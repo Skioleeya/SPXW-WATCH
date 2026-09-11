@@ -16,6 +16,25 @@ IV 的绝对水平在 0DTE 上几乎不变，画出来是一片均匀的色块�
 噪点。这里用"沿用上一个已知 IV"的方式填充，于是没有成交的桶自然得到 0 变化，
 语义正确且视觉连续。
 
+断代（break）—— 前向填充唯一危险的地方
+--------------------------------------
+前向填充假定"没有新 IV ⇒ IV 没变"。**行情断流时这个假定是假的**：断线期间
+最后一笔 tick 会一直是 ``STALE``，而 ``STALE`` 属于 ``TRUSTWORTHY_QUALITIES``
+（会话内前向填充语义），于是它被逐桶写进矩阵，断线看起来只是"IV 没动"。
+重连后第一笔新 IV 一进来，就与断线前的值做差 —— **整段断线的变化被压进单个
+30 秒桶**，在图上画出一堵与真冲量无法区分的假墙。色标下限只有 ±0.5 波动率点，
+几个点的跳变就直接打满，肉眼完全分不出来。
+
+所以这里引入 ``break``：调用方（L3 编排器，它才知道全局 tick 年龄）在
+"断流恢复"的那一刻传 ``break_now=True``，本桶的值**只作为新段的起点、不与
+前一个值做差**，即该桶输出 ``None``（留白）。宁可留白，也不画假信号。
+
+为什么断代标记是**全局**的而不是逐档的
+--------------------------------------
+断流是喂价层的事件，所有行权价同时停。而单个远虚值档本来就可能几分钟没有
+成交 —— 用逐档年龄判会把它误判成断流，热力图上凭空多出一堆空白。全局标记
+只在整个喂价停摆时才置位，不误伤安静的档位。
+
 为什么时间桶只按行权价分键，不带方向
 ------------------------------------
 热力图每档只取虚值一侧，而**现价一旦穿越某档，这一行的取边就会从 Put 翻成
@@ -46,7 +65,7 @@ _CellKey = float
 class HeatmapEngine:
     """按时间桶累积 IV，并产出 ΔIV 矩阵。"""
 
-    __slots__ = ("_clock", "_max_buckets", "_min_buckets", "_buckets")
+    __slots__ = ("_clock", "_max_buckets", "_min_buckets", "_buckets", "_breaks")
 
     def __init__(self, clock, serial_cfg: dict) -> None:
         self._clock = clock
@@ -58,14 +77,22 @@ class HeatmapEngine:
         )
         # {行权价: {bucket_index: iv}}
         self._buckets: dict[_CellKey, dict[int, float]] = {}
+        # 断代桶序号：这些桶的值是新段的起点，差分时必须留白。全局集合，
+        # 因为断流是所有档位同时发生的事件（见模块 docstring）。
+        self._breaks: set[int] = set()
 
     # ------------------------------------------------------------------ #
     # 累积
     # ------------------------------------------------------------------ #
 
-    def observe(self, cells: tuple[ImpulseCell, ...], now: float) -> int:
+    def observe(
+        self, cells: tuple[ImpulseCell, ...], now: float, break_now: bool = False
+    ) -> int:
         """
         把本轮的 IV 写进各自的时间桶。返回写入的网格点数。
+
+        ``break_now`` 由调用方在"行情断流后恢复"的那一刻置位：本桶记入
+        ``_breaks``，出矩阵时该桶留白，不与断线前的值做差。
 
         同一桶内重复写入只保留最后一次——这样每个桶代表"该分钟的收盘 IV"。
 
@@ -77,6 +104,9 @@ class HeatmapEngine:
         翻转不会把这一行的历史劈断。
         """
         index = self._clock.bucket_index_of_ts(now)
+        if break_now:
+            self._breaks.add(index)
+
         written = 0
         for cell in cells:
             if cell.quality not in TRUSTWORTHY_QUALITIES:
@@ -96,6 +126,7 @@ class HeatmapEngine:
         for bucket in self._buckets.values():
             for stale in [b for b in bucket if b < cutoff]:
                 del bucket[stale]
+        self._breaks = {b for b in self._breaks if b >= cutoff}
 
     # ------------------------------------------------------------------ #
     # 产出矩阵
@@ -142,16 +173,22 @@ class HeatmapEngine:
             spot=float(spot),
         )
 
-    @staticmethod
     def _row_values(
-        bucket: dict[int, float] | None, current: int
+        self, bucket: dict[int, float] | None, current: int
     ) -> tuple[float | None, ...] | None:
         """
         把稀疏的桶字典展开成定长行，并前向填充后取差分。
 
-        返回 ``None`` 仅表示"该行一个桶都没写过"（整行丢弃）。只有第 0 桶时，
+        返回 ``None`` 仅表示"该行一个桶都没写过"（整行丢弃）。只有**一个**
+        桶有值（不一定是第 0 桶——冷启动/重启时当前桶常非第 0 桶）时，
         差分天然全为空——此时仍然返回定长行，让前端能立刻画出带正确坐标轴的
         空网格，而不是整块面板空白。``null`` 与 ``0`` 语义不同，前端会跳过空值。
+
+        三种情况输出 ``None``（留白），它们的含义不同但都"不该画颜色"：
+        1. 该桶从未有过 IV（``previous is None``）—— 序列还没开始；
+        2. 该桶是断代桶（``index in self._breaks``）—— 前一个值来自断线前，
+           做差会造出假冲量；
+        3. 该桶本身没有值（整行一个桶都没写过时由调用方提前返回 ``None``）。
         """
         if not bucket:
             return None
@@ -166,12 +203,10 @@ class HeatmapEngine:
 
         for index in range(current + 1):
             value = bucket.get(index, carried)
-            if value is None:
+            if value is None or previous is None or index in self._breaks:
                 out.append(None)
             else:
-                out.append(
-                    None if previous is None else (value - previous) * 100.0
-                )
+                out.append((value - previous) * 100.0)
             carried = value
             previous = value
 
@@ -183,6 +218,7 @@ class HeatmapEngine:
 
     def reset(self) -> None:
         self._buckets.clear()
+        self._breaks.clear()
 
     def tracked_rows(self) -> int:
         return len(self._buckets)
@@ -190,3 +226,50 @@ class HeatmapEngine:
     def bucket_depth(self, ref: OptionRef) -> int:
         bucket = self._buckets.get(float(ref.strike))
         return len(bucket) if bucket else 0
+
+    def is_break(self, bucket_index: int) -> bool:
+        """给定桶序号是否为断代桶。"""
+        return bucket_index in self._breaks
+
+    def break_count(self) -> int:
+        """已记录的断代桶数，供探针与回归核对。"""
+        return len(self._breaks)
+
+    # ------------------------------------------------------------------ #
+    # 持久化快照
+    # ------------------------------------------------------------------ #
+
+    def dump_bucket(self, bucket_index: int) -> dict[float, float]:
+        """
+        提取某一桶的原始 IV 字典 ``{strike: iv}``。
+
+        只返回该桶有值的档位；空桶返回空字典。供 ``AsyncPersistenceWriter``
+        序列化写入 SQLite。
+        """
+        out: dict[float, float] = {}
+        for strike, bucket in self._buckets.items():
+            iv = bucket.get(bucket_index)
+            if iv is not None:
+                out[float(strike)] = float(iv)
+        return out
+
+    def load_snapshot(self, columns: list[dict]) -> None:
+        """
+        从持久化存储恢复原始 IV 桶。
+
+        ``columns`` 格式：
+        ``[{bucket_index: int, ivs: {float(strike): float}, break: bool}, ...]``
+
+        恢复后 ``_breaks`` 同时重建，但**不恢复任何差分产物**（ΔIV 在
+        ``build()`` 时按当前上下文重新计算）。
+        """
+        self._buckets.clear()
+        self._breaks.clear()
+        for col in columns:
+            idx = int(col["bucket_index"])
+            if col.get("break"):
+                self._breaks.add(idx)
+            for strike_str, iv in col.get("ivs", {}).items():
+                key = float(strike_str)
+                bucket = self._buckets.setdefault(key, {})
+                bucket[idx] = float(iv)

@@ -59,9 +59,16 @@ PAYLOAD_PATHS: tuple[str, ...] = (
     "session.bucket_index",
     "health.subscribed", "health.subscription_cap", "health.last_tick_age_s",
     "health.store_cells", "health.connection", "health.mode", "health.messages",
+    # matrix_codec.js（线上数值块 = 位图 + 定标整数；解出 values 后
+    # heatmap.js / period.js 照旧读 block.values，所以那里不用改）
+    "heatmap.enc", "heatmap.scale", "heatmap.bm", "heatmap.i16",
+    "heatmap.filled", "heatmap.rows", "heatmap.cols",
     # heatmap.js
-    "heatmap.strikes", "heatmap.labels", "heatmap.values",
+    "heatmap.strikes", "heatmap.labels",
     "heatmap.rights", "heatmap.vmax",
+    # period.js（周期聚合要用基线桶宽换算组大小，并用后端的色标规则重算量程）
+    "heatmap.bucket_seconds", "heatmap.scale_policy",
+    "heatmap.scale_policy.quantile", "heatmap.scale_policy.floor",
     # skew.js
     "skew.series", "skew.series.label", "skew.series.skew", "skew.series.atm",
     "skew.series.put25", "skew.series.call25",
@@ -135,7 +142,8 @@ def _resolve(obj: Any, path: str) -> tuple[bool, Any]:
 def check_cfg_paths() -> bool:
     cfg = _load_config_js()
     used: set[str] = set()
-    for js in ("app.js", "heatmap.js", "skew.js", "ws_client.js"):
+    for js in ("app.js", "heatmap.js", "skew.js", "period.js",
+               "matrix_codec.js", "ws_client.js"):
         src = (WEB / js).read_text("utf-8")
         used.update(m.group(1).lstrip(".") for m in _CFG_PATH.finditer(src))
 

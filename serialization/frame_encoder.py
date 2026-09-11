@@ -27,6 +27,7 @@ from typing import Any
 from config import loader
 from contracts.enums import ConnectionState, FeedMode
 from contracts.frame import Frame, HealthBlock, SessionBlock
+from contracts.tick import RateLimitStatus
 
 from serialization.cell_encoder import CellSerializer
 from serialization.heatmap_matrix import HeatmapSerializer
@@ -112,6 +113,28 @@ class FrameEncoder:
             "ticks_dropped": int(block.ticks_dropped),
             "store_cells": int(block.store_cells),
             "last_tick_age_s": round_opt(block.last_tick_age_s, 1),
-            "throttled": bool(block.throttled),
+            "rate_limit": FrameEncoder._rate_limit(block.rate_limit),
+            "sub_limit_backoff": bool(block.sub_limit_backoff),
             "messages": list(block.messages),
+        }
+
+    @staticmethod
+    def _rate_limit(status: RateLimitStatus) -> dict[str, Any]:
+        """
+        出站消息限速桶读数。
+
+        与 ``sub_limit_backoff`` 是两个不同层面的限流信号：这里是库层消息**速率**
+        桶（msg/s），那里是 IBKR 行情**行数**超限（Error 300）的退避开关。字段名
+        刻意不共用 "throttled"，免得前端和排查时张冠李戴。
+
+        ``capacity`` / ``interval_s`` 是配置值（回显出来便于确认桶真的是按配置设的，
+        而不是落回库的隐式默认值）；``events`` / ``throttled_total_s`` 是实测值 ——
+        全程为 0 就说明容量是宽的，订阅/退订没被限速拖慢。
+        """
+        return {
+            "capacity": int(status.capacity),
+            "interval_s": round(float(status.interval_s), 3),
+            "events": int(status.events),
+            "throttling": bool(status.throttling),
+            "throttled_total_s": round(float(status.throttled_total_s), 1),
         }

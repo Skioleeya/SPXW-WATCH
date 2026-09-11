@@ -31,6 +31,7 @@ import aiohttp
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from config import loader  # noqa: E402
+from serialization.bitmap_codec import unpack  # noqa: E402
 
 _QUANTILES = (0.50, 0.75, 0.90, 0.95, 0.99, 1.00)
 
@@ -87,6 +88,12 @@ def _row_report(block: dict, spot: float) -> None:
 
 def report(frame: dict, tail: int, rows: bool) -> int:
     block = frame.get("heatmap")
+    # 线上数值块是「位图 + 定标整数」，这里就地还原成 values，
+    # 下面的统计逻辑一行都不用改（约定同 web/matrix_codec.js）。
+    if block and not block.get("values") and block.get("bm"):
+        block["values"] = unpack(
+            block["bm"], block["i16"], block["rows"], block["cols"], block["scale"]
+        )
     if not block or not block.get("values"):
         print("当前帧还没有热力图矩阵（会话刚开始，或数据尚未到位）")
         return 1

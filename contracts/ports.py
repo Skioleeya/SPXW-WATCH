@@ -14,7 +14,7 @@ L5 去消费它，两边互不认识。
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import Callable, Protocol, runtime_checkable
 
 from contracts.frame import Frame
 from contracts.tick import (
@@ -81,6 +81,27 @@ class FeedPort(Protocol):
 
     def set_sink(self, sink: TickSink) -> None:
         """注入下游接收者。必须在 ``start()`` 之前调用。"""
+        ...
+
+    def set_reconnect_hook(self, hook: Callable[[], None]) -> None:
+        """
+        注册"连接重建成功"之后要执行的回调。实盘源在自动重连成功时触发；
+        离线源不会重连，实现为 no-op。
+
+        为什么这条钩子必须进端口
+        ------------------------
+        它是 L1 → L6 的**上行**信号（下层告诉组装层"我刚重连了"）。组装层只
+        认识 ``FeedPort``，如果这条钩子只长在 ``IbkrFeed`` 上，那么任何一次
+        "换数据源"或"新写一个实现"都会静默漏掉它。
+
+        本项目已经在这类"接口没写、实现漏了、调用方碰运气"的模式上栽过一次：
+        ``SessionClock`` 没有实现 ``ClockPort.now()``，于是 ``TickStore.prune()``
+        每 10 秒抛一次被吞掉的异常，时间窗裁剪长期形同虚设。所以这里选择把
+        钩子写进协议 —— 让 ``runtime_checkable`` 能静态地要求两个实现都有它。
+
+        "要不要据此清空特征状态"不属于本层：L1 只负责报告事件，决策由组装层
+        按 ``pipeline.reset_feature_state_on_reconnect`` 做。
+        """
         ...
 
     async def start(self) -> None:

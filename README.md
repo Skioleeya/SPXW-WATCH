@@ -41,12 +41,30 @@ python tools/check_side_flip.py                # 回归：取边翻转不得劈�
 python tools/check_subscription_qualify.py     # 回归：订阅前必须确认合约
 python tools/check_tick_router.py              # 回归：L1 分流层的模型值优先与脏值拦截
 python tools/check_session_rollover.py         # 回归：跨会话不得共用桶序号
+python tools/check_clock_protocol.py           # 回归：注入下层的时间源必须满足 ClockPort
 python tools/check_web_contract.py             # 回归：前端引用 → 后端定义的对照
 python tools/check_page_render.py              # 回归：真浏览器打开，断言画出来了
+python tools/check_period_aggregation.py       # 回归：前端周期聚合 ↔ 后端定义逐值对拍
+python tools/check_matrix_codec.py             # 回归：热力图数值块 Python 打包 ↔ JS 解包
+python tools/check_ws_compression.py           # 回归：WebSocket 必须真的协商 permessage-deflate
 python tools/ws_probe.py --frames 24           # 作为独立客户端抓帧并校验结构
 python tools/heatmap_stats.py                  # 打印矩阵里 ΔIV 的实际分布
 python tools/heatmap_stats.py --rows           # 逐行覆盖情况（排查"空洞"用）
 ```
+
+`tools/check_clock_protocol.py` 钉的是"注入下层的时间源必须满足 L0 的
+`ClockPort`"。`TickStore` 拿到的时钟是组装层注入的 `SessionClock`，而它曾经
+只提供 `now_ts()`、没有实现协议要求的 `now()` —— 于是 `prune()` 里那句
+`self._clock.now()` 每 10 秒抛一次 `AttributeError`，被维护循环的 `except`
+吞成一行 warning。表现出来只是"按时间窗裁剪从未真正发生"，缓冲区只靠 `maxlen`
+兜底，`option_buffer_seconds` 形同虚设 —— 而所有探针、所有回归当时都是绿的。
+这个脚本既断言三个时间源（`WallClock` / `SimClock` / `SessionClock`）都满足
+协议，也用真实的 `SessionClock` 走一遍裁剪路径、断言过期样本确实被丢掉。
+
+`run.py --check` 里的第 [7] 项专门盯"配置键有没有接线"：它按工程既有的
+`module=` 约定，把每处取键调用与它声明的配置文件对照。这项检查一上线就抓出
+7 个**死键**（配置里写着、没有任何代码读），它们已全部定性处理完（4 接线、
+3 删除），检查也随之收紧为"死键即失败"—— 详见 §10 已知边界。
 
 `tools/ws_probe.py` 的存在是为了把"数据链路坏了"和"前端渲染坏了"分开定位 ——
 页面白屏时，先跑它。
@@ -81,8 +99,9 @@ DOM id 必须在 `index.html` 里存在；`CFG.a.b` 必须在 `config.js` 里存
 `tools/check_page_render.py` 是"没人真正看过页面"这个盲区的封口检查：用 headless
 Chrome 打开面板，断言没有渲染回调异常、热力图与 Skew 的 meta 都已填充、canvas
 已生成、顶栏读数不是占位符。它存在的直接原因是 Skew 面板曾经因为一个 `visualMap`
-配置在 ECharts 5.6.0 上必抛异常而整块曲线画不出来 —— 而当时探针 20 项全绿、契约
+配置（`pieces` 模式）必抛异常而整块曲线画不出来 —— 而当时探针 20 项全绿、契约
 检查也全绿。找不到 Chrome 时它会跳过并返回 0，不会把"没装浏览器"误判成"页面坏了"。
+（那个异常的版本归属一度记错，见 §10。）
 
 ---
 
@@ -128,16 +147,16 @@ config/
   app.json          SPX / IND / CBOE / SPXW / 时区 / 会话时段
   ibkr.json         连接参数、generic_tick_list="106"、IV 边界
   subscription.json ±档位、订阅总上限、重连与 Error 300 退避
-  state.json        环形缓冲容量与年龄、健康阈值
+  state.json        环形缓冲容量与年龄、健康阈值、本层自己的裁剪节奏
   features.json     冲量窗口、毛刺过滤五道闸门、25Δ 目标与容差
   serialization.json 时间桶粒度、色标量程取法、小数位
   transport.json    监听地址、WS 路径、推送频率、客户端队列深度
   simulator.json    合成行情与合成时钟参数
-  pipeline.json     计算/裁剪/统计循环的节奏
+  pipeline.json     计算/统计循环的节奏与生命周期
   logging.json      日志级别与格式
 ```
 
-三条硬规则：
+四条硬规则：
 
 * **不硬编码。** 任何业务常量都必须来自配置。`loader.py` 刻意不知道模块名和
   字段名，也不提供业务默认值 —— 缺键就直接抛 `ConfigError`，而不是静默用一个
@@ -147,6 +166,14 @@ config/
 * **前端不复制后端取值。** 端口、WS 路径、推送频率由 `/runtime-config.js`
   在启动时注入 `window.SWATCH_RUNTIME`。`web/config.js` 里只有**呈现**参数，
   复制一份后端取值就等于制造"两份真相"。
+
+第四条是检查项 [7] 加上的，也是**同一条"两份真相"原则在配置内部的延伸**：
+
+* **一个键只属于一个模块，而且必须真的接线。** 每次取键都按既有约定写明
+  `module="<配置模块>"`，检查项 [7] 拿它和实际配置文件对照。两个方向都会报：
+  键被"非本模块"的代码读（键放错了文件），或者键**根本没有任何代码读**
+  （死键 —— 看起来是个旋钮，拧了没有任何效果）。后一种情况现在直接判失败，
+  不再是警告：配置项一旦没人读，它记录的就是一份过期的真相。
 
 ---
 
@@ -276,6 +303,25 @@ def broadcast(self, text: str) -> int:   # 同步函数
 `NaN`，那是**非法 JSON**，浏览器 `JSON.parse` 会直接抛错、整条推送链路静默
 死掉。关掉之后，漏网的 NaN 会在服务端立刻炸出来，而不是在前端变成一片空白。
 
+### 线上体积：两级压缩，实测省 99%
+
+| 措施 | 线上速率 | 一个交易日 / 客户端 |
+|---|---|---|
+| 无 | 184 KB/s | 4.41 GB |
+| permessage-deflate | 16 KB/s | 0.40 GB |
+| 再加「位图 + 定标整数」数值块 | ≈5 KB/s | **≈0.10 GB** |
+
+第一级由 `config/transport.json::ws_compression` 显式开启（`aiohttp` 的
+`WebSocketResponse` 默认就是 `compress=True`，但**靠库默认值等于没人知道也没人守**：
+开关一次是 11 倍流量。`tools/check_ws_compression.py` 用裸 socket 握手断言扩展被
+回显，并用"不 offer 扩展"做对照证明这组断言不是空转）。
+
+第二级见 `serialization/bitmap_codec.py`：热力图矩阵 88% 的格子是空的，JSON 里
+每个空格最少 5 字节（`null,`），实测占整帧 71%。改成「位图标记哪些格有值 +
+小端 int16 定标整数只存有值的格」后，**在 deflate 之上再省 85%**。
+前端镜像在 `web/matrix_codec.js`，两侧由 `tools/check_matrix_codec.py` 逐值对拍
+（位序 / 字节序 / 遍历顺序三种缺陷都能抓住）。
+
 ---
 
 ## 7. 前端
@@ -289,6 +335,8 @@ def broadcast(self, text: str) -> int:   # 同步函数
 | `runtime-config.js` | **由后端注入**（`window.SWATCH_RUNTIME`） |
 | `config.js` | 仅呈现参数：重连退避、渲染节流、色板、小数位 |
 | `ws_client.js` | 断线指数退避 + 抖动、帧合并（只留最新）、缺口统计 |
+| `period.js` | 时间周期切换：基线桶并组（ΔIV 相加）、尾部截断、色标重算 |
+| `matrix_codec.js` | 热力图数值块解包（位图 + 定标整数 → `block.values`） |
 | `heatmap.js` | ECharts heatmap，`animation:false`，`progressive` 分片绘制 |
 | `skew.js` | 25Δ Skew 主曲线 + ATM/Put25/Call25 副轴，纵轴不自动缩放 |
 | `app.js` | 装配、渲染分发、陈旧看门狗 |
@@ -319,30 +367,55 @@ def broadcast(self, text: str) -> int:   # 同步函数
 
 ---
 
-## 9. 自检覆盖的六条约束
+## 9. 自检：五条硬性约束怎么变成可执行检查
 
-| 约束 | 落地方式 | 检查项 |
-|---|---|---|
-| 不可反向依赖 | `contracts/` 作为 L0 契约层，层间只交换 DTO 与 Protocol | [2] AST 扫描 import 方向 |
-| 每个文件 < 400 行 | 单一职责拆分 | [1] 全量行数统计 |
-| 模块化、单一职能 | 每文件一个类/一组纯函数 | [1] + 目录分层 |
-| L0→L1→…→L6 单向 | `LAYER_OF` 映射 + 组装根唯一例外 | [2] |
-| 禁止硬编码 | 全部业务常量进 `config/`，`loader` 无业务默认值 | [3][5] |
-| 配置按模块、零耦合 | 每模块一份 JSON，禁止跨文件引用 | [4] |
+`run.py --check` 共 11 项，把项目约束从"靠人记住"变成"跑一遍就知道"。
+检查代码本身也按单一职能拆开：`tools/selfcheck.py` 只做编排，
+`selfcheck_core` 是共享基础设施，其余各文件一组检查。
 
-额外一条 [7] 是踩坑之后加的：`__slots__` 类里任何 `self.x = ...` 都必须已在
+| # | 检查 | 对应约束 | 落地方式 | 强度 |
+|---|---|---|---|---|
+| [1] | 文件长度 | 文件 < 400 行 | 全量行数统计 | **强**（全量） |
+| [2] | 依赖方向 | L0→L1→…→L6 单向 | `LAYER_OF` 映射 + AST 扫描 import 方向 | **强** |
+| [3] | 配置可读 | 禁止硬编码 | 10 份 JSON 逐个解析 | 强 |
+| [4] | 配置零耦合 | 配置彼此独立 | 禁 `$ref`/`include` 等跨文件引用键 | 强 |
+| [5] | 关键键存在 | 禁止硬编码 | 41 个关键配置项逐一核对 | 中 |
+| [6] | 订阅容量 | 不触发 Error 300 | ±18 档 → 73 条 ≤ 自设 92 ≤ IBKR 100 | 强 |
+| [7] | 配置键归属与接线 | 一个文件不得含跨模块变量 | 按 `module=` 约定对照归属；死键即失败 | **强** |
+| [8] | `__slots__` 一致性 | 单一职能的静态护栏 | AST 比对声明与赋值 | **强** |
+| [9] | 单一职能 | 单一文件单一职能 | 顶层公开类计数 + `__init__.py` 只做导出 | 中（粗粒度代理） |
+| [10] | 禁止硬编码 | 禁止硬编码 | 模块级字面量扫描 + 逐条登记的例外表 | 中（仅模块级） |
+| [11] | 出站限速桶容量 | 禁止硬编码 | 读 `ibkr.json` + `subscription.json` 核对跨文件不变量 | **强**（跨文件核对） |
+
+三处**诚实声明的覆盖边界**，不假装它们比实际更强：
+
+* **[9] 是粗粒度代理。** 它用"顶层公开类数量 ≤ 2"近似"职能数量"，拦住的是
+  "一个文件里堆了好几个互不相关的类"这种最明显的违规。一个类也可以塞进三个
+  职能 —— 那靠目录分层和人评审。异常分类与枚举是"定义词汇"这一个职能，天然
+  是一堆类，因此按基类链识别后豁免。
+* **[10] 只覆盖模块级字面量。** 函数体内的魔法数字不在范围内（需要更复杂的
+  数据流分析，误报率高）。例外逐条登记在 `EXEMPT_CONSTANTS` 里并写明理由，
+  只有"非可调参数"才准进表；例外表条目失效也会报警告，防止表本身腐烂。
+* **[7] 的死键判定是失败而非警告。** 开关是
+  `selfcheck_config.py::UNWIRED_IS_FAILURE`，已置 `True` —— 任何新出现的死键都会
+  直接让 `--check` 变红。它曾经是 `False`：一次上线抓出 7 个死键、每个都需要产品
+  决策，先留着警告免得自检长期变红。那 7 个已于同日逐个定性处理完（4 接线、
+  3 删除，见 §10），开关随之收紧。
+
+第 [8] 项是踩坑之后加的：`__slots__` 类里任何 `self.x = ...` 都必须已在
 `__slots__` 中声明。这个错误在开发过程中反复出现四次，每次都只在运行时才暴露，
 所以用 AST 静态检查彻底堵死。
 
-当前状态：**61 个 Python 文件，最长 386 行，全部检查通过。**
+当前状态：**70 个 Python 文件，最长 397 行（`acquisition/feed_service.py`），
+11 项检查全部通过。**
 
 ---
 
 ## 10. 已知边界
 
-* **端口必须与客户端类型匹配。** `config/ibkr.json` 默认 `7497`，指向
-  **TWS 模拟盘**。若你跑的是 IB Gateway，必须改成 `4001`（实盘）或 `4002`
-  （模拟），否则连不上：
+* **端口必须与客户端类型匹配。** `config/ibkr.json` 默认 `4002`，指向
+  **IB Gateway 模拟盘**（本项目实测联通用的就是它）。换客户端类型时必须同步改，
+  否则连不上：
 
   | 客户端 | 实盘 | 模拟 |
   |---|---|---|
@@ -352,9 +425,26 @@ def broadcast(self, text: str) -> int:   # 同步函数
   连接失败时会打印包含这条提示的错误信息，不会只丢一个裸的 socket 错误。
 * **`zoneinfo` 在 Windows 上需要 `tzdata`**。`requirements.txt` 里带了它，并
   注明了原因 —— 否则会得到 `ZoneInfoNotFoundError: 'America/New_York'`。
-* **实盘未验证。** `run.py --live` 需要 TWS / IB Gateway 在
-  `config/ibkr.json` 指定的端口上开启 API。离线链路已完整验证；实盘的连接
-  失败路径已实测（错误信息可操作），但"连上之后能否收到数据"尚未验证。
+* **实盘链路已实测联通，106 模型 Greeks 落地已证实（2026-09-11）。**
+  `run.py --live` 需要 TWS / IB Gateway 在 `config/ibkr.json` 指定的端口
+  （默认 `4002`）上开启 API。实测：**11～14 秒就绪**，错误码仅
+  `72 × Error 10090`（无 100/300/200）；`tools/ws_probe.py` 全过
+  （72/92 订阅、热力图 36 档 × 25 桶、36 格有效数值、25Δ Skew 与现价均有值）。
+  直接订阅探针另证：`generic_tick_list: "106"` 确实让 IBKR 推送
+  `tickOptionComputation`，`ticker.modelGreeks` 第 5s 出现，且与 bid / ask / last
+  三档 greeks **四者并存、值互不相同** ⇒ MODEL_OPTION 是独立 tick 通道，
+  项目拿到的 IV / Δ 就是这一组（`use_model_greeks: true` 时其余三档被拒）。
+
+  ⚠️ 两点必读：
+
+  1. **状态行是 `connected · delayed` 还是 `connected`，取决于账户侧有没有
+     实时数据权限** —— 这是**账户配置，不是代码**。本项目当前已开通
+     （实测期权 ticker 报 `marketDataType = 1`），**换账户后必须重新确认**。
+  2. **Error 10090 的原文是 "Part of requested market data is not subscribed"
+     （部分未订阅），不代表没有权限** —— 别拿它判断状态。
+     另：`ib_async` 把 tickType 13（实时模型）与 83（延迟模型）合并到同一个
+     `modelGreeks` 属性，**属性层无法区分**，所以 `TickRouter.source_tick_type`
+     恒为 13，是名义值不是观测值。
 * **不依赖 numpy / pandas。** 全链路纯标准库 + `ib_async` + `aiohttp`，
   降低部署摩擦（毛刺过滤用的 MAD、分位数统计都是手写的）。
 * **不做本地 IV 重算。** 这是设计约束而非能力缺失：本地重算的 IV 与券商
@@ -366,8 +456,12 @@ def broadcast(self, text: str) -> int:   # 同步函数
   （靠 `_session_refs()` 按到期日过滤）。**两条都通向同一个后果：拿昨天的数据造
   今天的信号**，而且看上去完全正常 —— 颜色、量级都对，只是它从来不存在。
   这条约束的回归是 `tools/check_session_rollover.py`。
-* **`visualMap` 的 `pieces` 模式在本项目的 ECharts 5.6.0 上不可用。** 只要用
-  `pieces`，渲染时必抛 `Cannot read properties of undefined (reading 'coord')`，
+* **`visualMap` 的 `pieces` 模式在本项目的 ECharts 上不可用。** 版本要说准：
+  本地 `web/vendor/echarts.min.js` 是 **ECharts 5.5.1**，内置 **zrender 5.6.0**
+  （文件里 `t.version="5.5.1"`、`t.dependencies={zrender:"5.6.0"}`）—— 本节此前
+  把版本写成了 "ECharts 5.6.0"，那是 zrender 的版本号，不是 ECharts 的。
+  只要用 `pieces`，渲染时必抛
+  `Cannot read properties of undefined (reading 'coord')`，
   整块面板渲染中断（`type:'piecewise'` / `show:true` / 二维数据 / 去掉
   `seriesIndex` 全都一样失败；`continuous` 模式正常）。因此 Skew 的正负着色改成
   把主序列**拆成两条同名曲线**、各自固定颜色、另一侧填 `null` —— 效果与硬分割
@@ -376,6 +470,42 @@ def broadcast(self, text: str) -> int:   # 同步函数
   上一帧（刻意如此，避免闪白），而翻篇后后端确实会先给出空矩阵直到新数据到来。
   此时状态行的会话进度会显示 `0/390`，据此可区分"画面是上一场的"与"当前真的没
   数据"。这是刻意的取舍，不是缺陷。
+* **死键已清零，而且从此不会再悄悄出现。** 检查项 [7] 上线时一次抓出 7 个"写着
+  但没有任何代码读"的配置键。它们比硬编码更难发现 —— 硬编码至少能在代码里搜到，
+  死键搜不到，只能靠静态对照。这 7 个已逐个定性并处理完：
+
+  | 配置 | 键 | 处置 | 理由 |
+  |---|---|---|---|
+  | `transport.json` | `access_log` | **接线** | 代码里曾硬编码 `access_log=None`，配置写了也不生效，同时违反第 3 条 |
+  | `ibkr.json` | `max_underlying_age_s` | **接线** | 防用陈旧现价重建窗口 —— 会订错档位且不报任何错，属正确性问题 |
+  | `pipeline.json` | `shutdown_timeout_s` | **接线** | 停机保底退出，并顺手修掉吞掉 `CancelledError` 的反模式 |
+  | `pipeline.json` | `reset_feature_state_on_reconnect` | **接线** | 防跨断线的 IV 跳变被误判为冲量；默认值仍为 `false`，行为不变 |
+  | `features.json` | `atm_max_bracket_strikes` | **删除** | 配套的 `atm_bracket()` 是死代码，实际在用 `nearest_strike()` |
+  | `ibkr.json` | `handshake_timeout_s` | **删除** | `connectAsync(timeout=)` 已是连接+握手的总超时，再拆一个属重复建模 |
+  | `ibkr.json` | `chain_ready_timeout_s` | **删除** | "链就绪"没有明确信号，判据只能靠启发式；`chain_settle_s` 已够用 |
+
+  三条值得记下来的坑：
+
+  1. **`access_log` 接线不能传 aiohttp 的 `aiohttp.access` logger。** 它在
+     `core.logging_setup` 的第三方降噪列表里被压到 `WARNING`，而
+     `AccessLogger.enabled` 判的是 `isEnabledFor(INFO)` —— 传进去会被算成
+     "未启用"，配置写 `true` 也永远不出日志。改用项目自己的 `transport.access`
+     命名空间才真正生效（实测：`false` 捕获 0 行、`true` 捕获 1 行）。另外
+     aiohttp 的 `RequestHandler` 默认就是 `access_log=access_logger`（**默认
+     开启**），所以**不能**把 `access_log=None` 这个参数简单删掉 —— 删了等于
+     意外打开访问日志。
+  2. **`shutdown_timeout_s` 要用 `asyncio.wait` 而不是 `wait_for`。**
+     `wait_for` 超时后会 cancel 目标并**继续等它结束**；目标若在取消后还要跑
+     很久，所谓"上限"就是假的。这一点被非空转验证实测抓到：一个清理需 3s 的
+     任务，用 `wait_for` 时 `stop()` 会等满 3s，换成 `asyncio.wait` 后如实
+     在 2s 上限处放弃并打印「强制继续关闭」。
+  3. **`reset_feature_state_on_reconnect` 的链路必须绕组装层。** L1 不认识 L3，
+     所以钩子写进了 `FeedPort` 协议，而不是只长在 `IbkrFeed` 上 —— 否则换个
+     数据源或新写一个实现就会静默漏掉它。这与 `ClockPort.now()` 的教训同源：
+     接口不写进协议，实现就会漏、调用方就得碰运气。
+
+  （`state.json` 的 `prune_interval_s` 曾是第 8 个死键，已接线：裁剪节奏改由
+  L2 自己拥有，组装层只按它驱动循环。）
 * **页面渲染需要真浏览器才能验证。** 数据链路与字段契约都可以离线校验，但"画没
   画出来"不行 —— `tools/check_page_render.py` 用 headless Chrome 补上这一环。
   它依赖本机装了 Chrome；找不到时会跳过（返回 0）而不是误报失败。

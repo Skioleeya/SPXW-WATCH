@@ -12,7 +12,13 @@ L1 — IBKR 连接网关。
 --------
 连接一律以 ``readonly=True`` 建立。本系统只做监控，物理上不可能误下单。
 
-依赖：L0。
+出站限速桶不在本模块
+--------------------
+``Client`` 的滑动窗口限速桶（容量、``throttleStart`` / ``throttleEnd`` 观测）由
+``acquisition.rate_limit_watch.RateLimitWatch`` 负责 —— 那是库层概念，与本模块的
+"连接生命周期"不是同一个职能。这里只调用它的 ``apply()`` / ``snapshot()``。
+
+依赖：L0、L1（``rate_limit_watch``）。
 """
 
 from __future__ import annotations
@@ -24,8 +30,11 @@ from ib_async import IB
 
 from config import loader
 from contracts.enums import ConnectionState
+from contracts.tick import RateLimitStatus
 from core.errors import ConnectionFailed
 from core.logging_setup import get_logger
+
+from acquisition.rate_limit_watch import RateLimitWatch
 
 _CFG = "ibkr"
 
@@ -41,6 +50,7 @@ class IbkrGateway:
         "_host", "_port", "_client_id", "_connect_timeout",
         "_backoff_initial", "_backoff_max", "_max_attempts",
         "_generic_ticks", "_qualify_batch", "_qualify_interval", "_log",
+        "_rate_limit",
         "_ib", "_state", "_on_tickers", "_on_error",
         "_on_disconnect", "_on_reconnect", "_reconnect_task", "_stop", "_attempts",
     )
@@ -68,6 +78,7 @@ class IbkrGateway:
             ibkr_cfg, "qualify_batch_interval_s", module=_CFG
         )
         self._log = get_logger("ibkr.gateway")
+        self._rate_limit = RateLimitWatch(ibkr_cfg)
         self._ib: IB | None = None
         self._state = ConnectionState.DISCONNECTED
         self._on_tickers: TickerCallback | None = None
@@ -111,6 +122,17 @@ class IbkrGateway:
     def ib(self) -> IB | None:
         return self._ib
 
+    @property
+    def rate_limit(self) -> RateLimitStatus:
+        """
+        出站限速桶快照。
+
+        它回答的是"当前桶容量有没有成为瓶颈"：``events`` 全程为 0，说明订阅/退订
+        根本没被限速拖慢。注意这与 ``SubscriptionManager`` 的 Error 300 退避是
+        两回事 —— 后者是行情**行数**超限，不是消息**速率**超限。
+        """
+        return self._rate_limit.snapshot()
+
     def _set_state(self, state: ConnectionState) -> None:
         self._state = state
 
@@ -124,6 +146,7 @@ class IbkrGateway:
         self._set_state(ConnectionState.CONNECTING)
 
         ib = IB()
+        self._rate_limit.apply(ib)
         self._wire_events(ib)
 
         try:
@@ -172,6 +195,7 @@ class IbkrGateway:
                 ib.disconnect()
             except Exception:
                 pass
+        self._rate_limit.close_window()
         self._set_state(ConnectionState.DISCONNECTED)
 
     # ------------------------------------------------------------------ #
@@ -182,6 +206,8 @@ class IbkrGateway:
         ib.pendingTickersEvent += self._handle_tickers
         ib.errorEvent += self._handle_error
         ib.disconnectedEvent += self._handle_disconnect
+        # 限速桶的 throttleStart / throttleEnd 不在这里接线：IB.events 不含这两个
+        # 事件，必须直接挂 ib.client —— 已由 RateLimitWatch.apply() 完成。
 
     def _handle_tickers(self, tickers: Iterable[Any]) -> None:
         if self._on_tickers is not None:

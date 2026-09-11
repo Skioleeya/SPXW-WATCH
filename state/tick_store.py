@@ -44,7 +44,7 @@ class TickStore(TickSink):
 
     __slots__ = (
         "_lock", "_clock", "_option_age", "_option_maxlen",
-        "_spot_age", "_spot_maxlen",
+        "_spot_age", "_spot_maxlen", "_prune_interval_s",
         "_options", "_quotes", "_spot", "_status",
         "_counts", "_last_tick_ts", "_last_option_ts", "_last_spot_ts",
     )
@@ -59,6 +59,10 @@ class TickStore(TickSink):
         self._option_maxlen = loader.as_int(state_cfg, "option_buffer_max_points", module=_CFG)
         self._spot_age = loader.as_float(state_cfg, "spot_buffer_seconds", module=_CFG)
         self._spot_maxlen = loader.as_int(state_cfg, "spot_buffer_max_points", module=_CFG)
+        # 裁剪节奏属于本层的配置：L6 只负责按这个节奏驱动循环，不决定"多久裁一次"。
+        # 这个值曾经只写在 config/pipeline.json 里，导致 state.json 的同名键是死的
+        # （改了没有任何效果）——由自检项 [7] 兜住这类"未接线键"。
+        self._prune_interval_s = loader.as_float(state_cfg, "prune_interval_s", module=_CFG)
 
         self._options: dict[OptionRef, RingBuffer[OptionTick]] = {}
         self._quotes: dict[OptionRef, QuoteTick] = {}
@@ -186,11 +190,22 @@ class TickStore(TickSink):
     # 维护
     # ------------------------------------------------------------------ #
 
+    @property
+    def prune_interval_s(self) -> float:
+        """
+        本层期望的裁剪节奏（秒）。
+
+        L6 的维护循环按它驱动 ``prune()``。节奏由本层配置决定，
+        组装层只负责"照着跑"，不替本层选参数。
+        """
+        return self._prune_interval_s
+
     def prune(self, now: float | None = None) -> int:
         """
         按时间窗裁剪所有分片，返回被丢弃的样本总数。
 
-        由 L6 的维护循环驱动——L2 不自己起线程，保持"谁组装谁负责生命周期"。
+        由 L6 的维护循环驱动——L2 不自己起线程，保持"谁组装谁负责生命周期"；
+        但**多久裁一次**由本层的 ``prune_interval_s`` 决定（见同名属性）。
         """
         moment = now if now is not None else self._clock.now()
         dropped = 0

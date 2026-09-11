@@ -25,11 +25,17 @@ window.SWATCH_CONFIG = {
 
   /* 热力图 */
   heatmap: {
-    /* 发散色标：冷 = IV 下行，暖 = IV 上行 */
+    /* 色标：Plotly `Turbo` 顺序色阶，逐色抄自参考项目 live-volatility-surface
+       （dash_surface.py 的 IV_COLORSCALE，其 DASHBOARD_CONFIG_DEFAULTS 取 "Turbo"，
+       未反转）。冷端 = IV 下行，暖端 = IV 上行。
+       取位规则：ECharts 的 inRange.color 数组与 Plotly 的 list 色阶一致，都是在
+       数组上等距取点，故 15 色落在 0, 1/14, …, 1 —— 与本图 visualMap 的
+       [-vmax, +vmax] 对齐后，两端读数与原项目同色。
+       注意：这是顺序色阶，不是发散色阶；0 值落在第 8 色（黄绿），不再是中性灰。 */
     palette: [
-      "#0b3a6f", "#155ea8", "#3d8fd1", "#8ec9ee",
-      "#1a1f26", "#1a1f26",
-      "#f6c98a", "#f4a259", "#ef6f4c", "#d63b2f", "#a81f1c"
+      "#30123b", "#4145ab", "#4675ed", "#39a2fc", "#1bcfd4",
+      "#24eca6", "#61fc6c", "#a4fc3b", "#d1e834", "#f3c63a",
+      "#fe9b2d", "#f36315", "#d93806", "#b11901", "#7a0402"
     ],
     /* 防除零守卫：色标量程一律采用后端下发的 vmax（后端已按配置的分位截断 +
        下限保护算好）。这里只在 vmax 缺失或为 0 时兜一个极小值，避免色标
@@ -40,7 +46,24 @@ window.SWATCH_CONFIG = {
     maxYLabels: 26,
     /* 横轴时间标签间隔（按列数自动调整的基准） */
     xLabelCount: 14,
-    showSpotLine: true
+    showSpotLine: true,
+
+    /* 可选时间周期（秒）。这是纯呈现参数：它只决定给用户几个缩放档位。
+       真正的基线桶宽由后端帧里的 heatmap.bucket_seconds 给出，前端不复制 ——
+       不满足"基线桶宽整数倍"的项会被自动丢弃并告警（见 web/period.js）。 */
+    periods: [
+      { seconds: 30, label: "30秒" },
+      { seconds: 60, label: "1分" },
+      { seconds: 180, label: "3分" },
+      { seconds: 300, label: "5分" },
+      { seconds: 900, label: "15分" }
+    ],
+    /* 打开页面时默认选中的周期（秒）。不在可用列表里则回退到列表第一项。 */
+    defaultPeriodSeconds: 60,
+    /* 一屏最多画多少列，超出只画**最近**的若干列。
+       上限 400 是刻意取的：1 分钟粒度整个会话只有 390 列，所以这个截断只对
+       30 秒粒度生效（780 列），更粗的周期一个像素都不变。 */
+    maxColumns: 400
   },
 
   /* Skew 曲线 */
@@ -68,6 +91,7 @@ window.SWATCH_CONFIG = {
     textDim: "#8b97a5",
     textFaint: "#5d6874",
     border: "#232b34",
+    grid: "#1a2029",
     panel: "#11151a",
     accent: "#00e5ff",
     hot: "#ff5a5a",

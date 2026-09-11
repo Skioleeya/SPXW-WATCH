@@ -71,9 +71,19 @@ def main() -> int:
     )
     scenario = Scenario(sim_cfg)
 
+    bucket_s = loader.as_int(
+        serial_cfg, "heatmap_bucket_seconds", module="serialization"
+    )
     print(f"\n会话: {session.describe()}")
-    passed &= check("时间桶总数 = 390", session.bucket_count() == 390,
-                    f"实际 {session.bucket_count()}")
+    # 不写死"= 390"：桶宽是可配的，写死会让这条检查在改桶宽时变成一个假警报，
+    # 然后被人顺手改掉。改成校验真正的不变量 —— 桶必须**恰好铺满**会话，
+    # 既不留余数（最后一截数据没有桶可落），也不重叠。
+    passed &= check(
+        "时间桶恰好铺满会话（无余数、无重叠）",
+        session.bucket_count() * bucket_s == int(session.session_len_s()),
+        f"{session.bucket_count()} 桶 × {bucket_s}s = "
+        f"{session.bucket_count() * bucket_s}s / 会话 {int(session.session_len_s())}s",
+    )
     passed &= check("到期日格式 YYYYMMDD", len(session.expiry_str()) == 8,
                     session.expiry_str())
 
@@ -207,10 +217,11 @@ def main() -> int:
     print("\n回归：默认时间源 = 注入的会话时钟")
     probe_store = TickStore(state_cfg, session)
     probe_engine = FeatureEngine(probe_store, session, feat_cfg, serial_cfg)
-    sim_clock.advance(1800.0)  # 把会话时间推到开盘后第 30 分钟
+    probe_advance_s = 1800.0
+    sim_clock.advance(probe_advance_s)  # 把会话时间推到开盘后 30 分钟
 
     probe_ts = session.now_ts()
-    probe_spot = scenario.spot_at(1800.0, real_elapsed_s=0.0)
+    probe_spot = scenario.spot_at(probe_advance_s, real_elapsed_s=0.0)
     probe_atm = scenario.atm_iv_at(0.0)
     probe_store.on_spot_tick(SpotTick(price=probe_spot, ts=probe_ts))
     for strike in scenario.strike_grid(probe_spot, step, each_side):
@@ -232,10 +243,14 @@ def main() -> int:
 
     probe_bundle = probe_engine.compute()  # 关键：不传 now
     probe_bucket = probe_bundle.heatmap.bucket_index if probe_bundle.heatmap else None
+    # 期望桶号由"推进了多少秒 ÷ 桶宽"推出，不写死 30 —— 桶宽一改，写死的数字
+    # 就会变成假警报。墙钟路径给出的桶号与此相差极远，所以这条依然拦得住。
+    expect_bucket = int(probe_advance_s // bucket_s)
     passed &= check(
-        "默认时间源取会话时钟（应落在第 30 桶）",
-        probe_bucket == 30,
-        f"bucket_index={probe_bucket}",
+        f"默认时间源取会话时钟（应落在第 {expect_bucket} 桶）",
+        probe_bucket == expect_bucket,
+        f"bucket_index={probe_bucket}（期望 {expect_bucket} = "
+        f"{probe_advance_s / 60:.0f} 分钟 ÷ {bucket_s}s）",
     )
     passed &= check(
         "会话时钟生效后 Skew 写入独立时间桶",

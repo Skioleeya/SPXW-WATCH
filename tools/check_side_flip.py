@@ -33,8 +33,8 @@ BUCKETS = 40
 STRIKE_STEP = 5.0
 EACH_SIDE = 18
 
-#: 允许的启动偏移：前两个时间桶没有"前值"可差分，天然为空。
-STARTUP_OFFSET = 2
+#: 每轮推进的会话秒数。
+STEP_SECONDS = 60.0
 
 GREEN, RED, RESET = "\033[32m", "\033[31m", "\033[0m"
 
@@ -63,6 +63,15 @@ def main() -> int:
     store = TickStore(state_cfg, session)
     engine = FeatureEngine(store, session, feat_cfg, serial_cfg)
 
+    #: 首个有值列 = 首次写入所在桶 + 1。
+    #:
+    #: 首次 compute 落在"开盘后 STEP_SECONDS 秒"的那个桶，而那一格没有前值可
+    #: 差分，本身也是空的；再往后一格才有值。这个偏移**必须由桶宽推出来**，
+    #: 不能写死 —— 桶宽从 60 秒改成 30 秒时，写死的 2 会立刻变成假警报，然后
+    #: 被人顺手调大，于是这条检查就不再拦任何东西了。
+    bucket_s = loader.as_int(serial_cfg, "heatmap_bucket_seconds", module="serialization")
+    startup_offset = int(STEP_SECONDS // bucket_s) + 1
+
     expiry = session.expiry_str()
     atm_iv = loader.as_float(sim_cfg, "base_atm_iv", module="simulator")
     open_spot = loader.as_float(sim_cfg, "base_spot", module="simulator")
@@ -72,7 +81,7 @@ def main() -> int:
     side_log: list[str] = []
 
     for bucket in range(BUCKETS):
-        sim_clock.advance(60.0)
+        sim_clock.advance(STEP_SECONDS)
         ts = session.now_ts()
         spot = open_spot - (50.0 * bucket / (BUCKETS - 1))
         # 每次都按当前现价重算网格（与 SyntheticFeed 的行为一致）
@@ -116,16 +125,30 @@ def main() -> int:
         print(f"{RED}[FAIL]{RESET} 测试前提不成立：该行取边全程未翻转")
         return 1
 
-    continuous = bool(filled) and filled[0] <= STARTUP_OFFSET
+    # 真正的判据是"一旦开始有值就不许再断"。只看首个有值列还不够：翻转处
+    # 出现空洞同样会毁掉这条行，而空洞出现在中间时首列位置完全正常。
+    interior = [c for c in range(filled[0], len(values)) if values[c] is None]
+    passed = True
+
+    continuous = bool(filled) and filled[0] <= startup_offset
     if continuous:
         print(f"{GREEN}[ok]{RESET} 取边翻转后历史保持连续"
-              f"（首个有值列 {filled[0]}，允许偏移 ≤ {STARTUP_OFFSET}）")
-        return 0
+              f"（首个有值列 {filled[0]}，允许偏移 ≤ {startup_offset}"
+              f" = {int(STEP_SECONDS // bucket_s)} + 1）")
+    else:
+        print(f"{RED}[FAIL]{RESET} 历史在取边翻转处断裂："
+              f"前 {filled[0]} 个桶在矩阵里为空，"
+              f"而这段数据其实记在翻转前的另一个方向键下")
+        passed = False
 
-    print(f"{RED}[FAIL]{RESET} 历史在取边翻转处断裂："
-          f"前 {filled[0]} 个桶在矩阵里为空，"
-          f"而这段数据其实记在翻转前的另一个方向键下")
-    return 1
+    if interior:
+        print(f"{RED}[FAIL]{RESET} 行内出现 {len(interior)} 个空洞"
+              f"（首个有值列之后仍为空）：{interior[:8]}")
+        passed = False
+    else:
+        print(f"{GREEN}[ok]{RESET} 首个有值列之后无空洞（{len(values) - filled[0]} 列全有值）")
+
+    return 0 if passed else 1
 
 
 if __name__ == "__main__":

@@ -24,6 +24,7 @@ from aiohttp import web
 from config import loader
 from contracts.ports import PayloadSource
 from core.clock import now_ts
+from core.logging_setup import get_logger
 
 from transport.http_static import StaticHandler
 from transport.push_loop import PushLoop
@@ -36,7 +37,7 @@ class TransportServer:
     """HTTP + WebSocket 服务器。"""
 
     __slots__ = (
-        "_cfg", "_source", "_host", "_port", "_health_path",
+        "_cfg", "_source", "_host", "_port", "_health_path", "_access_log",
         "_broadcaster", "_static", "_push", "_app", "_runner", "_site",
     )
 
@@ -51,6 +52,20 @@ class TransportServer:
         self._host = loader.as_str(transport_cfg, "host", module=_CFG)
         self._port = loader.as_int(transport_cfg, "http_port", module=_CFG)
         self._health_path = loader.as_str(transport_cfg, "health_path", module=_CFG)
+
+        # 访问日志开关。
+        #
+        # 必须显式传值，因为 aiohttp 的 ``RequestHandler`` 默认是
+        # ``access_log=access_logger``（``logging.getLogger("aiohttp.access")``，
+        # truthy）—— 也就是说**默认开启**，只有传 ``None`` 才关闭。
+        #
+        # 这里刻意用项目自己的 logger 命名空间，而不是 aiohttp 的
+        # ``aiohttp.access``：后者在 ``core.logging_setup`` 的第三方降噪列表里
+        # 被压到 WARNING，而 ``AccessLogger.enabled`` 判的是
+        # ``isEnabledFor(INFO)`` —— 传它进去会被算成"未启用"，配置写 true 也
+        # 永远不出日志。走 ``transport.access`` 则继承 root 的级别，开关真生效。
+        enabled = loader.as_bool(transport_cfg, "access_log", module=_CFG)
+        self._access_log = get_logger("transport.access") if enabled else None
 
         self._broadcaster = WsBroadcaster(transport_cfg, source)
         self._static = StaticHandler(transport_cfg, base_dir)
@@ -98,7 +113,7 @@ class TransportServer:
         app.router.add_get("/runtime-config.js", self._handle_runtime_config)
         self._static.register(app)
 
-        runner = web.AppRunner(app, access_log=None)
+        runner = web.AppRunner(app, access_log=self._access_log)
         await runner.setup()
         site = web.TCPSite(runner, self._host, self._port)
         await site.start()

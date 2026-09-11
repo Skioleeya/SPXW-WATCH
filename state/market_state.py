@@ -88,7 +88,8 @@ class MarketState:
             ticks_dropped=feed_status.ticks_dropped,
             store_cells=self._store.cell_count(),
             last_tick_age_s=age,
-            throttled=feed_status.throttled,
+            rate_limit=feed_status.rate_limit,
+            sub_limit_backoff=feed_status.sub_limit_backoff,
             messages=self.recent_messages(limit=6),
         )
 

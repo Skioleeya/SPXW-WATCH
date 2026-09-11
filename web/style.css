@@ -192,6 +192,37 @@ main {
   white-space: nowrap;
 }
 
+/* ------------------------------------------------------------------ */
+/* 时间周期切换                                                        */
+/* ------------------------------------------------------------------ */
+
+.periods {
+  display: flex;
+  gap: 3px;
+  flex: 0 0 auto;
+}
+.periods button {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--text-dim);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 7px;
+  cursor: pointer;
+}
+.periods button:hover {
+  color: var(--text);
+  border-color: var(--border-2);
+}
+.periods button.on {
+  color: #06222a;
+  background: var(--accent);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
 .chart { flex: 1 1 auto; min-height: 0; }
 
 .panel-foot {

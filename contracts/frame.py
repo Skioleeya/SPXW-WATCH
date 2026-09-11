@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 
 from contracts.enums import ConnectionState, FeedMode
 from contracts.feature import AtmSnapshot, HeatmapMatrix, ImpulseCell, SkewPoint
+from contracts.tick import RateLimitStatus
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,7 +34,13 @@ class SessionBlock:
 
 @dataclass(frozen=True, slots=True)
 class HealthBlock:
-    """系统健康读数，前端顶栏直接显示。"""
+    """
+    系统健康读数，前端顶栏直接显示。
+
+    ``rate_limit`` 与 ``sub_limit_backoff`` 是两个不同层面的限流读数，命名刻意
+    不共用 "throttled" —— 前者是 ``ib_async`` 出站消息桶（msg/s），后者是 IBKR
+    Error 300（行情行数超限）的退避开关。
+    """
 
     mode: FeedMode = FeedMode.UNKNOWN
     connection: ConnectionState = ConnectionState.DISCONNECTED
@@ -43,7 +50,8 @@ class HealthBlock:
     ticks_dropped: int = 0
     store_cells: int = 0
     last_tick_age_s: float | None = None
-    throttled: bool = False
+    rate_limit: RateLimitStatus = field(default_factory=RateLimitStatus)
+    sub_limit_backoff: bool = False
     messages: tuple[str, ...] = field(default_factory=tuple)
 
 

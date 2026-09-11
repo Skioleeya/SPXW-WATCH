@@ -181,8 +181,37 @@ class StatusEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class RateLimitStatus:
+    """
+    出站消息限速桶的可观测状态。
+
+    桶本身住在 ``ib_async`` 的 ``Client`` 里（滑动窗口：每 ``interval_s`` 秒最多
+    ``capacity`` 条出站消息）。这里只**观测**，不另建一个桶 —— 库是唯一的限流者；
+    本系统若自己再放一个桶，两个桶互相不知情，容量对不上时反而更容易撞上
+    IBKR 的 Error 100（3 次违约即终止 API 会话）。
+
+    ``events`` / ``throttled_total_s`` 来自 ``Client.throttleStart`` /
+    ``throttleEnd``。它们回答的是同一个问题：当前这个容量到底有没有成为瓶颈。
+    全程为 0，就说明订阅/退订根本没被限速拖慢，容量是宽的。
+    """
+
+    capacity: int = 0
+    interval_s: float = 0.0
+    events: int = 0
+    throttling: bool = False
+    throttled_total_s: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
 class FeedStatus:
-    """采集层的整体健康快照。"""
+    """
+    采集层的整体健康快照。
+
+    这里有两个名字里都带"限流"的读数，含义完全不同，不要混：``rate_limit`` 是
+    库层**出站消息桶**（msg/s），``sub_limit_backoff`` 是 IBKR 的 **Error 300
+    退避开关**（行情行数超限）。二者此前共用 ``throttled`` 一个名字，排查时
+    极易张冠李戴。
+    """
 
     mode: FeedMode = FeedMode.UNKNOWN
     connection: ConnectionState = ConnectionState.DISCONNECTED
@@ -190,22 +219,8 @@ class FeedStatus:
     subscription_cap: int = 0
     ticks_received: int = 0
     ticks_dropped: int = 0
-    throttled: bool = False
+    rate_limit: RateLimitStatus = field(default_factory=RateLimitStatus)
+    sub_limit_backoff: bool = False
     expiry: str = ""
     spot: float = 0.0
     messages: tuple[str, ...] = field(default_factory=tuple)
-
-    def with_message(self, message: str, limit: int = 6) -> "FeedStatus":
-        kept = (self.messages + (message,))[-limit:]
-        return FeedStatus(
-            mode=self.mode,
-            connection=self.connection,
-            subscribed=self.subscribed,
-            subscription_cap=self.subscription_cap,
-            ticks_received=self.ticks_received,
-            ticks_dropped=self.ticks_dropped,
-            throttled=self.throttled,
-            expiry=self.expiry,
-            spot=self.spot,
-            messages=kept,
-        )

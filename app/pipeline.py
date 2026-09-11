@@ -38,6 +38,7 @@ from core.logging_setup import configure, get_logger
 from state.market_state import MarketState
 from state.tick_store import TickStore
 from features.feature_engine import FeatureEngine
+from features.persistence import AsyncPersistenceWriter
 from serialization.payload_builder import PayloadBuilder
 from transport.server import TransportServer
 
@@ -61,6 +62,7 @@ class Pipeline:
             "transport": loader.load("transport"),
             "simulator": loader.load("simulator"),
             "pipeline": loader.load("pipeline"),
+            "persistence": loader.load("persistence"),
         }
 
         if simulate is None:
@@ -71,14 +73,22 @@ class Pipeline:
         self._clock = self._build_clock()
         self._store = TickStore(self._cfg["state"], self._clock)
         self._market = MarketState(self._store, self._cfg["state"], self._clock)
+        self._writer = AsyncPersistenceWriter(self._cfg["persistence"])
         self._engine = FeatureEngine(
-            self._store, self._clock, self._cfg["features"], self._cfg["serialization"]
+            self._store, self._clock, self._cfg["features"],
+            self._cfg["serialization"], self._writer,
         )
         self._builder = PayloadBuilder(self._market, self._cfg["serialization"], self._clock)
         self._server = TransportServer(
             self._cfg["transport"], self._builder, PROJECT_ROOT
         )
         self._feed = self._build_feed()
+        # 重连后是否清空特征累积状态。默认 false，即接线只为让这个键可切换，
+        # 行为与接线之前完全一致。
+        self._reset_on_reconnect = loader.as_bool(
+            self._cfg["pipeline"], "reset_feature_state_on_reconnect", module=_PIPE
+        )
+        self._feed.set_reconnect_hook(self._on_feed_reconnect)
         self._tasks: list[asyncio.Task] = []
         self._running = False
         self._frames_built = 0
@@ -131,6 +141,31 @@ class Pipeline:
             self._cfg["app"], self._cfg["ibkr"], self._cfg["subscription"], self._clock
         )
 
+    def _on_feed_reconnect(self) -> None:
+        """
+        行情源重连成功后的回调（L1 通过 ``FeedPort.set_reconnect_hook`` 触发）。
+
+        为什么要清空特征状态
+        --------------------
+        断线期间 IV 序列是断的，重连后的第一笔数据与断线前的最后一点之间隔着
+        几分钟。IV 冲量按时间窗做差，这个跨断线的落差会被算成一次**从未发生过
+        的剧烈冲量**，在热力图上表现为一整列假信号 —— 而且它看起来和真实行情
+        完全一样，前端无法分辨。
+
+        为什么这条链路要绕组装层
+        ------------------------
+        L1 不认识 L3，直接调用就是反向依赖。所以 L1 只报告"我重连了"，由组装层
+        决定要不要清状态 —— 这是本项目唯一允许同时看见两层的角色。
+
+        默认不清（``reset_feature_state_on_reconnect=false``）。清空的代价是
+        重连后要重新积累 60/300 秒的数据，前端会有一段空窗；是否划算取决于
+        实盘断线频率，所以这是个配置项而不是写死的策略。
+        """
+        if not self._reset_on_reconnect:
+            return
+        self._engine.reset()
+        self._log.info("已按配置清空特征累积状态（避免跨断线的假冲量）")
+
     # ------------------------------------------------------------------ #
     # 生命周期
     # ------------------------------------------------------------------ #
@@ -150,6 +185,12 @@ class Pipeline:
             )
         self._log.info("界面地址 %s | 行情通道 %s", self._server.url, self._server.ws_url)
 
+        await self._writer.start()
+        recovered = self._writer.recover()
+        if recovered:
+            self._engine.restore_heatmap(recovered)
+            self._log.info("已从 SQLite 恢复 %d 个历史桶", len(recovered))
+
         self._feed.set_sink(self._store)
         self._running = True
 
@@ -167,23 +208,61 @@ class Pipeline:
 
     async def stop(self) -> None:
         self._running = False
-        for task in self._tasks:
-            if not task.done():
-                task.cancel()
-        for task in self._tasks:
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
+        timeout = loader.as_float(
+            self._cfg["pipeline"], "shutdown_timeout_s", module=_PIPE
+        )
+
+        pending = [t for t in self._tasks if not t.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            _, stuck = await asyncio.wait(pending, timeout=timeout)
+            if stuck:
+                self._log.warning(
+                    "%d 个后台任务 %.0fs 内未结束，强制继续关闭", len(stuck), timeout
+                )
         self._tasks = []
 
-        for closer, name in ((self._feed.stop, "feed"), (self._server.stop, "server")):
-            try:
-                await closer()
-            except Exception as exc:
-                self._log.warning("%s 关闭异常: %s", name, exc)
+        await self._shutdown_step(self._feed.stop(), "feed 关闭", timeout)
+        await self._shutdown_step(self._server.stop(), "server 关闭", timeout)
+        await self._shutdown_step(self._writer.stop(), "持久化关闭", timeout)
 
         self._log.info("已停止")
+
+    async def _shutdown_step(self, coro, what: str, timeout: float) -> None:
+        """
+        执行一个停机动作，超时就**放弃等待**、继续往下走。
+
+        为什么用 ``asyncio.wait`` 而不是 ``wait_for``
+        --------------------------------------------
+        ``wait_for`` 超时后会 cancel 目标，然后**继续等它结束**。如果那个协程在
+        收到取消之后还要跑很久（卡在一次耗时的网络清理里），``wait_for`` 会跟着
+        一起卡住 —— 所谓"超时上限"就是假的。这一点在本轮的非空转验证里被实测
+        抓到过：一个普通任务被取消后瞬间结束，``stop()`` 耗时 0.0s，超时分支根本
+        没被走到。
+
+        ``asyncio.wait`` 超时后把未完成的任务留在 ``pending`` 里**直接返回**，
+        调用方不等它 —— 这才是"保底退出"该有的语义。
+
+        代价：超时后那个任务可能仍在后台跑，进程退出时 asyncio 可能打印
+        "Task was destroyed but it is pending"。这是**故意**的取舍 —— 宁可留一行
+        警告，也不要让 Ctrl-C 之后程序毫无反应。
+
+        另一个刻意的选择：不再吞 ``CancelledError``。旧写法
+        ``except (asyncio.CancelledError, Exception): pass`` 会把取消异常吃掉，
+        于是"取消成功"变成假象 —— 任务可能根本没结束，调用方却以为收干净了。
+        """
+        task = asyncio.ensure_future(coro)
+        _, pending = await asyncio.wait({task}, timeout=timeout)
+        if pending:
+            task.cancel()
+            self._log.warning("%s 超时 %.0fs，强制继续关闭", what, timeout)
+            return
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            self._log.warning("%s 异常: %s", what, exc)
 
     async def run_until_cancelled(self) -> None:
         """阻塞直到被外部取消（Ctrl-C 或信号）。"""
@@ -223,7 +302,9 @@ class Pipeline:
                 self._log.exception("特征计算异常: %s", exc)
 
     async def _prune_loop(self) -> None:
-        interval = loader.as_float(self._cfg["pipeline"], "prune_interval_s", module=_PIPE)
+        # 节奏取自 L2 自己的配置，而不是 pipeline.json —— 裁剪间隔是状态层的
+        # 参数，组装层只负责按它驱动循环。
+        interval = self._store.prune_interval_s
         while self._running:
             await asyncio.sleep(interval)
             if not self._running:

@@ -7,70 +7,35 @@ L1 — IBKR 行情服务编排器。
 它是 L1 的对外门面：L6 组装层只认识 ``FeedPort``，完全不知道底下有 ``ib_async``。
 
 本模块**不 import 任何 L2 及以上的东西**。它需要知道现价才能算 ATM 窗口，
-但这个现价由内部的 ``_SpotTap`` 就地留存，而不是去读状态层的存储——否则就
-构成了 L1 → L2 的反向依赖。
+但这个现价由 ``acquisition.spot_tap.SpotTap`` 就地留存，而不是去读状态层的
+存储——否则就构成了 L1 → L2 的反向依赖。
 
 依赖：L0。
 """
-
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, Callable
 
 from config import loader
 from contracts.enums import ConnectionState, FeedMode, StatusLevel
 from contracts.ports import TickSink
-from contracts.tick import FeedStatus, SpotTick, StatusEvent
+from contracts.tick import FeedStatus, StatusEvent
 from core.clock import now_ts
 from core.errors import SpotUnavailableError
 
 from acquisition.chain_resolver import ChainResolver
 from acquisition.contract_factory import ContractFactory
+from acquisition.feed_errors import FeedErrorHandler
+from acquisition.feed_reconcile import WindowFollower
 from acquisition.ibkr_gateway import IbkrGateway
+from acquisition.spot_tap import SpotTap
 from acquisition.subscription_manager import SubscriptionManager
 from acquisition.tick_router import TickRouter
 
 _APP = "app"
 _IBKR = "ibkr"
 _SUB = "subscription"
-
-# IBKR 错误码语义（只在本文件翻译，网关层保持中立）
-_CODE_SUBSCRIPTION_LIMIT = 300
-_CODE_DATA_LOST = 1101
-_CODE_NO_SECURITY = 200
-_IGNORED_CODES = frozenset(
-    {1100, 1102, 2103, 2104, 2105, 2106, 2108, 2110, 2158, 10167, 10089, 10091}
-)
-
-
-class _SpotTap:
-    """
-    包在真实 sink 外面的一层薄壳：把现价就地留一份给窗口计算用，其余原样转发。
-
-    这样 L1 既能拿到现价，又不需要去读 L2 的存储，依赖方向保持单向。
-    """
-
-    __slots__ = ("_inner", "last_spot", "last_spot_ts")
-
-    def __init__(self, inner: TickSink) -> None:
-        self._inner = inner
-        self.last_spot: float = 0.0
-        self.last_spot_ts: float = 0.0
-
-    def on_option_tick(self, tick: Any) -> None:
-        self._inner.on_option_tick(tick)
-
-    def on_quote_tick(self, tick: Any) -> None:
-        self._inner.on_quote_tick(tick)
-
-    def on_spot_tick(self, tick: SpotTick) -> None:
-        self.last_spot = float(tick.price)
-        self.last_spot_ts = float(tick.ts)
-        self._inner.on_spot_tick(tick)
-
-    def on_status(self, event: StatusEvent) -> None:
-        self._inner.on_status(event)
 
 
 class IbkrFeed:
@@ -81,7 +46,8 @@ class IbkrFeed:
         "_sink", "_tap", "_gateway", "_factory", "_resolver",
         "_manager", "_router", "_slice", "_window", "_centre",
         "_reconcile_task", "_resubscribe_task", "_running",
-        "_messages", "_mode", "_last_error", "_recover_at",
+        "_messages", "_mode", "_error_handler", "_follower",
+        "_reconnect_hook",
     )
 
     def __init__(self, app_cfg: dict, ibkr_cfg: dict, sub_cfg: dict, clock: Any) -> None:
@@ -91,7 +57,7 @@ class IbkrFeed:
         self._clock = clock
 
         self._sink: TickSink | None = None
-        self._tap: _SpotTap | None = None
+        self._tap: SpotTap | None = None
         self._gateway = IbkrGateway(ibkr_cfg)
         self._factory = ContractFactory(app_cfg)
         self._resolver = ChainResolver(app_cfg, sub_cfg)
@@ -105,8 +71,10 @@ class IbkrFeed:
         self._resubscribe_task: asyncio.Task | None = None
         self._running = False
         self._messages: list[str] = []
-        self._last_error = ""
-        self._recover_at = 0.0
+
+        self._error_handler: FeedErrorHandler | None = None
+        self._follower: WindowFollower | None = None
+        self._reconnect_hook: Callable[[], None] | None = None
 
         mdt = loader.as_int(ibkr_cfg, "market_data_type", module=_IBKR)
         self._mode = FeedMode.from_market_data_type(mdt)
@@ -122,6 +90,10 @@ class IbkrFeed:
     def set_sink(self, sink: TickSink) -> None:
         self._sink = sink
 
+    def set_reconnect_hook(self, hook: Callable[[], None]) -> None:
+        """见 ``contracts.ports.FeedPort.set_reconnect_hook``。"""
+        self._reconnect_hook = hook
+
     def status(self) -> FeedStatus:
         tap = self._tap
         router = self._router
@@ -132,7 +104,8 @@ class IbkrFeed:
             subscription_cap=self._manager.capacity,
             ticks_received=router.routed if router else 0,
             ticks_dropped=router.rejected if router else 0,
-            throttled=self._manager.throttled,
+            rate_limit=self._gateway.rate_limit,
+            sub_limit_backoff=self._manager.in_backoff,
             expiry=self._slice.expiry if self._slice else "",
             spot=tap.last_spot if tap else 0.0,
             messages=tuple(self._messages[-6:]),
@@ -148,8 +121,24 @@ class IbkrFeed:
         if self._running:
             return
 
-        self._tap = _SpotTap(self._sink)
+        self._tap = SpotTap(self._sink)
         self._router = TickRouter(self._tap, self._ibkr_cfg)
+
+        self._error_handler = FeedErrorHandler(
+            self._manager, self._note, self._trigger_resubscribe,
+        )
+        self._follower = WindowFollower(
+            self._manager,
+            self._resolver,
+            self._tap,
+            self._sub_cfg,
+            self._note,
+            loader.as_float(self._ibkr_cfg, "max_underlying_age_s", module=_IBKR),
+            recover_at_ref=lambda: self._error_handler.recover_at
+            if self._error_handler is not None else 0.0,
+            set_recover_at=lambda v: self._error_handler.set_recover_at(v)
+            if self._error_handler is not None else None,
+        )
 
         self._gateway.set_callbacks(
             on_tickers=self._router.handle_tickers,
@@ -158,8 +147,10 @@ class IbkrFeed:
             on_reconnect=self._on_reconnect,
         )
 
-        self._note(f"连接 IBKR {loader.as_str(self._ibkr_cfg, 'host', module=_IBKR)}"
-                   f":{loader.as_int(self._ibkr_cfg, 'port', module=_IBKR)}")
+        self._note(
+            f"连接 IBKR {loader.as_str(self._ibkr_cfg, 'host', module=_IBKR)}"
+            f":{loader.as_int(self._ibkr_cfg, 'port', module=_IBKR)}"
+        )
         await self._gateway.connect()
 
         mdt = loader.as_int(self._ibkr_cfg, "market_data_type", module=_IBKR)
@@ -169,7 +160,12 @@ class IbkrFeed:
         await self._resolve_and_subscribe()
 
         self._running = True
-        self._reconcile_task = asyncio.create_task(self._reconcile_loop())
+        self._reconcile_task = asyncio.create_task(
+            self._follower.run(
+                running_flag=lambda: self._running,
+                slice_provider=lambda: self._slice,
+            )
+        )
         self._note("行情服务已就绪")
 
     async def _resolve_and_subscribe(self) -> None:
@@ -210,6 +206,9 @@ class IbkrFeed:
 
         self._window = self._resolver.window(self._slice.strikes, spot)
         self._centre = self._resolver.centre_strike(self._window, spot)
+        if self._follower is not None:
+            self._follower.initialize(self._window, self._centre)
+
         plan = await self._manager.reconcile(self._slice.expiry, self._window)
         self._note(
             f"初始订阅 {plan.projected_total} 条 "
@@ -235,88 +234,16 @@ class IbkrFeed:
         )
 
     # ------------------------------------------------------------------ #
-    # 窗口维护循环
-    # ------------------------------------------------------------------ #
-
-    async def _reconcile_loop(self) -> None:
-        interval = loader.as_float(self._sub_cfg, "reconcile_interval_s", module=_SUB)
-        trigger = loader.as_float(
-            self._sub_cfg, "recenter_trigger_strikes", module=_SUB
-        )
-        while self._running:
-            await asyncio.sleep(interval)
-            if not self._running or self._slice is None or self._tap is None:
-                continue
-
-            if self._manager.throttled:
-                continue
-
-            if self._recover_at and now_ts() >= self._recover_at:
-                self._manager.note_recovered()
-                self._recover_at = 0.0
-                self._note("订阅配额已恢复", StatusLevel.INFO)
-
-            spot = self._tap.last_spot
-            if spot <= 0:
-                continue
-
-            if not self._resolver.centre_moved(
-                self._centre, self._slice.strikes, spot, trigger
-            ):
-                continue
-
-            window = self._resolver.window(self._slice.strikes, spot)
-            if window == self._window:
-                continue
-
-            self._window = window
-            self._centre = self._resolver.centre_strike(window, spot)
-            try:
-                plan = await self._manager.reconcile(self._slice.expiry, window)
-            except Exception as exc:
-                self._note(f"窗口重建失败: {exc}", StatusLevel.ERROR)
-                continue
-
-            if plan.changed:
-                self._note(
-                    f"窗口跟随现价重建 ±{len(window) // 2} 档 "
-                    f"(+{len(plan.add)} / -{len(plan.drop)}, 共 {plan.projected_total})"
-                )
-            if plan.failed:
-                self._note(
-                    f"窗口重建时 {len(plan.failed)} 条合约订阅失败",
-                    StatusLevel.WARN,
-                )
-
-    # ------------------------------------------------------------------ #
     # IBKR 事件翻译
     # ------------------------------------------------------------------ #
 
     def _on_error(self, req_id: int, code: int, message: str, contract: Any) -> None:
-        if code == _CODE_SUBSCRIPTION_LIMIT:
-            backoff = self._manager.note_throttled()
-            self._recover_at = now_ts() + backoff
-            self._note(
-                f"触发 IBKR Error 300（行情行数超限），退避 {backoff:.0f}s",
-                StatusLevel.ERROR, code,
-            )
-            return
+        if self._error_handler is not None:
+            self._error_handler.handle(req_id, code, message, contract)
 
-        if code == _CODE_DATA_LOST:
-            self._note("IBKR 1101：行情订阅状态丢失，准备重建", StatusLevel.WARN, code)
-            if self._resubscribe_task is None or self._resubscribe_task.done():
-                self._resubscribe_task = asyncio.create_task(self._resubscribe())
-            return
-
-        if code == _CODE_NO_SECURITY:
-            self._note(f"合约无定义 (reqId={req_id}): {message}", StatusLevel.WARN, code)
-            return
-
-        if code in _IGNORED_CODES:
-            return
-
-        self._last_error = f"{code}: {message}"
-        self._note(f"IBKR 错误 {code}: {message}", StatusLevel.WARN, code)
+    def _trigger_resubscribe(self) -> None:
+        if self._resubscribe_task is None or self._resubscribe_task.done():
+            self._resubscribe_task = asyncio.create_task(self._resubscribe())
 
     async def _resubscribe(self) -> None:
         try:
@@ -330,8 +257,14 @@ class IbkrFeed:
 
     def _on_reconnect(self) -> None:
         self._note("IBKR 已重连，正在重建行情", StatusLevel.WARN)
-        if self._resubscribe_task is None or self._resubscribe_task.done():
-            self._resubscribe_task = asyncio.create_task(self._resubscribe())
+        self._trigger_resubscribe()
+        # 通知组装层"连接已重建"。L1 不认识 L3，所以这里只报告事件；
+        # 要不要据此清空特征累积状态由 L6 按配置决定。
+        if self._reconnect_hook is not None:
+            try:
+                self._reconnect_hook()
+            except Exception as exc:
+                self._note(f"重连钩子异常: {exc}", StatusLevel.WARN)
 
     # ------------------------------------------------------------------ #
     # 停机

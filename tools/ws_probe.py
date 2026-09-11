@@ -27,7 +27,21 @@ import aiohttp
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from config import loader  # noqa: E402
+from serialization.bitmap_codec import unpack  # noqa: E402
+
 GREEN, RED, RESET = "\033[32m", "\033[31m", "\033[0m"
+
+
+def decode_matrix(hm: dict) -> list[list[float | None]]:
+    """
+    线上数值块 ``[位图][定标整数]`` → 二维数组。
+
+    约定与 ``web/matrix_codec.js`` 完全一致，两边由
+    ``tools/check_matrix_codec.py`` 逐值对拍 —— 探针若用另一套解读，
+    "探针全绿"就不再等于"前端画得对"。
+    """
+    return unpack(hm["bm"], hm["i16"], hm["rows"], hm["cols"], hm["scale"])
 
 
 def _check(label: str, condition: bool, detail: str = "") -> bool:
@@ -40,6 +54,7 @@ async def probe(url: str, want_frames: int) -> int:
     frames: list[dict] = []
     gaps = 0
     last_seq: int | None = None
+    serial_cfg = loader.load("serialization")
 
     timeout = aiohttp.ClientTimeout(total=60)
     async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -85,8 +100,16 @@ async def probe(url: str, want_frames: int) -> int:
     session = last["session"]
     passed &= _check("会话块含到期日", bool(session.get("expiry")),
                      str(session.get("expiry")))
-    passed &= _check("时间桶总数 = 390", session.get("bucket_count") == 390,
-                     str(session.get("bucket_count")))
+    # 不写死"= 390"：桶宽可配，写死只会在改桶宽时变成假警报。
+    # 改校验跨字段不变量 —— 桶数 × 基线桶宽 必须等于会话总长。
+    hm_probe = last.get("heatmap") or {}
+    bucket_s = hm_probe.get("bucket_seconds")
+    session_s = round((session.get("elapsed_s") or 0) +
+                      (session.get("seconds_to_close") or 0))
+    passed &= _check(
+        "时间桶恰好铺满会话（桶数 × 桶宽 = 会话长度）",
+        bool(bucket_s) and session.get("bucket_count", 0) * bucket_s == session_s,
+        f"{session.get('bucket_count')} 桶 × {bucket_s}s vs 会话 {session_s}s")
 
     health = last["health"]
     passed &= _check("健康块含连接状态", bool(health.get("connection")),
@@ -103,9 +126,17 @@ async def probe(url: str, want_frames: int) -> int:
                          f"{first['heatmap']['cols'] if first['heatmap'] else 0} → {hm['cols']} 桶")
         passed &= _check("色标量程为正", hm["vmax"] > 0, f"±{hm['vmax']}")
         passed &= _check("行数与 strikes 对齐", hm["rows"] == len(hm["strikes"]))
+        values = decode_matrix(hm)
         passed &= _check("每行列数与 labels 对齐",
-                         all(len(row) == len(hm["labels"]) for row in hm["values"]))
-        flat = [v for row in hm["values"] for v in row if v is not None]
+                         all(len(row) == len(hm["labels"]) for row in values))
+        passed &= _check("数值块编码名与配置一致",
+                         hm.get("enc") == serial_cfg["heatmap_encoding"],
+                         f"{hm.get('enc')}")
+        passed &= _check("位图置位数与 filled 一致",
+                         sum(1 for row in values for v in row if v is not None)
+                         == hm.get("filled"),
+                         f"{hm.get('filled')} 格")
+        flat = [v for row in values for v in row if v is not None]
         passed &= _check("矩阵含有效数值", len(flat) > 0, f"{len(flat)} 格")
         passed &= _check("无 NaN / Infinity 字面量",
                          not any(v != v or v in (float("inf"), float("-inf"))

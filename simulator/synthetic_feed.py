@@ -23,6 +23,7 @@ import asyncio
 import math
 import random
 import time
+from typing import Callable
 
 from config import loader
 from contracts.enums import ConnectionState, FeedMode, OptionRight, StatusLevel
@@ -53,6 +54,7 @@ class SyntheticFeed:
         "_spot_noise", "_glitch_interval", "_glitch_mult",
         "_status_interval", "_counts", "_last_status_at", "_last_glitch_at",
         "_expiry", "_subscribed", "_messages", "_mode", "_current_spot",
+        "_reconnect_hook",
     )
 
     def __init__(self, app_cfg: dict, sim_cfg: dict, sub_cfg: dict, session_clock) -> None:
@@ -98,6 +100,7 @@ class SyntheticFeed:
         self._messages: list[str] = []
         self._mode = FeedMode.SIM
         self._current_spot: float = 0.0
+        self._reconnect_hook: Callable[[], None] | None = None
 
     # ------------------------------------------------------------------ #
     # FeedPort
@@ -110,6 +113,16 @@ class SyntheticFeed:
     def set_sink(self, sink: TickSink) -> None:
         self._sink = sink
 
+    def set_reconnect_hook(self, hook: Callable[[], None]) -> None:
+        """
+        见 ``contracts.ports.FeedPort.set_reconnect_hook``。
+
+        模拟源不建连接，也就不会重连 —— 这个钩子只记录、永不触发。它存在的
+        意义是让 ``SyntheticFeed`` 与 ``IbkrFeed`` 保持同一套接口，组装层才能
+        在两种模式下无条件调用，而不必先探测"这个源支不支持重连"。
+        """
+        self._reconnect_hook = hook
+
     def status(self) -> FeedStatus:
         return FeedStatus(
             mode=self._mode,
@@ -121,7 +134,7 @@ class SyntheticFeed:
             subscription_cap=self._cap,
             ticks_received=self._counts["option"] + self._counts["spot"],
             ticks_dropped=0,
-            throttled=False,
+            sub_limit_backoff=False,
             expiry=self._expiry,
             spot=self._current_spot,
             messages=tuple(self._messages[-6:]),

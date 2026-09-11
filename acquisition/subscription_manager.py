@@ -10,8 +10,14 @@ L1 — 动态 ATM 订阅协调器。
    配置写大了也只会被压缩，不会真的超限。
 2. **先退后订**：``cancel_stale_before_add`` 打开时，先取消滑出窗口的合约，
    再订阅新进窗口的，峰值订阅数不会瞬时冲高。
-3. **Error 300 退避**：一旦 IBKR 真的返回限流错误，进入指数退避并停止一切
+3. **Error 300 退避**：一旦 IBKR 返回"行情行数超限"，进入指数退避并停止一切
    订阅动作，等行情配额回收后再恢复。
+
+命名纪律：本模块管的是 **Error 300（行情行数超限）**，不是**消息速率**。
+消息速率那个桶在 ``ib_async`` 的 ``Client`` 里，由
+``acquisition.rate_limit_watch.RateLimitWatch`` 观测。两者语义不同，因此这里
+一律用 ``backoff`` / ``limit_events`` 命名，**刻意不出现** ``throttle*`` —— 历史上
+二者共用 ``throttled`` 一个名字，排查时极易张冠李戴。
 
 订阅前必须先确认合约（qualify）
 -------------------------------
@@ -64,7 +70,7 @@ class _State:
     contracts: dict[OptionRef, Any] = field(default_factory=dict)
     backoff_until: float = 0.0
     backoff_current: float = 0.0
-    throttle_events: int = 0
+    limit_events: int = 0
 
 
 class SubscriptionManager:
@@ -102,12 +108,14 @@ class SubscriptionManager:
         return self._cap
 
     @property
-    def throttled(self) -> bool:
+    def in_backoff(self) -> bool:
+        """是否处于 Error 300（行情行数超限）退避期。"""
         return time.monotonic() < self._state.backoff_until
 
     @property
-    def throttle_events(self) -> int:
-        return self._state.throttle_events
+    def limit_events(self) -> int:
+        """累计收到的 Error 300 次数。"""
+        return self._state.limit_events
 
     def active_refs(self) -> tuple[OptionRef, ...]:
         return tuple(self._state.contracts.keys())
@@ -163,7 +171,7 @@ class SubscriptionManager:
         """
         desired = self.guard_capacity(self.desired_refs(expiry, strikes))
 
-        if self.throttled:
+        if self.in_backoff:
             return SubscriptionPlan(
                 keep=self.active_refs(),
                 blocked_by_backoff=True,
@@ -304,12 +312,12 @@ class SubscriptionManager:
         await self._drop(tuple(self._state.contracts.keys()))
 
     # ------------------------------------------------------------------ #
-    # 限流反馈（由 feed_service 从 IBKR 错误回调转发进来）
+    # Error 300 退避反馈（由 feed_service 从 IBKR 错误回调转发进来）
     # ------------------------------------------------------------------ #
 
-    def note_throttled(self) -> float:
+    def note_limit_hit(self) -> float:
         """记录一次 Error 300，返回本次退避秒数。"""
-        self._state.throttle_events += 1
+        self._state.limit_events += 1
         current = self._state.backoff_current or self._backoff_base
         self._state.backoff_current = min(current * self._backoff_mult, self._backoff_max)
         self._state.backoff_until = time.monotonic() + current
@@ -323,5 +331,5 @@ class SubscriptionManager:
     def exhausted(self) -> bool:
         return (
             self._max_retries > 0
-            and self._state.throttle_events > self._max_retries
+            and self._state.limit_events > self._max_retries
         )

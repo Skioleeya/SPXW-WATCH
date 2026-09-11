@@ -49,8 +49,95 @@
     lastFrame: null,
     lastFrameAt: 0,
     lastHealth: "",
-    startedAt: Date.now()
+    startedAt: Date.now(),
+    /* 时间周期切换的状态。periodBase 是后端随帧下发的**基线桶宽**（秒）；
+       它一变就说明后端换了粒度，已选周期可能已不合法，需要重建按钮并复检。 */
+    periodBase: 0,
+    periods: [],
+    periodSeconds: 0
   };
+
+  /* ------------------------------------------------------------------ */
+  /* 时间周期切换                                                        */
+  /* ------------------------------------------------------------------ */
+
+  var periodBar = el("heatmap-periods");
+
+  function currentPeriodLabel() {
+    for (var i = 0; i < state.periods.length; i++) {
+      if (state.periods[i].seconds === state.periodSeconds) {
+        return state.periods[i].label;
+      }
+    }
+    return "--";
+  }
+
+  function renderPeriodButtons() {
+    if (!periodBar) { return; }
+    periodBar.innerHTML = "";
+    state.periods.forEach(function (p) {
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = p.label;
+      btn.className = p.seconds === state.periodSeconds ? "on" : "";
+      btn.addEventListener("click", function () { setPeriod(p.seconds); });
+      periodBar.appendChild(btn);
+    });
+  }
+
+  function setPeriod(seconds) {
+    if (seconds === state.periodSeconds) { return; }
+    state.periodSeconds = seconds;
+    renderPeriodButtons();
+    /* 换周期只影响呈现，不必向后端要数据：拿缓存的最新一帧立刻重画。
+       否则要干等到下一次推送（最多 400ms）画面才变，点按钮像是没反应。 */
+    if (state.lastFrame) { renderHeatmap(state.lastFrame); }
+  }
+
+  function pickDefaultPeriod() {
+    var wanted = CFG.heatmap.defaultPeriodSeconds;
+    for (var i = 0; i < state.periods.length; i++) {
+      if (state.periods[i].seconds === wanted) { return wanted; }
+    }
+    return state.periods.length ? state.periods[0].seconds : 0;
+  }
+
+  /*
+   * 基线桶宽一变就重建按钮，并复检当前选中周期是否还在可用列表里 ——
+   * 不在就回退到默认档，而不是留着一个分组算不对的选中态。
+   */
+  function syncPeriods(block) {
+    var base = block ? Number(block.bucket_seconds) : 0;
+    if (!(base > 0) || base === state.periodBase) { return; }
+
+    state.periodBase = base;
+    state.periods = global.SWATCH_PERIOD.options(base);
+
+    var available = false;
+    for (var i = 0; i < state.periods.length; i++) {
+      if (state.periods[i].seconds === state.periodSeconds) { available = true; }
+    }
+    if (!available) { state.periodSeconds = pickDefaultPeriod(); }
+    renderPeriodButtons();
+  }
+
+  function groupOf(seconds) {
+    if (!(state.periodBase > 0) || !(seconds > 0)) { return 1; }
+    var g = Math.round(seconds / state.periodBase);
+    return g > 0 ? g : 1;
+  }
+
+  /*
+   * 基线矩阵 → 实际要画的矩阵。两步都是纯呈现变换，本体在 web/period.js：
+   * 先按选中周期把基线桶并组（ΔIV 相加），再从尾部截到 maxColumns 列。
+   */
+  function displayBlock(block) {
+    if (!block) { return block; }
+    return global.SWATCH_PERIOD.clipTail(
+      global.SWATCH_PERIOD.aggregate(block, groupOf(state.periodSeconds)),
+      CFG.heatmap.maxColumns
+    );
+  }
 
   /* ------------------------------------------------------------------ */
   /* 渲染                                                                */
@@ -82,9 +169,14 @@
     var session = frame.session || {};
     var health = frame.health || {};
 
+    /* 会话长度必须由 elapsed + 剩余推算，**不能**用 session.bucket_count ——
+       那是基线桶的**个数**（30 秒粒度下是 780），当分钟数用会显示成 "390/780 分"。
+       同理，下面进度条用 bucket_index/bucket_count 是对的（那是个比例）。 */
+    var totalMin = Math.round(
+      ((session.elapsed_s || 0) + (session.seconds_to_close || 0)) / 60
+    );
     setText("st-session", (session.expiry || "--") + " · " +
-      Math.round((session.elapsed_s || 0) / 60) + "/" +
-      Math.round((session.bucket_count || 0)) + " 分");
+      Math.round((session.elapsed_s || 0) / 60) + "/" + totalMin + " 分");
 
     var sub = (health.subscribed || 0) + "/" + (health.subscription_cap || 0);
     var age = health.last_tick_age_s;
@@ -111,17 +203,22 @@
   }
 
   function renderHeatmap(frame) {
-    var info = heatmapPanel.update(frame.heatmap, frame.spot);
+    syncPeriods(frame.heatmap);
+
+    var view = displayBlock(frame.heatmap);
+    var info = heatmapPanel.update(view, frame.spot);
     if (info) {
       setText("heatmap-meta", info.rows + " 档 × " + info.cols + " 桶 · " +
-        info.cells.toLocaleString() + " 格 · 色标 ±" + info.vmax.toFixed(2));
+        info.cells.toLocaleString() + " 格 · 色标 ±" + info.vmax.toFixed(2) +
+        " · " + currentPeriodLabel());
     }
-    setText("heatmap-foot", movers(frame));
+    setText("heatmap-foot", movers(view));
   }
 
-  /* 取最新一列里绝对变动最大的几档，作为"雷达"读数 */
-  function movers(frame) {
-    var block = frame.heatmap;
+  /* 取最新一列里绝对变动最大的几档，作为"雷达"读数。
+     传入的是**显示矩阵**，所以"本桶"就是用户当前选中周期的那一桶 ——
+     换周期时这个读数会跟着变，因此把周期写进标题，免得两行读数对不上。 */
+  function movers(block) {
     if (!block || !block.values || !block.values.length) { return ""; }
 
     var lastCol = block.labels.length - 1;
@@ -138,7 +235,7 @@
     var parts = rows.slice(0, 5).map(function (r) {
       return r.strike + r.right + " " + signed(r.value, CFG.decimals.impulse);
     });
-    return "本桶冲量 Top: " + parts.join("   ");
+    return "本桶(" + currentPeriodLabel() + ")冲量 Top: " + parts.join("   ");
   }
 
   function renderSkew(frame) {
@@ -152,6 +249,11 @@
   }
 
   function render(frame) {
+    /* 热力图数值块在线上是「位图 + 定标整数」，先还原成 block.values 再往下走。
+       放在这里而不是 ws_client 里，是因为上面已经做过"只留最新一帧"的背压，
+       被丢掉的帧不必白解一遍。解包是幂等的，换周期重画时不会重复劳动。 */
+    frame = global.SWATCH_MATRIX.decodeFrame(frame);
+
     state.frames += 1;
     state.lastFrame = frame;
     state.lastFrameAt = Date.now();

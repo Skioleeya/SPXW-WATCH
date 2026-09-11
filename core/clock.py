@@ -100,8 +100,24 @@ class SessionClock:
     # 时间源
     # ------------------------------------------------------------------ #
 
-    def now_ts(self) -> float:
+    def now(self) -> float:
+        """
+        当前时间（epoch 秒）——**实现 ``ClockPort``**。
+
+        本类会被当作时间源直接注入 L2 / L3（``TickStore``、``MarketState``、
+        ``FeatureEngine`` 拿到的都是 ``SessionClock``）。因此它必须和
+        ``WallClock`` 一样满足 ``contracts.ports.ClockPort``，否则那些模块里
+        ``clock.now()`` 的调用会在运行期炸成 ``AttributeError``。
+
+        这个接口曾经缺失，后果是 ``TickStore.prune()`` 每 10 秒抛一次异常、
+        被维护循环的 ``except`` 吞成一行警告 —— 表现是"裁剪从未真正发生"，
+        而任何探针都看不见。回归见 ``tools/check_clock_protocol.py``。
+        """
         return float(self._clock.now())
+
+    def now_ts(self) -> float:
+        """``now()`` 的别名，保留给既有的 ``now_ts()`` 调用点。"""
+        return self.now()
 
     def now_dt(self) -> datetime:
         return datetime.fromtimestamp(self.now_ts(), self._tz)
@@ -186,8 +202,20 @@ class SessionClock:
         return min(max(raw, 0), self.bucket_count() - 1)
 
     def bucket_label(self, index: int) -> str:
-        minute = self._open_min + int(index) * self._bucket_s // 60
-        return fmt_hm(minute)
+        """
+        某个桶的横轴标签。
+
+        桶宽是整分钟时输出 ``HH:MM``；**不是**整分钟时（例如基线 30 秒）必须
+        带上秒，否则相邻两个桶会打印出同一个 ``HH:MM`` —— 前端横轴看起来是
+        重复标签，聚合后的分组起点也无从分辨。整分钟这一支刻意保持原样，
+        不把 ``:00`` 塞进既有视图。
+        """
+        total_s = (self._open_min * 60 + int(index) * self._bucket_s) % (24 * 3600)
+        hour, rest = divmod(total_s, 3600)
+        minute, second = divmod(rest, 60)
+        if self._bucket_s % 60 == 0:
+            return f"{hour:02d}:{minute:02d}"
+        return f"{hour:02d}:{minute:02d}:{second:02d}"
 
     def bucket_labels(self) -> list[str]:
         return [self.bucket_label(i) for i in range(self.bucket_count())]

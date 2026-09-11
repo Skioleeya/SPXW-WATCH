@@ -1,5 +1,5 @@
 {
-  "_comment": "L2 状态层 — 环形缓冲区容量与裁剪节奏。buffer_seconds 决定动能回看的最大深度。",
+  "_comment": "L2 状态层 — 环形缓冲区容量与裁剪节奏。buffer_seconds 决定动能回看的最大深度；prune_interval_s 是本层自己的裁剪节奏，由 L6 的维护循环按它驱动（组装层不替本层选参数）。",
   "option_buffer_seconds": 900,
   "option_buffer_max_points": 4000,
   "spot_buffer_seconds": 900,

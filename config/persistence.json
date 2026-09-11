@@ -1,0 +1,11 @@
+{
+  "_comment": "L3 旁路持久化 —— 异步 SQLite 热备。开关、路径、队列大小。本配置独立，不引用其它配置文件。",
+  "enabled": true,
+  "_enabled_comment": "总开关。false 时完全不创建/连接 SQLite，行为与无前 persistence 完全一致。",
+  "db_path": "data/session.db",
+  "_db_path_comment": "SQLite 文件路径，相对项目根目录。data/ 目录在 .gitignore 中，不会污染版本控制。",
+  "queue_maxsize": 100,
+  "_queue_maxsize_comment": "内存队列上限。队列满时新桶被丢弃（不阻塞行情主循环），丢桶数在日志中可见。",
+  "write_interval_s": 1.0,
+  "_write_interval_s_comment": "后台 worker 睡眠间隔。worker 每次醒来后批量消费队列中所有待写桶（不是逐条 sleep）。"
+}

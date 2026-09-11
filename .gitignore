@@ -1,6 +1,10 @@
 # 运行时输出
-# logs/ 由 core/logging_setup.py 自动创建（path.parent.mkdir），无需入库
+# logs/ 由 core/logging_setup.py 自动创建，data/ 由 persistence.py 自动创建，均无需入库
 logs/
+data/
+
+# WorkBuddy 本地记忆与日志
+.workbuddy-ai/
 
 # Python
 __pycache__/

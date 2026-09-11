@@ -64,7 +64,7 @@ class WsBroadcaster:
 
     __slots__ = (
         "_source", "_path", "_queue_size", "_max_clients",
-        "_heartbeat", "_send_timeout", "_clients",
+        "_heartbeat", "_send_timeout", "_compress", "_clients",
         "_total_dropped", "_total_sent",
     )
 
@@ -80,6 +80,9 @@ class WsBroadcaster:
         )
         self._send_timeout = loader.as_float(
             transport_cfg, "send_timeout_s", module=_CFG
+        )
+        self._compress = loader.as_bool(
+            transport_cfg, "ws_compression", module=_CFG
         )
         self._clients: set[_Client] = set()
         self._total_dropped = 0
@@ -100,7 +103,14 @@ class WsBroadcaster:
                 text=f"已达最大客户端数 {self._max_clients}"
             )
 
-        ws = web.WebSocketResponse(heartbeat=self._heartbeat, max_msg_size=0)
+        # compress 显式传参，不吃 aiohttp 的库默认值 —— 这一项开关一次就是
+        # 4.41GB/日 ↔ 0.40GB/日（实测 11 倍）。靠库默认值意味着：库升级改了默认、
+        # 或有人顺手写成 compress=False，线上流量会静默翻十倍而没有任何检查会红。
+        ws = web.WebSocketResponse(
+            heartbeat=self._heartbeat,
+            max_msg_size=0,
+            compress=self._compress,
+        )
         await ws.prepare(request)
 
         client = _Client(

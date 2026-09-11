@@ -17,7 +17,7 @@ L3 — 行权价窗口与 OTM 选边。
 
 from __future__ import annotations
 
-from typing import Iterable, Sequence
+from typing import Iterable
 
 from config import loader
 from contracts.enums import OptionRight
@@ -96,27 +96,6 @@ class StrikeWindow:
     # ------------------------------------------------------------------ #
     # ATM 定位
     # ------------------------------------------------------------------ #
-
-    @staticmethod
-    def atm_bracket(
-        strikes: Sequence[float], spot: float
-    ) -> tuple[float, float] | None:
-        """
-        返回夹住现价的相邻两档行权价 ``(lower, upper)``。
-
-        现价恰好落在某档上时返回 ``(s, s)``；行权价不足两个时返回 ``None``。
-        """
-        ordered = sorted({float(s) for s in strikes})
-        if len(ordered) < 2:
-            return None
-
-        for lower, upper in zip(ordered, ordered[1:]):
-            if lower <= spot <= upper:
-                return (lower, upper)
-
-        if spot < ordered[0]:
-            return (ordered[0], ordered[1])
-        return (ordered[-2], ordered[-1])
 
     @staticmethod
     def nearest_strike(strikes: Iterable[float], spot: float) -> float | None:

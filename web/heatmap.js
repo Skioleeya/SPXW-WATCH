@@ -174,7 +174,7 @@
         progressive: 6000,
         progressiveThreshold: 4000,
         animation: false,
-        itemStyle: { borderWidth: 0 },
+        itemStyle: { borderWidth: 1, borderColor: CFG.theme.grid },
         emphasis: {
           itemStyle: { borderColor: "#ffffff", borderWidth: 1 }
         },

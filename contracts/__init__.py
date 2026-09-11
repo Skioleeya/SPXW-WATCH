@@ -46,6 +46,7 @@ from contracts.tick import (
     OptionRef,
     OptionTick,
     QuoteTick,
+    RateLimitStatus,
     SpotTick,
     StatusEvent,
 )
@@ -71,6 +72,7 @@ __all__ = [
     "PayloadSource",
     "Quality",
     "QuoteTick",
+    "RateLimitStatus",
     "SessionBlock",
     "SkewPoint",
     "SpotTick",

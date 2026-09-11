@@ -41,6 +41,7 @@ from features.skew_engine import SkewEngine
 from features.strike_window import StrikeWindow
 
 _FEAT = "features"
+_SERIAL = "serialization"
 
 
 class FeatureEngine:
@@ -49,9 +50,17 @@ class FeatureEngine:
     __slots__ = (
         "_store", "_clock", "_window", "_glitch",
         "_impulse", "_heatmap", "_skew", "_each_side", "_session_key",
+        "_feed_gap_s", "_feed_gap_open", "_writer",
     )
 
-    def __init__(self, store, clock, feat_cfg: dict, serial_cfg: dict) -> None:
+    def __init__(
+        self,
+        store,
+        clock,
+        feat_cfg: dict,
+        serial_cfg: dict,
+        writer: Any | None = None,
+    ) -> None:
         self._store = store
         self._clock = clock
         self._window = StrikeWindow(feat_cfg)
@@ -62,8 +71,16 @@ class FeatureEngine:
         self._each_side = loader.as_int(
             feat_cfg, "heatmap_rows_each_side", module=_FEAT
         )
+        # 断流判定阈值。它是热力图的形状参数（与 heatmap_max_buckets 同族），
+        # 消费方 HeatmapEngine 也读 serialization.json，所以放那里而不是这里。
+        self._feed_gap_s = loader.as_float(
+            serial_cfg, "heatmap_feed_gap_s", module=_SERIAL
+        )
+        self._feed_gap_open = False
         # 当前累积数据归属的会话。首次 compute 时落定，之后只在翻篇时变。
         self._session_key: str | None = None
+        # 旁路持久化写入器（可选）。不为 None 时每 compute 一轮后把当前桶入队。
+        self._writer = writer
 
     # ------------------------------------------------------------------ #
     # 主流程
@@ -74,6 +91,9 @@ class FeatureEngine:
         # 墙钟会落在开盘之前，分桶全部钳到第 0 桶，热力图就永远差不出第一列。
         moment = now if now is not None else self._clock.now_ts()
         self._sync_session()
+        # 断流恢复的那一刻必须留白，否则整段断线的变化会被压进单个桶 ——
+        # 画出一堵与真冲量无法区分的假墙（见 HeatmapEngine 模块 docstring）。
+        feed_gap_break = self._note_feed_gap(moment)
         spot = self._store.spot()
 
         if spot <= 0:
@@ -87,7 +107,8 @@ class FeatureEngine:
         if not cells:
             return FeatureBundle(ts=moment, spot=spot)
 
-        self._heatmap.observe(cells, moment)
+        self._heatmap.observe(cells, moment, break_now=feed_gap_break)
+        self._persist_current_bucket(moment)
         matrix = self._heatmap.build(rows, spot, moment)
 
         skew_point = self._skew.compute(cells, spot, moment)
@@ -110,6 +131,37 @@ class FeatureEngine:
     # ------------------------------------------------------------------ #
     # 各步骤
     # ------------------------------------------------------------------ #
+
+    def _note_feed_gap(self, moment: float) -> bool:
+        """
+        检测"行情断流后又恢复"的那一刻，返回本桶是否要打断代标记。
+
+        为什么用**全局** tick 年龄而不是逐档年龄
+        ----------------------------------------
+        断流是喂价层的事件，所有行权价同时停。而单个远虚值档本来就可能几分钟
+        没有成交 —— 用逐档年龄判会把它误判成断流，热力图上凭空多出一堆空白。
+        全局年龄只在整个喂价停摆时才变大，不误伤安静的档位。
+
+        为什么不能只靠毛刺过滤器
+        ------------------------
+        断线期间最后一笔 tick 会一直是 ``STALE``，而 ``STALE`` 属于
+        ``TRUSTWORTHY_QUALITIES``（会话内前向填充语义）⇒ 它仍被逐桶写进矩阵，
+        断线看起来只是"IV 没动"。重连后第一笔新 IV 一进来就与断线前的值做差，
+        整段变化被压进单个桶。而毛刺过滤器的两道幅度闸门
+        （``glitch_max_jump_vol_points``、MAD）是为**逐笔错价**标定的，且断线
+        超过 tick 缓冲时间窗（``state.option_buffer_seconds``）后旧 tick 被裁光、
+        两道闸门都会因"样本不足"返回 False —— 拦不住这件事。
+
+        返回值只在**跨越阈值的那一次恢复**时为真，不会持续为真。
+        """
+        age = self._store.last_tick_age_s(moment)
+        if age is not None and age > self._feed_gap_s:
+            self._feed_gap_open = True
+            return False
+        if self._feed_gap_open:
+            self._feed_gap_open = False
+            return True
+        return False
 
     def _session_refs(self) -> tuple[OptionRef, ...]:
         """
@@ -231,6 +283,21 @@ class FeatureEngine:
             total += float(tick.opt_price)
         return total
 
+    def _persist_current_bucket(self, now: float) -> None:
+        """
+        把当前桶的原始 IV 丢进旁路持久化队列。
+
+        每次 ``compute()`` 后调用；同一桶被多次覆盖写入是安全的
+        （SQLite ``INSERT OR REPLACE`` 保证幂等）。
+        """
+        writer = self._writer
+        if writer is None:
+            return
+        idx = self._clock.bucket_index_of_ts(now)
+        ivs = self._heatmap.dump_bucket(idx)
+        if ivs:
+            writer.enqueue(idx, ivs, self._heatmap.is_break(idx))
+
     # ------------------------------------------------------------------ #
     # 生命周期
     # ------------------------------------------------------------------ #
@@ -271,6 +338,10 @@ class FeatureEngine:
         """清空所有按会话累积的状态。由 ``_sync_session()`` 在翻篇时触发。"""
         self._heatmap.reset()
         self._skew.reset()
+
+    def restore_heatmap(self, columns: list[dict]) -> None:
+        """从持久化存储恢复热力图原始 IV 桶。供 L6 组装层在启动时调用。"""
+        self._heatmap.load_snapshot(columns)
 
     def windows(self) -> tuple[int, ...]:
         return self._impulse.windows

@@ -165,6 +165,19 @@ def main(argv: list[str] | None = None) -> int:
     spot = _text(dom, "ro-spot") or ""
     passed &= _check("顶栏现价已填充", spot not in ("", "--"), spot)
 
+    # 7) 时间周期切换：按钮由 JS 生成，meta 里的周期标签必须与选中态一致。
+    #    一条检查同时覆盖三种坏法 —— 按钮没生成、选中态没落到渲染上、meta 没接周期。
+    #    这三件事都不会让任何探针变红，只会让面板安静地画错粒度。
+    buttons = re.findall(r'<button[^>]*class="([^"]*)"[^>]*>([^<]*)</button>', dom)
+    labels = [text.strip() for _, text in buttons]
+    chosen = [text.strip() for cls, text in buttons if cls == "on"]
+    passed &= _check("周期按钮已生成（≥ 2 档）", len(buttons) >= 2,
+                     "、".join(labels) or "一个都没有")
+    passed &= _check("有且仅有一个周期处于选中态", len(chosen) == 1,
+                     "选中: " + "、".join(chosen) if chosen else "无选中态")
+    passed &= _check("热力图 meta 带上当前周期", bool(chosen) and chosen[0] in meta,
+                     meta or "meta 为空")
+
     print()
     print("=" * 72)
     print(f"{GREEN}结果: 全部通过{RESET}" if passed

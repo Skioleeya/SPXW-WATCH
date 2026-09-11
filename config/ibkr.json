@@ -1,0 +1,22 @@
+{
+  "_comment": "L1 采集层 — IBKR 连接与行情通道参数。禁止引用其他配置文件。端口对照：TWS 实盘 7496 / TWS 模拟 7497；IB Gateway 实盘 4001 / IB Gateway 模拟 4002。默认值 7497 指向 TWS 模拟盘——若你跑的是 IB Gateway，必须改成 4001 或 4002，否则连不上。",
+  "host": "127.0.0.1",
+  "port": 7497,
+  "client_id": 71,
+  "connect_timeout_s": 20.0,
+  "handshake_timeout_s": 15.0,
+  "reconnect_initial_backoff_s": 2.0,
+  "reconnect_max_backoff_s": 60.0,
+  "reconnect_max_attempts": 0,
+  "generic_tick_list": "106",
+  "market_data_type": 3,
+  "spot_ready_timeout_s": 20.0,
+  "chain_ready_timeout_s": 20.0,
+  "chain_settle_s": 1.0,
+  "qualify_batch_size": 40,
+  "qualify_batch_interval_s": 0.3,
+  "max_iv": 3.0,
+  "min_iv": 0.01,
+  "max_underlying_age_s": 10.0,
+  "use_model_greeks": true
+}

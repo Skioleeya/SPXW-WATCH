@@ -1,0 +1,9 @@
+{
+  "_comment": "L0 日志配置。由 app 层读取后注入 core.logging_setup，core 自身不读配置。",
+  "level": "INFO",
+  "format": "%(asctime)s %(levelname)-7s %(name)-30s %(message)s",
+  "date_format": "%H:%M:%S",
+  "console": true,
+  "file": "logs/spxw_swatch.log",
+  "file_level": "DEBUG"
+}

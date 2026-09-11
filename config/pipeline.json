@@ -1,0 +1,9 @@
+{
+  "_comment": "L6 组装层 — 流水线节奏与生命周期。compute_interval_ms 决定特征计算频率，应不大于 transport.push_interval_ms。",
+  "compute_interval_ms": 400,
+  "prune_interval_s": 10.0,
+  "log_stats_every_s": 60.0,
+  "startup_grace_s": 1.0,
+  "shutdown_timeout_s": 10.0,
+  "reset_feature_state_on_reconnect": false
+}

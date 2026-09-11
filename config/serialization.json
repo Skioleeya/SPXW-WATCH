@@ -1,0 +1,13 @@
+{
+  "_comment": "L4 序列化层 — 推送帧的形状与精度。bucket 决定热力图横轴粒度；color_* 决定色标量程的取法（分位截断 + 下限保护）。",
+  "heatmap_bucket_seconds": 60,
+  "heatmap_max_buckets": 390,
+  "heatmap_min_buckets": 1,
+  "heatmap_color_quantile": 0.95,
+  "heatmap_color_floor_vol_points": 0.5,
+  "skew_series_max_points": 390,
+  "iv_decimals": 4,
+  "impulse_decimals": 3,
+  "price_decimals": 2,
+  "include_raw_iv": true
+}

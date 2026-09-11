@@ -1,0 +1,18 @@
+{
+  "_comment": "L3 特征层 — IV 冲量、毛刺过滤、25Δ Skew 定位。全部为纯计算参数，不涉及连接。",
+  "impulse_windows_seconds": [60, 300],
+  "impulse_min_span_ratio": 0.6,
+  "impulse_min_abs_iv": 0.01,
+  "glitch_min_abs_option_price": 0.05,
+  "glitch_max_iv": 3.0,
+  "glitch_min_iv": 0.01,
+  "glitch_max_tick_age_s": 20.0,
+  "glitch_mad_window": 9,
+  "glitch_mad_multiplier": 4.0,
+  "glitch_max_jump_vol_points": 25.0,
+  "skew_target_delta": 0.25,
+  "skew_delta_tolerance": 0.12,
+  "skew_min_points": 3,
+  "heatmap_rows_each_side": 18,
+  "atm_max_bracket_strikes": 1
+}

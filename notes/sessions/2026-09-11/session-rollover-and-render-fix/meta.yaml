@@ -1,0 +1,34 @@
+task_id: session-rollover-and-render-fix
+date: 2026-09-11
+status: complete
+scope: >
+  L1 采集层离线覆盖；前端真实渲染验证与修复；跨会话数据污染修复；
+  三项新回归；README 同步。
+change_id: N/A
+proposal_path: N/A
+tasks_path: N/A
+
+deliverables:
+  - tools/check_tick_router.py
+  - tools/check_session_rollover.py
+  - tools/check_web_contract.py
+  - tools/check_page_render.py
+  - web/skew.js
+  - features/feature_engine.py
+  - web/ws_client.js
+  - README.md
+
+validation_commands:
+  - "python run.py --check"
+  - "python tools/smoke_test.py"
+  - "python tools/check_side_flip.py"
+  - "python tools/check_subscription_qualify.py"
+  - "python tools/check_tick_router.py"
+  - "python tools/check_session_rollover.py"
+  - "python tools/check_web_contract.py"
+  - "python tools/check_page_render.py"
+  - "python tools/ws_probe.py --frames 6"
+
+notes:
+  - check_page_render.py 依赖本机 Chrome；找不到时跳过并返回 0。
+  - ws_probe.py / check_web_contract.py / check_page_render.py 需要服务已在跑。

@@ -1,0 +1,10 @@
+{
+  "_comment": "L2 状态层 — 环形缓冲区容量与裁剪节奏。buffer_seconds 决定动能回看的最大深度。",
+  "option_buffer_seconds": 900,
+  "option_buffer_max_points": 4000,
+  "spot_buffer_seconds": 900,
+  "spot_buffer_max_points": 6000,
+  "prune_interval_s": 10.0,
+  "health_stale_tick_s": 15.0,
+  "health_degraded_tick_s": 45.0
+}

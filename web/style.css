@@ -1,0 +1,228 @@
+/* SPXW SWATCH — 深色主题
+ * ------------------------------------------------------------------
+ * 配色遵循"信息优先"：背景压到接近纯黑，网格与边框只用一级灰度差，
+ * 把全部色彩预算留给热力图与 Skew 曲线，避免长时间盯盘时视觉疲劳。
+ * ------------------------------------------------------------------ */
+
+:root {
+  --bg:        #0a0c0f;
+  --panel:     #11151a;
+  --panel-2:   #161b22;
+  --border:    #232b34;
+  --border-2:  #2e3844;
+  --text:      #dbe3ec;
+  --text-dim:  #8b97a5;
+  --text-faint:#5d6874;
+  --hot:       #ff5a5a;
+  --cool:      #4ea8ff;
+  --accent:    #00e5ff;
+  --warn:      #ffb020;
+  --ok:        #2fd07a;
+  --mono: "JetBrains Mono", "SF Mono", "Cascadia Mono", Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, "Segoe UI", "Microsoft YaHei", Roboto, sans-serif;
+  font-size: 13px;
+  overflow: hidden;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+}
+
+/* ------------------------------------------------------------------ */
+/* 顶栏                                                                */
+/* ------------------------------------------------------------------ */
+
+#topbar {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  padding: 8px 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+
+.brand { display: flex; flex-direction: column; gap: 2px; min-width: 190px; }
+.brand-name {
+  font-family: var(--mono);
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 1.6px;
+  color: var(--accent);
+}
+.brand-sub { font-size: 10px; color: var(--text-faint); letter-spacing: .4px; }
+
+.readouts {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  flex: 1 1 auto;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.readouts::-webkit-scrollbar { display: none; }
+
+.readout {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 4px 12px;
+  min-width: 92px;
+  border-left: 1px solid var(--border);
+}
+.readout label {
+  font-size: 10px;
+  color: var(--text-faint);
+  letter-spacing: .5px;
+  white-space: nowrap;
+}
+.readout b {
+  font-family: var(--mono);
+  font-size: 14px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.readout.wide { min-width: 128px; }
+.readout b.hero { font-size: 19px; }
+.readout b.cool { color: var(--cool); }
+.readout b.hot  { color: var(--hot); }
+.readout b.flat { color: var(--text); }
+
+.status {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 210px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  text-align: right;
+}
+.status-row { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
+.status-row.muted { color: var(--text-dim); }
+
+.dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  flex: 0 0 auto;
+}
+.dot.off    { background: #4a525c; }
+.dot.on     { background: var(--ok);   box-shadow: 0 0 6px var(--ok); }
+.dot.warn   { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
+.dot.err    { background: var(--hot);  box-shadow: 0 0 6px var(--hot); }
+
+/* ------------------------------------------------------------------ */
+/* 会话进度条                                                          */
+/* ------------------------------------------------------------------ */
+
+#sessionbar {
+  height: 3px;
+  background: var(--panel-2);
+  flex: 0 0 auto;
+}
+#sessionbar-fill {
+  height: 100%;
+  width: 0;
+  background: linear-gradient(90deg, #1d6fa5, var(--accent));
+  transition: width .5s linear;
+}
+
+/* ------------------------------------------------------------------ */
+/* 主区                                                                */
+/* ------------------------------------------------------------------ */
+
+main {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+  min-height: 0;
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+#panel-heatmap { flex: 3 1 0; }
+#panel-skew    { flex: 2 1 0; }
+
+.panel-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-2);
+  flex: 0 0 auto;
+}
+.panel-head h2 {
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: .6px;
+  color: var(--text);
+}
+.panel-head .hint {
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+.panel-head .meta {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.chart { flex: 1 1 auto; min-height: 0; }
+
+.panel-foot {
+  padding: 5px 12px;
+  border-top: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--text-dim);
+  background: var(--panel-2);
+  flex: 0 0 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ------------------------------------------------------------------ */
+/* 底栏                                                                */
+/* ------------------------------------------------------------------ */
+
+#statusbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 5px 14px;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--text-dim);
+  flex: 0 0 auto;
+}
+#sb-msg { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#sb-right { white-space: nowrap; color: var(--text-faint); }

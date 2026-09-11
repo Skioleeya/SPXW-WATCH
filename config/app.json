@@ -1,0 +1,14 @@
+{
+  "_comment": "L0 标的与会话定义。仅本文件被 app 层读取，其他配置文件不得引用本文件。",
+  "symbol": "SPX",
+  "underlying_sec_type": "IND",
+  "underlying_exchange": "CBOE",
+  "currency": "USD",
+  "option_trading_class": "SPXW",
+  "option_exchange": "SMART",
+  "option_multiplier": "100",
+  "zero_dte_only": true,
+  "timezone": "America/New_York",
+  "session_open": "09:30",
+  "session_close": "16:00"
+}

@@ -1,0 +1,15 @@
+{
+  "_comment": "L5 传输层 — HTTP 静态页与 WebSocket 同端口。client_queue_size=1 表示慢客户端直接丢帧（fail-closed）。",
+  "host": "127.0.0.1",
+  "http_port": 8060,
+  "ws_path": "/ws",
+  "health_path": "/health",
+  "static_dir": "web",
+  "http_index_file": "index.html",
+  "push_interval_ms": 400,
+  "client_queue_size": 1,
+  "max_clients": 16,
+  "send_timeout_s": 1.0,
+  "heartbeat_interval_s": 20.0,
+  "access_log": false
+}

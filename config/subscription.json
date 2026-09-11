@@ -1,0 +1,13 @@
+{
+  "_comment": "L1 采集层 — 动态 ATM 窗口与订阅限额。IBKR 硬上限 100 条，留出余量防 Error 300。",
+  "num_strikes_each_side": 18,
+  "max_total_subscriptions": 92,
+  "min_request_interval_s": 0.05,
+  "reconcile_interval_s": 5.0,
+  "recenter_trigger_strikes": 3.0,
+  "error300_backoff_s": 30.0,
+  "error300_backoff_multiplier": 2.0,
+  "error300_max_backoff_s": 300.0,
+  "error300_max_retries": 6,
+  "cancel_stale_before_add": true
+}

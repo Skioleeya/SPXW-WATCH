@@ -191,6 +191,11 @@ class Pipeline:
             self._engine.restore_heatmap(recovered)
             self._log.info("已从 SQLite 恢复 %d 个历史桶", len(recovered))
 
+        recovered_skew = self._writer.recover_skew()
+        if recovered_skew:
+            self._engine.restore_skew(recovered_skew)
+            self._log.info("已从 SQLite 恢复 %d 个历史 Skew 点", len(recovered_skew))
+
         self._feed.set_sink(self._store)
         self._running = True
 

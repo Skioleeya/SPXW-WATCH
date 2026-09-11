@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Any
 
 from config import loader
+from contracts.enums import Quality
+from contracts.feature import SkewPoint
 
 _PERSIST = "persistence"
 
@@ -108,9 +110,24 @@ class AsyncPersistenceWriter:
         if not self._enabled:
             return
         payload = {
+            "_kind": "heatmap",
             "bucket_index": int(bucket_index),
             "ivs": {str(k): float(v) for k, v in ivs.items()},
             "break": bool(is_break),
+        }
+        try:
+            self._queue.put_nowait(payload)
+        except asyncio.QueueFull:
+            self._dropped += 1
+
+    def enqueue_skew(self, bucket_index: int, point: SkewPoint) -> None:
+        """把当前桶的 Skew 点丢进写入队列。"""
+        if not self._enabled:
+            return
+        payload = {
+            "_kind": "skew",
+            "bucket_index": int(bucket_index),
+            "skew": self._skew_to_dict(point),
         }
         try:
             self._queue.put_nowait(payload)
@@ -168,6 +185,34 @@ class AsyncPersistenceWriter:
             })
         return out
 
+    def recover_skew(self) -> list[SkewPoint]:
+        """读取 SQLite 中全部已存 Skew 点，返回给 SkewEngine 恢复。"""
+        if not self._enabled or not self._db_path.exists():
+            return []
+        try:
+            if self._conn is not None:
+                cur = self._conn.execute(
+                    "SELECT bucket_index, skew_json FROM skew_points ORDER BY bucket_index"
+                )
+                rows = cur.fetchall()
+            else:
+                with sqlite3.connect(str(self._db_path), timeout=5.0) as conn:
+                    cur = conn.execute(
+                        "SELECT bucket_index, skew_json FROM skew_points ORDER BY bucket_index"
+                    )
+                    rows = cur.fetchall()
+        except sqlite3.Error:
+            return []
+
+        out: list[SkewPoint] = []
+        for _idx, skew_json in rows:
+            try:
+                d = json.loads(skew_json)
+            except json.JSONDecodeError:
+                continue
+            out.append(self._skew_from_dict(d))
+        return out
+
     # ------------------------------------------------------------------ #
     # 后台 worker
     # ------------------------------------------------------------------ #
@@ -191,15 +236,26 @@ class AsyncPersistenceWriter:
             return
         try:
             for item in batch:
-                self._conn.execute(
-                    "INSERT OR REPLACE INTO heatmap_buckets "
-                    "(bucket_index, ivs_json, is_break) VALUES (?, ?, ?)",
-                    (
-                        item["bucket_index"],
-                        json.dumps(item["ivs"], separators=(",", ":")),
-                        int(item["break"]),
-                    ),
-                )
+                kind = item.get("_kind", "heatmap")
+                if kind == "heatmap":
+                    self._conn.execute(
+                        "INSERT OR REPLACE INTO heatmap_buckets "
+                        "(bucket_index, ivs_json, is_break) VALUES (?, ?, ?)",
+                        (
+                            item["bucket_index"],
+                            json.dumps(item["ivs"], separators=(",", ":")),
+                            int(item["break"]),
+                        ),
+                    )
+                elif kind == "skew":
+                    self._conn.execute(
+                        "INSERT OR REPLACE INTO skew_points "
+                        "(bucket_index, skew_json) VALUES (?, ?)",
+                        (
+                            item["bucket_index"],
+                            json.dumps(item["skew"], separators=(",", ":")),
+                        ),
+                    )
             self._conn.commit()
         except sqlite3.Error:
             pass  # 旁路：写失败不中断主流程
@@ -214,4 +270,44 @@ class AsyncPersistenceWriter:
             "is_break INTEGER NOT NULL DEFAULT 0"
             ")"
         )
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS skew_points ("
+            "bucket_index INTEGER PRIMARY KEY, "
+            "skew_json TEXT NOT NULL"
+            ")"
+        )
         self._conn.commit()
+
+    @staticmethod
+    def _skew_to_dict(point: SkewPoint) -> dict:
+        return {
+            "ts": float(point.ts),
+            "spot": float(point.spot),
+            "atm_iv": point.atm_iv,
+            "put25_iv": point.put25_iv,
+            "call25_iv": point.call25_iv,
+            "put25_strike": point.put25_strike,
+            "call25_strike": point.call25_strike,
+            "put25_delta": point.put25_delta,
+            "call25_delta": point.call25_delta,
+            "skew_25d_vol_points": point.skew_25d_vol_points,
+            "butterfly_vol_points": point.butterfly_vol_points,
+            "quality": str(point.quality),
+        }
+
+    @staticmethod
+    def _skew_from_dict(d: dict) -> SkewPoint:
+        return SkewPoint(
+            ts=float(d["ts"]),
+            spot=float(d["spot"]),
+            atm_iv=d.get("atm_iv"),
+            put25_iv=d.get("put25_iv"),
+            call25_iv=d.get("call25_iv"),
+            put25_strike=d.get("put25_strike"),
+            call25_strike=d.get("call25_strike"),
+            put25_delta=d.get("put25_delta"),
+            call25_delta=d.get("call25_delta"),
+            skew_25d_vol_points=d.get("skew_25d_vol_points"),
+            butterfly_vol_points=d.get("butterfly_vol_points"),
+            quality=Quality(d.get("quality", "missing")),
+        )

@@ -142,6 +142,14 @@ class SkewEngine:
         self._series.clear()
         self._latest = None
 
+    def load_series(self, points: Iterable[SkewPoint]) -> None:
+        """从持久化存储恢复折线序列。直接写入内部 dict，不触发裁剪。"""
+        self._series.clear()
+        for p in points:
+            idx = self._clock.bucket_index_of_ts(p.ts)
+            self._series[idx] = p
+        self._latest = max(self._series.values(), key=lambda p: p.ts) if self._series else None
+
     @property
     def target_delta(self) -> float:
         return abs(self._target_delta)

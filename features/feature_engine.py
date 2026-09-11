@@ -108,10 +108,10 @@ class FeatureEngine:
             return FeatureBundle(ts=moment, spot=spot)
 
         self._heatmap.observe(cells, moment, break_now=feed_gap_break)
-        self._persist_current_bucket(moment)
         matrix = self._heatmap.build(rows, spot, moment)
 
         skew_point = self._skew.compute(cells, spot, moment)
+        self._persist_current_bucket(moment, skew_point)
         atm = self._build_atm(cells, spot, skew_point, moment)
 
         ok = sum(1 for c in cells if c.quality in TRUSTWORTHY_QUALITIES)
@@ -283,9 +283,9 @@ class FeatureEngine:
             total += float(tick.opt_price)
         return total
 
-    def _persist_current_bucket(self, now: float) -> None:
+    def _persist_current_bucket(self, now: float, skew_point=None) -> None:
         """
-        把当前桶的原始 IV 丢进旁路持久化队列。
+        把当前桶的原始 IV 与 Skew 点丢进旁路持久化队列。
 
         每次 ``compute()`` 后调用；同一桶被多次覆盖写入是安全的
         （SQLite ``INSERT OR REPLACE`` 保证幂等）。
@@ -297,6 +297,8 @@ class FeatureEngine:
         ivs = self._heatmap.dump_bucket(idx)
         if ivs:
             writer.enqueue(idx, ivs, self._heatmap.is_break(idx))
+        if skew_point is not None:
+            writer.enqueue_skew(idx, skew_point)
 
     # ------------------------------------------------------------------ #
     # 生命周期
@@ -342,6 +344,10 @@ class FeatureEngine:
     def restore_heatmap(self, columns: list[dict]) -> None:
         """从持久化存储恢复热力图原始 IV 桶。供 L6 组装层在启动时调用。"""
         self._heatmap.load_snapshot(columns)
+
+    def restore_skew(self, points: list) -> None:
+        """从持久化存储恢复 Skew 折线序列。供 L6 组装层在启动时调用。"""
+        self._skew.load_series(points)
 
     def windows(self) -> tuple[int, ...]:
         return self._impulse.windows

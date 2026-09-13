@@ -7,7 +7,7 @@
   `web/heatmap.js::yAxis.inverse = true` **成对**保证（缺一即翻转）。
   实测**屏幕视觉零变化**（`SAME_AS_BEFORE: true`）；回归在
   `tools/smoke_test.py`「矩阵 strikes 降序」（含非空转证伪）。
-  改动 6 文件 + 新 session 目录，**尚未提交**（与上一会话累积 8 个 M）。
+  **已提交并推送 `7ffe882`**（24 文件，+1071/−68）；工作区干净，远端已核实。
 - Previous: 2026-09-13/cold-data-strike-order（notes/sessions/2026-09-13/cold-data-strike-order/handoff.md）
 - Previous: 2026-09-13/live-verify-and-release（notes/sessions/2026-09-13/live-verify-and-release/handoff.md）
 - Previous: 2026-09-13/notes-dedup-tiering（notes/sessions/2026-09-13/notes-dedup-tiering/handoff.md）

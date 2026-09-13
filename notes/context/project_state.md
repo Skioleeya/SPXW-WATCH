@@ -14,7 +14,8 @@ CURRENT_STATE: **spxw_swatch 已是纯实盘系统** —— 模拟盘（`simulat
 ⚠️ **实盘只验证到连通性**：2026-09-13 是周日，无当日 SPXW 到期 ⇒
 `ChainResolveError`（fail-closed 正确），**订阅与热力图出图至今未在任何
 交易日跑过**。
-⚠️ **未提交改动共 8 个文件**（两轮会话累积：冷数据键序 + 帧降序）。
+✅ **已提交并推送 `7ffe882`**（24 文件，+1071/−68）—— 含冷数据键序 + 帧降序
+两轮改动；工作区干净，远端已核实（`git ls-remote` == 本地 HEAD）。
 
 本会话完整记录见 `notes/sessions/2026-09-13/frame-strike-order-descending/`；
 上一会话见 `notes/sessions/2026-09-13/cold-data-strike-order/`（冷数据键序升序）。

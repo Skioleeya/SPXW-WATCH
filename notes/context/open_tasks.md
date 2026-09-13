@@ -4,16 +4,15 @@ Archive: notes/context/archive/open_tasks_2026-09.md
 
 ## Active
 
-- [ ] **[待 KAI 定] 硬切改动未提交** —— 工作树 18 个文件（+186 / −814）
-      加 2 个未跟踪项（`notes/`、`tools/fixtures.py`）；HEAD 仍 `3eeb55b`。
-      **是否提交并推送 `origin/main` 待 KAI 指示。**
-- [ ] **[中] 硬切后的首次实盘联通未验证** —— 模拟盘已物理删除，系统只剩实盘路径，
-      而本轮**未起 IB Gateway**。下次实盘启动应确认：`mode` 正确、72 条订阅、
-      热力图出图、`--check` 之外的真实链路。
+- [ ] **[中] 实盘首次出图未验证** —— 模拟盘已物理删除，系统只剩实盘路径。
+  2026-09-13（周日）起服务只走到 0DTE 切片即 `ChainResolveError`（fail-closed 正确，
+  无当日到期）。**下一交易日盘中**应确认：`mode` 正确、72 条订阅、热力图出图、
+  `health.rate_limit` 四要素。
 - [ ] **[中] 4 个需服务的检查未跑通** —— `check_web_contract` /
-      `check_page_render` / `check_ws_compression` / `ws_probe`，本机 8060 无服务。
-      已定位与硬切无关（`check_web_contract` §[1] DOM id 与 §[2] CFG 路径均通过，
-      只 §[3] 载荷字段需活连接）。起服务后补跑。
+  `check_page_render` / `check_ws_compression` / `ws_probe`。
+  ⚠️ 硬切后**服务无法在非交易日常驻**（无当日到期即退出）⇒ 这 4 项
+  **从此只有盘中能跑**；盘前/盘后/周末"回归全绿"永远不成立，
+  这是取舍的必然结果而非回归破坏。
 - [ ] **[中] 现价延迟** —— SPX 指数无实时权限（`marketDataType=3`），窗口居中 /
       现价标注偏约 1–3 档。出路：开通 CBOE 指数实时，或换 spot 来源
       （`OptionTick.und_price` 恒为 `None`，不可用）。
@@ -35,6 +34,13 @@ Archive: notes/context/archive/open_tasks_2026-09.md
       但**后续若有人拿它做数值断言会得到与实盘不符的结论**。
 - [ ] **ib_async 合并 tickType 13/83** —— `TickRouter.source_tick_type` 恒为 13
       （名义值），属性层无法区分实时模型与延迟模型 greeks。
+- [ ] **`git fetch` 在本环境不落地 remote-tracking ref（根因未定位）** ——
+      `git fetch` 退出 0、输出 `[new branch] main -> origin/main`、并写了
+      `.git/logs/refs/remotes/origin/main`，但 `refs/remotes/origin/main` **不存在**；
+      手动建好后**下次 fetch 又被删**。全环境**无任何 prune 配置**；
+      对照仓库 `live-volatility-surface` 正常。**不影响提交/推送**
+      （`git ls-remote` 已核实远端 = 本地 HEAD），只让 `git status -sb` 显示 `[gone]`。
+      需 KAI 在自己终端复现一次才能判定是否为工具沙箱侧现象。
 
 ## 已决策（KAI）—— 不要再当待办重提
 

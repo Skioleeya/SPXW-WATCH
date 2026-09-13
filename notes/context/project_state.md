@@ -1,16 +1,18 @@
 # Project State
 
-ACTIVE_SESSION: 2026-09-13/simulator-hard-cut
-LAST_UPDATED: 2026-09-13（硬切删除模拟盘 → 纯实盘系统；记录体系拓扑重排）
+ACTIVE_SESSION: 2026-09-13/live-verify-and-release
+LAST_UPDATED: 2026-09-13（硬切已提交并推送 `2f2794f`；实盘链路连通性已验证，出图待交易日）
 ARCHIVE: notes/context/archive/project_state_2026-09.md
 
-CURRENT_STATE: **spxw_swatch 已是纯实盘系统** —— 模拟盘（`simulator/` 4 文件
-582 行 + `config/simulator.json`）已物理删除，无特性开关、无兼容分支、无回退路径。
+CURRENT_STATE: **spxw_swatch 已是纯实盘系统，且已入库** —— 模拟盘（`simulator/`
+4 文件 582 行 + `config/simulator.json`）物理删除，无特性开关、无兼容分支、
+无回退路径；**已提交并推送 `2f2794f`（远端已核实）**，工作树干净。
 78 个 Python 文件（最长 `tools/smoke_test.py` 363 行；产品代码最长
 `acquisition/ibkr_gateway.py` 360 行）；`run.py --check` **11/11**
-（9 个模块配置 / 37 个关键键 / 137 处取键 / 9 条硬编码例外）；
-本地回归 **11/11 exit 0**；4 个需服务的检查因本机 8060 无服务未跑通
-（已定位与硬切无关）。**改动未提交**（18 文件 +186/−814，HEAD 仍 `3eeb55b`）。
+（9 个模块配置 / 37 个关键键 / 137 处取键 / 9 条硬编码例外）。
+⚠️ **实盘只验证到连通性**：2026-09-13 是周日，无当日 SPXW 到期 ⇒
+`ChainResolveError`（fail-closed 正确），**72 条订阅与热力图出图至今未在任何
+交易日跑过**。
 
 ## 2026-09-13 本轮要点
 
@@ -62,13 +64,13 @@ CURRENT_STATE: **spxw_swatch 已是纯实盘系统** —— 模拟盘（`simulat
   （`transport.json::ws_compression`）。
 - ⚠️ **JS 里 `""` 是 falsy** —— 判"字段在不在"必须用 `=== undefined`。
 
-NEXT: 3 项
-1. **[待 KAI 定] 硬切改动是否提交并推送 `origin/main`** —— 18 文件 +186/−814
-   加 2 个未跟踪项（`notes/`、`tools/fixtures.py`）。
-2. **硬切后的首次实盘联通** —— 系统现在只剩实盘路径，而本轮未起 IB Gateway。
-   应确认 `mode` 正确、72 条订阅、热力图出图。
-3. **4 个需服务的检查补跑** —— `check_web_contract` / `check_page_render` /
-   `check_ws_compression` / `ws_probe`（起 8060 后）。
+NEXT: 2 项（**都只能在交易日盘中做**）
+1. **实盘首次出图验证** —— 硬切后系统只剩实盘路径，至今未在任何交易日跑过。
+   应确认：`mode` 正确、72 条订阅、热力图出图、`health.rate_limit` 四要素。
+2. **4 个需服务的检查补跑** —— `check_web_contract` / `check_page_render` /
+   `check_ws_compression` / `ws_probe`。⚠️ 删掉模拟盘后**服务无法在非交易日常驻**
+   （无当日到期即 fail-closed 退出）⇒ 这 4 项从此**只有盘中能跑**，
+   "回归全绿"在盘前/盘后/周末永远不成立。这是取舍的必然结果，不是回归破坏。
 
 低优先（记录但不阻塞）：
 - **色板缺机械回归** —— 色值被误改没有任何检查会红。
@@ -81,5 +83,5 @@ NEXT: 3 项
 **已决策不再重提（KAI）**：限速桶读数**不上前端**；**IV 热力图 ΔIV ≈ 0 不退回中性色**
 （维持 Turbo 顺序色阶）；`notes/` 为记录落点、`memory/` 为根路由器。
 
-本会话完整记录见 `notes/sessions/2026-09-13/simulator-hard-cut/`；
-上一会话见 `notes/sessions/2026-09-11/model-greeks-landing-verified/`。
+本会话完整记录见 `notes/sessions/2026-09-13/live-verify-and-release/`；
+上一会话见 `notes/sessions/2026-09-13/simulator-hard-cut/`（硬切本体与提交内容）。

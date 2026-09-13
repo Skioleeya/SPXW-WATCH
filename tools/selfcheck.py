@@ -16,6 +16,10 @@ L6 — 架构与配置自检（编排器）。
 [9]  单一职能：模块不得承载多个职能。                       （selfcheck_duty）
 [10] 禁止硬编码：模块级字面量常量必须来自配置。             （selfcheck_hardcode）
 [11] 出站限速桶容量与 IBKR 配额（行数÷2）。                 （selfcheck_config）
+[12] 时钟协议：注入 ``TickStore`` 的时钟必须满足 ``ClockPort``，
+     且 ``prune()`` 真实裁剪（不是抛异常后被吞掉）。         （check_clock_protocol）
+[13] 联通与数据通道：若 8060 有服务则连 WS 抓帧校验结构；
+     无服务时跳过（非交易日预期）。                         （selfcheck_connectivity）
 
 检查项 [1]–[7] 直接对应项目五条硬性要求；[8] 是踩坑之后加的静态护栏，
 [9][10] 把原本只写在 README 里的第 2、3 条变成了可执行检查；
@@ -53,6 +57,8 @@ from tools.selfcheck_core import GREEN, RED, RESET  # noqa: E402
 from tools.selfcheck_duty import check_single_duty  # noqa: E402
 from tools.selfcheck_hardcode import check_hardcode  # noqa: E402
 from tools.selfcheck_slots import check_slots  # noqa: E402
+from tools.check_clock_protocol import run_clock_checks  # noqa: E402
+from tools.selfcheck_connectivity import check_connectivity  # noqa: E402
 from tools.selfcheck_structure import check_file_sizes, check_layering  # noqa: E402
 
 
@@ -77,6 +83,11 @@ def run_selfcheck() -> int:
     failures += check_slots()
     failures += check_single_duty()
     failures += check_hardcode()
+
+    print("\n[12] 时钟协议与裁剪路径")
+    failures += run_clock_checks()
+
+    failures += check_connectivity()
 
     print()
     print("=" * 72)

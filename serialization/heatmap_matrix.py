@@ -97,7 +97,7 @@ class HeatmapSerializer:
 
         flat = [cell for row in matrix.values for cell in row]
 
-        return {
+        out: dict = {
             "labels": list(matrix.bucket_labels),
             "strikes": list(matrix.strikes),
             "rights": [str(right) for right in matrix.rights],
@@ -117,3 +117,12 @@ class HeatmapSerializer:
             },
             "spot": round(float(matrix.spot), 2),
         }
+
+        # P1: volume 视觉层 —— tick 计数用同样的位图+定标整数编码，scale=1
+        if matrix.volumes:
+            vol_bm, vol_i16, vol_filled = pack(matrix.volumes, 1)
+            out["vol_bm"] = vol_bm
+            out["vol_i16"] = vol_i16
+            out["vol_filled"] = vol_filled
+
+        return out

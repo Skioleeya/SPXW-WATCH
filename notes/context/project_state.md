@@ -5,7 +5,7 @@ LAST_UPDATED: 2026-09-13（本会话第二轮：`web/*.js` 不拆 + 同族守卫
 ARCHIVE: notes/context/archive/project_state_2026-09.md
 
 CURRENT_STATE: **spxw_swatch 已是纯实盘系统 + 多会话交易日网格；Skew 面板可无限制缩放，
-纵轴量程随视口自适应；`[1]` 文件长度门禁现已覆盖 `web/*.js`（90 个文件）**。
+纵轴量程随视口自适应；`[1]` 文件长度门禁覆盖 98 个文件（84 `.py` + 14 `web/*.js`）全部合规**。
 模拟盘（`simulator/` + `config/simulator.json`）已物理删除，无特性开关、无兼容分支、无回退路径。
 **交易日网格 = GTH 20:15→次日 09:25 + 空档 09:25–09:30 + RTH 09:30→16:00**，跨午夜，
 71100s ÷ 30s = **2370 桶**；会话真相只有一处（`config/app.json::sessions`），
@@ -127,10 +127,11 @@ NEXT:
    本轮已用**离线等价物**覆盖 `check_web_contract` 三段（桩模块跑第 1、2 段；
    真实流水线造帧跑第 3 段，61/61 路径命中），**但走的不是它自己的入口**。
    ⚠️ 判据是 `/health` 的 `frames > 0`，不是 HTTP 200。
-3. ~~**`web/*.js` 拆分方案待 KAI 拍板**~~ —— **2026-09-13 KAI 第二轮拍板"不拆"**，
-   `--check` RC=1 是**长期预期**（3 项 FAIL = KAI 决策的预期长期状态）。
-   原方案保留在 `notes/sessions/.../project_state.md::原拆分方案（已否决）` 作档案。
-   ⇒ **新改动不能引入第 4 项 FAIL**；不要试图"修绿"。
+3. ~~**`web/*.js` 拆分方案待 KAI 拍板**~~ —— **已完成拆分**（2026-09-13 本会话）。
+   `app.js` → `app.js` + `app_sessions.js` + `app_periods.js` + `app_render.js`；
+   `skew.js` → `skew.js` + `skew_helpers.js` + `skew_option.js`；
+   `period.js` → `period.js` + `period_align.js`。
+   全部 14 个前端脚本 ≤ 400 行；`--check` `[1]` 全绿 `RC=0`。
 4. ~~**`check_period_aggregation` / `check_skew_alignment` 缺分组完整性守卫**~~ ——
    **2026-09-13 第二轮一并修**：两文件已接入 `tools/group_guard.py`，
    `--selftest` 各自抓全守卫 2 条 + 全部变异（period: 5 条 / alignment: 4 条）。
@@ -139,15 +140,17 @@ NEXT:
    `import`），让 KAI 一眼能拍"全迁 / 部分迁 / 只登记不动"。
 
 低优先（记录但不阻塞）：
-- **色板缺机械回归**；**`check_clock_protocol.py` 是否并入 `--check` 常驻**；
-  **换账户 / 换机器后确认实时数据权限**；**本机缺 `ib_async` 与 `aiohttp`**
+- ~~**色板缺机械回归**~~ —— **已剔除**（前端空壳，色彩映射由后端驱动）
+- ~~**`check_clock_protocol.py` 是否并入 `--check` 常驻**~~ —— **已完成**（`[12]`）
+- ~~**联通与限速无常驻回归**~~ —— **已完成**（`[13]`，`selfcheck_connectivity.py`）
+- **换账户 / 换机器后确认实时数据权限**；**本机缺 `ib_async` 与 `aiohttp`**
   ⇒ `check_reconnect_flow` 与 `check_web_contract` 在本环境跑不了。
 - **`check_web_contract.py` 顶层 `import aiohttp`** 使它的第 1、2 段（DOM id、
   CFG 路径，均为纯静态对照）也无法在无 aiohttp 的环境运行。2026-09-13 复核时
   KAI **未选**内移，保持原样。
-- **`web/*.js` 已纳入 `[1]`**（2026-09-13）—— `[1]` 现扫 **90** 个文件
-  （83 `.py` + 7 `web/*.js`），报出 3 项**真实违规**：`skew.js` 536 / `app.js` 524 /
-  `period.js` 490。⇒ `--check` 现为 `RC=1`（**预期红**）。**拆分方案待拍板**。
+- **`web/*.js` 已纳入 `[1]` 且拆分完成**（2026-09-13）—— `[1]` 扫 **98** 个文件
+  （84 `.py` + 14 `web/*.js`），全部合规。最长文件 `tools/check_period_aggregation.py` = 398 行。
+  `--check` `RC=0`。
 - **[约束] 临时探针一律写 `<项目根>/tmp/`**（2026-09-13 KAI 定）——
   旧约定"写在工程目录之外（`…/.workbuddy-ai/tmp/`）"**路径含糊且理由错误**
   （只有用户级那个真实存在、被所有项目共用）。必须在 `.gitignore` +
@@ -160,14 +163,17 @@ NEXT:
 与 Cboe 指数期权到 16:15 的口径差异**不是缺陷**，不要再提）；
 **不设任何验收自动任务**（由 KAI 手动在 GTH 时段验证；"定时任务不见了"是
 **预期行为**，不要再当 bug 排查或重建）；
-**`web/*.js` 纳入 `[1]`，KAI 第二轮拍板"不拆文件"**（2026-09-13）—— 接受 `--check`
-**长期** `RC=1`（红的是真实违规、不是"修好方案落地前的临时状态"）。理由：
-① 长度约束与语言无关；② `web` 是空壳不应加语义门禁；③ 跨语言 AST 成本不抵收益。
-`.js` 只进 `[1]`，不进 AST 类检查（`[2][9][10]`）。原方案保留在
-`sessions/.../project_state.md::原拆分方案（已否决）` 作决策档案。
+**`web/*.js` 已拆分完成**（2026-09-13）—— `app.js` / `skew.js` / `period.js` 三文件
+拆分为 9 个模块（含原文件重写），全部 < 400 行。`--check` `[1]` 全绿 `RC=0`。
+`.js` 只进 `[1]`，不进 AST 类检查（`[2][9][10]`）。
 **临时探针落点 = `<项目根>/tmp/`**（2026-09-13 KAI 拍板，不再写用户级
 `~/.workbuddy-ai/tmp/`；必须在 `.gitignore` + `NON_SOURCE_DIRS` 两处登记，
 探针用完即弃、判据要落成常驻回归）。
+- **`check_clock_protocol.py` 已并入 `--check` 常驻 `[12]`**（2026-09-13 KAI 批准）——
+  验证时间源满足 `ClockPort` + `TickStore.prune()` 真实裁剪。
+- **联通与限速已并入 `--check` 常驻 `[13]`**（2026-09-13 KAI 批准）——
+  `selfcheck_connectivity.py`：8060 有服务则连 WS 抓帧校验；无服务跳过（warning，
+  非交易日预期），不视为失败。
 
 **记录教训（累积，五条同族）**：
 1. 2026-09-13 复核 —— **"记录里写了"不等于"系统里有"**：把"已设一次性验收定时任务"

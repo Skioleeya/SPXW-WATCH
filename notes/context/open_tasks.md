@@ -34,14 +34,6 @@ Archive: notes/context/archive/open_tasks_2026-09.md
   KAI 2026-09-13 拍板：**下一个会话做**（"代办"）。本轮不动用户目录。
   ⇒ 开始前先列清单（按 mtime / 大小 / 是否含 `import`），让 KAI 一眼能拍"全迁/部分迁/只登记不动"。
 
-- [ ] **[低] 色板缺机械回归** —— `check_web_contract` 只校验 CFG **路径存在**、
-      `check_page_render` 只断言"画出来了"，色值被误改**没有任何检查会红**。
-
-- [ ] **[低] `check_clock_protocol.py` 是否并入 `--check` 常驻** ——
-      目前靠"有人记得跑"而不是自动拦截。
-
-- [ ] **[低] 联通与限速无常驻回归** —— 全靠手工 `run.py` + `tools/ws_probe.py`。
-
 - [ ] **[低] 本机缺 `ib_async` 与 `aiohttp`** —— 只有纯标准库的回归能跑，
   `check_reconnect_flow`（缺 `ib_async`）与 `check_web_contract`（缺 `aiohttp`）
   在本环境直接 `ModuleNotFoundError`。要跑全量离线回归需先装项目依赖。
@@ -80,11 +72,9 @@ Archive: notes/context/archive/open_tasks_2026-09.md
 - **冷数据键序也统一为降序**（2026-09-13 复核时 KAI 选定）—— 与帧 `strikes` 同向。
   `dump_bucket()` 改 `sorted(..., reverse=True)`，回归
   `check_persistence.py::_case_key_order_descending`。
-- **`web/*.js` 纳入 `[1]`，且 KAI 第二轮拍板"不拆文件"**（2026-09-13）—— 接受
-  `--check` 长期 `RC=1`（红的是真实违规）。`iter_web_scripts()` 按目录枚举实现；
-  长度约束与语言无关；`.js` 只进 `[1]`，不进 AST 类检查（`[2][9][10]`）。
-  原"拆分方案"段已挪进 `project_state.md::原拆分方案（已否决）` 作为决策档案。
-  ⇒ **不要**把 `--check RC=1` 当回归恶化、不要"修绿"。新改动不能引入第 4 项 FAIL。
+- **`web/*.js` 已拆分完成**（2026-09-13）—— `app.js` / `skew.js` / `period.js` 三文件
+  拆分为 9 个模块，全部 < 400 行；`--check` `[1]` 全绿 `RC=0`。
+  `.js` 只进 `[1]`，不进 AST 类检查（`[2][9][10]`）。
 - **同族守卫缺口已修**（2026-09-13）—— `check_period_aggregation.py` 与
   `check_skew_alignment.py` 已接入 `tools/group_guard.py`，`--selftest` 各自抓全
   守卫 2 条用例 + 全部变异。`group_guard.py::prefixes` 契约 = `tuple[str, ...]`
@@ -99,3 +89,10 @@ Archive: notes/context/archive/open_tasks_2026-09.md
 - **`notes/` 与 `.workbuddy-ai/memory/` 的分工**（2026-09-13）：
   `notes/` 为记录落点（`notes/sessions/YYYY-MM-DD/<task-id>/`），
   `memory/` 为根路由器（只留指针与跨项目约定）。**同一事实只写一处。**
+- **色板缺机械回归 = 不做**（2026-09-13 KAI 明确）—— 前端是空壳，色彩映射由后端值驱动；
+  色值变更的责任在后端，不需要前端做机械回归。从 Active 剔除。
+- **`check_clock_protocol.py` 已并入 `--check` 常驻**（2026-09-13 KAI 批准）——
+  作为 `[12]` 检查项，验证三个时间源满足 `ClockPort` + `TickStore.prune()` 真实裁剪。
+- **联通与限速已并入 `--check` 常驻**（2026-09-13 KAI 批准）—— 作为 `[13]` 检查项，
+  `selfcheck_connectivity.py`：若 8060 有服务则连 WS 抓帧校验结构；无服务时跳过（warning，
+  非交易日预期），不视为失败。

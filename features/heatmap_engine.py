@@ -75,7 +75,8 @@ class HeatmapEngine:
     """按时间桶累积 IV，并产出 ΔIV 矩阵。"""
 
     __slots__ = (
-        "_clock", "_max_buckets", "_min_buckets", "_buckets", "_breaks", "_zone_starts",
+        "_clock", "_max_buckets", "_min_buckets", "_buckets", "_tick_counts",
+        "_breaks", "_zone_starts",
     )
 
     def __init__(self, clock, serial_cfg: dict) -> None:
@@ -88,6 +89,9 @@ class HeatmapEngine:
         )
         # {行权价: {bucket_index: iv}}
         self._buckets: dict[_CellKey, dict[int, float]] = {}
+        # {行权价: {bucket_index: tick_count}} —— 每格有多少笔 tick 写入。
+        # 用于前端「成交量加权」视觉层（P1）。
+        self._tick_counts: dict[_CellKey, dict[int, int]] = {}
         # 断代桶序号：这些桶的值是新段的起点，差分时必须留白。全局集合，
         # 因为断流是所有档位同时发生的事件（见模块 docstring）。
         self._breaks: set[int] = set()
@@ -130,6 +134,9 @@ class HeatmapEngine:
             key: _CellKey = float(cell.strike)
             bucket = self._buckets.setdefault(key, {})
             bucket[index] = float(cell.iv)
+            # 累加 tick 计数（P1：volume 视觉层）
+            tick_bucket = self._tick_counts.setdefault(key, {})
+            tick_bucket[index] = tick_bucket.get(index, 0) + 1
             written += 1
 
         self._prune(index)
@@ -142,6 +149,9 @@ class HeatmapEngine:
         for bucket in self._buckets.values():
             for stale in [b for b in bucket if b < cutoff]:
                 del bucket[stale]
+        for tick_bucket in self._tick_counts.values():
+            for stale in [b for b in tick_bucket if b < cutoff]:
+                del tick_bucket[stale]
         self._breaks = {b for b in self._breaks if b >= cutoff}
 
     # ------------------------------------------------------------------ #
@@ -179,15 +189,21 @@ class HeatmapEngine:
         strikes: list[float] = []
         rights: list[OptionRight] = []
         values: list[tuple[float | None, ...]] = []
+        volumes: list[tuple[int | None, ...]] = []
 
         for ref in sorted(rows, key=lambda r: r.strike, reverse=True):
-            bucket = self._buckets.get(float(ref.strike))
+            key = float(ref.strike)
+            bucket = self._buckets.get(key)
             row = self._row_values(bucket, current) if bucket else None
             if row is None:
                 continue
             strikes.append(ref.strike)
             rights.append(ref.right)
             values.append(row)
+            # 体积矩阵：与 values 同形，取 tick 计数
+            tick_bucket = self._tick_counts.get(key, {})
+            vol_row = self._row_volumes(tick_bucket, current)
+            volumes.append(vol_row)
 
         if not strikes:
             return None
@@ -199,6 +215,7 @@ class HeatmapEngine:
             values=tuple(values),
             bucket_index=current,
             spot=float(spot),
+            volumes=tuple(volumes),
         )
 
     def _row_values(
@@ -246,12 +263,29 @@ class HeatmapEngine:
 
         return tuple(out)
 
+    def _row_volumes(
+        self, tick_bucket: dict[int, int] | None, current: int
+    ) -> tuple[int | None, ...]:
+        """
+        把稀疏的 tick 计数字典展开成定长行。
+        与 ``_row_values`` 同形：有值的位置给计数，无值给 None。
+        """
+        if not tick_bucket:
+            return tuple([None] * (current + 1))
+
+        out: list[int | None] = []
+        for index in range(current + 1):
+            count = tick_bucket.get(index)
+            out.append(count if count is not None else None)
+        return tuple(out)
+
     # ------------------------------------------------------------------ #
     # 维护
     # ------------------------------------------------------------------ #
 
     def reset(self) -> None:
         self._buckets.clear()
+        self._tick_counts.clear()
         self._breaks.clear()
 
     def tracked_rows(self) -> int:

@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Viewport Sync Test — P2</title>
+<style>
+  body { margin: 0; background: #0a0c0f; padding: 20px; font-family: monospace; }
+  #heatmap { width: 1200px; height: 400px; border: 1px solid #232b34; }
+  #controls { margin-top: 12px; color: #8b97a5; }
+  #controls input[type=range] { width: 400px; vertical-align: middle; }
+  #controls button { margin-left: 12px; padding: 4px 12px; }
+  #info { color: #8b97a5; font-size: 12px; margin-top: 8px; }
+</style>
+</head>
+<body>
+<div id="heatmap"></div>
+<div id="controls">
+  Start: <input type="range" id="r-start" min="0" max="199" value="0">
+  End: <input type="range" id="r-end" min="0" max="199" value="199">
+  <button id="btn-reset">Reset</button>
+  <button id="btn-tail">Tail</button>
+</div>
+<div id="info"></div>
+
+<script src="config.js"></script>
+<script src="gl_heatmap.js"></script>
+<script src="heatmap.js"></script>
+<script>
+  var panel = new HeatmapPanel(document.getElementById("heatmap"));
+
+  /* 模拟 40 档 × 200 桶 */
+  var strikes = [];
+  for (var i = 0; i < 40; i++) strikes.push(5500 - i * 5);
+  var labels = [];
+  for (var i = 0; i < 200; i++) {
+    var m = 30 + Math.floor(i / 2);
+    var s = (i % 2) * 30;
+    labels.push("09:" + String(m).padStart(2, "0") + ":" + String(s).padStart(2, "0"));
+  }
+  var values = [], volumes = [];
+  for (var r = 0; r < strikes.length; r++) {
+    var row = [], volRow = [];
+    for (var c = 0; c < labels.length; c++) {
+      var cx = c / labels.length, cy = r / strikes.length;
+      var dist = Math.sqrt((cx - 0.7) * (cx - 0.7) + (cy - 0.5) * (cy - 0.5));
+      var v = Math.sin(c * 0.15 + r * 0.4) * Math.exp(-dist * 3) * 3.0;
+      if (Math.random() > 0.85) { row.push(null); volRow.push(null); }
+      else {
+        row.push(v);
+        volRow.push(Math.max(1, Math.floor(Math.random() * 8 + Math.abs(v) * 3)));
+      }
+    }
+    values.push(row);
+    volumes.push(volRow);
+  }
+
+  var block = {
+    strikes: strikes,
+    labels: labels,
+    values: values,
+    volumes: volumes,
+    rights: strikes.map(function() { return "C"; }),
+    vmax: 3.0
+  };
+
+  /* P2 裁剪逻辑（从 app.js 复制） */
+  function applyViewport(blk, zoom) {
+    if (!zoom || !blk || !blk.labels || !blk.labels.length) return blk;
+    var n = blk.labels.length;
+    var from = zoom.start;
+    var to = zoom.tail ? n - 1 : zoom.end;
+    if (from < 0) from = 0;
+    if (to >= n) to = n - 1;
+    if (from >= to) return blk;
+    return {
+      strikes: blk.strikes,
+      rights: blk.rights,
+      labels: blk.labels.slice(from, to + 1),
+      values: blk.values.map(function(row) { return row.slice(from, to + 1); }),
+      volumes: blk.volumes ? blk.volumes.map(function(row) { return row.slice(from, to + 1); }) : undefined,
+      vmax: blk.vmax
+    };
+  }
+
+  function render(zoom) {
+    var view = zoom ? applyViewport(block, zoom) : block;
+    var info = panel.update(view, 5475);
+    var text = info
+      ? info.rows + " 档 × " + info.cols + " 桶 · " + info.cells + " 格 · vmax=" + info.vmax.toFixed(2)
+      : "Render failed";
+    if (zoom) {
+      var to = zoom.tail ? block.labels.length - 1 : zoom.end;
+      text += " · 缩放 " + (zoom.start + 1) + "–" + (to + 1) + "/" + block.labels.length + " 列";
+    } else {
+      text += " · 全宽 " + block.labels.length + " 列";
+    }
+    document.getElementById("info").textContent = text;
+  }
+
+  /* 初始全宽 */
+  render(null);
+
+  var rStart = document.getElementById("r-start");
+  var rEnd = document.getElementById("r-end");
+
+  function onChange() {
+    var a = parseInt(rStart.value, 10);
+    var b = parseInt(rEnd.value, 10);
+    if (a > b) { var t = a; a = b; b = t; }
+    render({ start: a, end: b, tail: b >= 199 });
+  }
+
+  rStart.addEventListener("input", onChange);
+  rEnd.addEventListener("input", onChange);
+
+  document.getElementById("btn-reset").addEventListener("click", function() {
+    rStart.value = 0; rEnd.value = 199; render(null);
+  });
+  document.getElementById("btn-tail").addEventListener("click", function() {
+    rStart.value = 150; rEnd.value = 199; render({ start: 150, end: 199, tail: true });
+  });
+</script>
+</body>
+</html>

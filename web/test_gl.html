@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>WebGL Heatmap Test</title>
+<style>
+  body { margin: 0; background: #0a0c0f; padding: 20px; }
+  #heatmap { width: 1200px; height: 500px; border: 1px solid #232b34; }
+  #info { color: #8b97a5; font-family: monospace; font-size: 12px; margin-top: 10px; }
+</style>
+</head>
+<body>
+<div id="heatmap"></div>
+<div id="info"></div>
+
+<script src="config.js"></script>
+<script src="gl_heatmap.js"></script>
+<script src="heatmap.js"></script>
+<script>
+  var panel = new HeatmapPanel(document.getElementById("heatmap"));
+
+  /* 模拟 40 档行权价 × 200 个时间桶 */
+  var strikes = [];
+  for (var i = 0; i < 40; i++) strikes.push(5500 - i * 5);
+
+  var labels = [];
+  for (var i = 0; i < 200; i++) {
+    var m = 30 + Math.floor(i / 2);
+    var s = (i % 2) * 30;
+    labels.push("09:" + String(m).padStart(2, "0") + ":" + String(s).padStart(2, "0"));
+  }
+
+  var values = [];
+  var volumes = [];
+  for (var r = 0; r < strikes.length; r++) {
+    var row = [];
+    var volRow = [];
+    for (var c = 0; c < labels.length; c++) {
+      // 模拟 IV 脉冲：中心区域波动大，边缘波动小
+      var cx = c / labels.length, cy = r / strikes.length;
+      var dist = Math.sqrt((cx - 0.7) * (cx - 0.7) + (cy - 0.5) * (cy - 0.5));
+      var v = Math.sin(c * 0.15 + r * 0.4) * Math.exp(-dist * 3) * 3.0;
+      // 随机空值模拟稀疏矩阵
+      if (Math.random() > 0.85) { row.push(null); volRow.push(null); }
+      else {
+        row.push(v);
+        // volume: 波动大的区域 tick 数多，空值区域无 tick
+        var vol = Math.max(1, Math.floor(Math.random() * 8 + Math.abs(v) * 3));
+        volRow.push(vol);
+      }
+    }
+    values.push(row);
+    volumes.push(volRow);
+  }
+
+  var info = panel.update({
+    strikes: strikes,
+    labels: labels,
+    values: values,
+    volumes: volumes,
+    rights: strikes.map(function() { return "C"; }),
+    vmax: 3.0
+  }, 5475);
+
+  document.getElementById("info").textContent = info
+    ? "Rendered: " + info.rows + " rows × " + info.cols + " cols, " + info.cells + " cells, vmax=" + info.vmax.toFixed(2) + " (volume = border thickness)"
+    : "Render failed";
+</script>
+</body>
+</html>

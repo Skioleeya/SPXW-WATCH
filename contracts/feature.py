@@ -107,6 +107,8 @@ class HeatmapMatrix:
       与屏幕自上而下的方向一致（前端 ``yAxis.inverse``）。
     * 横轴 ``bucket_labels``：会话时间桶，从开盘到收盘。
     * ``values[i][j]``：第 i 个行权价、第 j 个时间桶的 ΔIV（波动率点）。
+    * ``volumes[i][j]``：同一格的 tick 计数（None 表示无数据）。
+      用于前端「成交量加权」视觉层 —— tick 数多 = 圆点大。
 
     每个行权价只取 OTM 一侧（行权价 < 现价取 Put，否则取 Call），
     这样一张矩阵就能完整呈现 0DTE 微笑的两翼，无需再拆成两张图。
@@ -118,6 +120,7 @@ class HeatmapMatrix:
     values: tuple[tuple[float | None, ...], ...]
     bucket_index: int
     spot: float
+    volumes: tuple[tuple[int | None, ...], ...] = ()
 
     def rows(self) -> int:
         return len(self.strikes)

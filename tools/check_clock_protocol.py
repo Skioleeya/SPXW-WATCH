@@ -39,7 +39,8 @@ GREEN, RED, RESET = "\033[32m", "\033[31m", "\033[0m"
 STRIKE = 6500.0
 
 
-def main() -> int:
+def run_clock_checks() -> int:
+    """供 ``--check`` 调用的时钟协议验证。返回失败数。"""
     app_cfg = loader.load("app")
     serial_cfg = loader.load("serialization")
     state_cfg = loader.load("state")
@@ -50,10 +51,7 @@ def main() -> int:
 
     failures = 0
 
-    # ---------------------------------------------------------------- #
     # 1. 三个时间源都必须满足 ClockPort
-    # ---------------------------------------------------------------- #
-    print("[1] 时间源的协议一致性")
     session, fake = make_session_clock(app_cfg, serial_cfg)
     print(f"  网格起点 {fake.grid_start().isoformat()}（{tz}）· "
           f"{session.bucket_count()} 桶 × {session.bucket_seconds}s")
@@ -70,10 +68,7 @@ def main() -> int:
             print(f"  {RED}[FAIL]{RESET} {name} 不满足 ClockPort，缺少 {missing}")
             failures += 1
 
-    # ---------------------------------------------------------------- #
     # 2. 真实裁剪路径：SessionClock 注入 TickStore，prune() 必须真的丢掉过期样本
-    # ---------------------------------------------------------------- #
-    print("\n[2] L2 用注入的时钟裁剪")
     store = TickStore(state_cfg, session)
     expiry = session.expiry_str()
     ref = OptionRef(strike=STRIKE, right=OptionRight.PUT, expiry=expiry)
@@ -86,12 +81,8 @@ def main() -> int:
             und_price=STRIKE, source_tick_type=13, model_greeks=True,
         )
     )
-    print(f"  写入 1 个现价样本 + 1 个期权样本（ts={ts0:.1f}）")
 
-    # 推进到远超两个缓冲窗口
     fake.advance(max(option_age, spot_age) + 60.0)
-    print(f"  会话时间推进 {max(option_age, spot_age) + 60.0:.0f}s "
-          f"（现价窗 {spot_age:.0f}s / 期权窗 {option_age:.0f}s）")
 
     try:
         dropped = store.prune()
@@ -103,7 +94,6 @@ def main() -> int:
     remaining = store.snapshot_meta()
     option_points = remaining["option_points"]
     spot_points = remaining["spot_points"]
-    print(f"  prune() 丢弃 {dropped} 个样本；剩余 期权 {option_points} / 现价 {spot_points}")
 
     if dropped <= 0:
         print(f"  {RED}[FAIL]{RESET} 裁剪没有丢弃任何样本，"
@@ -116,6 +106,13 @@ def main() -> int:
     else:
         print(f"  {GREEN}[ok]{RESET} 过期样本已按时间窗裁掉，裁剪节奏参数真实生效")
 
+    return failures
+
+
+def main() -> int:
+    print("[1] 时间源的协议一致性")
+    print("\n[2] L2 用注入的时钟裁剪")
+    failures = run_clock_checks()
     print()
     if failures:
         print(f"{RED}结果: {failures} 项不通过{RESET}")

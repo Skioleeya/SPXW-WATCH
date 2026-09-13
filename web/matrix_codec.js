@@ -98,6 +98,35 @@
     }
 
     block.values = values;
+
+    /* P1: volume 视觉层 —— tick 计数，scale=1，可选（旧帧没有则不画圆点） */
+    if (block.vol_bm !== undefined && block.vol_i16 !== undefined) {
+      try {
+        var volBits = b64ToBytes(block.vol_bm);
+        var volNums = b64ToBytes(block.vol_i16);
+        var volView = new DataView(volNums.buffer, volNums.byteOffset, volNums.byteLength);
+        var volumes = [];
+        var vk = 0;
+        for (var r = 0; r < rows; r++) {
+          var vrow = new Array(cols);
+          var base = r * cols;
+          for (var c = 0; c < cols; c++) {
+            var i = base + c;
+            if (volBits[i >> 3] >> (7 - (i & 7)) & 1) {
+              vrow[c] = volView.getInt16(vk * 2, true);
+              vk++;
+            } else {
+              vrow[c] = null;
+            }
+          }
+          volumes.push(vrow);
+        }
+        block.volumes = volumes;
+      } catch (e) {
+        fail("volume 块解码失败: " + e.message);
+      }
+    }
+
     return block;
   }
 

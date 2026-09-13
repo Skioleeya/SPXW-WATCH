@@ -1,11 +1,16 @@
 /* 时间周期聚合
  * ------------------------------------------------------------------
- * 唯一职责：把后端的**基线矩阵**变换成前端要画的那张矩阵。
- * 三件事，都是纯粹的呈现变换，不含任何业务判断：
+ * 唯一职责：把后端的**基线序列 / 矩阵**变换成前端要画的那张图。
+ * 热力图与 Skew 折线共用同一条横轴，两者必须由同一个周期档位驱动 ——
+ * 选了 1 分钟，两块图都必须是 1 分钟一格，否则同一屏幕横坐标在两块图里
+ * 指向不同时刻，上下没法对着看。
+ *
+ * 四件事，都是纯粹的呈现变换，不含任何业务判断：
  *
  *   1. options()   —— 按基线桶宽筛掉凑不出整组的周期；
  *   2. aggregate() —— 把若干基线桶并成一列（ΔIV 相加）；
- *   3. clipTail()  —— 列数超上限时只保留最近的一段。
+ *   3. clipTail()  —— 列数超上限时只保留最近的一段；
+ *   4. alignSkew() —— 把 Skew 折线对齐到上面那套列网格（取组内末值）。
  *
  * 为什么聚合放在前端而不是后端
  * ----------------------------
@@ -16,6 +21,7 @@
  *
  * 正好等于该跨度的 IV 变化量。**这是恒等式，不是近似**，所以前端聚合不会
  * 引入任何信息损失，后端不必为每个可选周期各算一遍、各编码一遍。
+ * Skew 折线同理：它每个基线桶一个读数，并组后取**末值**即可，无需后端重算。
  *
  * 代价是色标量程必须在前端按同样的规则重算（聚合后数值量级会变），于是这里
  * 有一份 `bound()` —— 它是 `serialization/numeric.py::robust_bound` 的镜像。
@@ -223,6 +229,77 @@
   }
 
   /* ------------------------------------------------------------------ */
+  /* Skew 折线对齐                                                       */
+  /* ------------------------------------------------------------------ */
+
+  function nullArray(n) {
+    var out = new Array(n);
+    for (var i = 0; i < n; i++) { out[i] = null; }
+    return out;
+  }
+
+  /*
+   * 把 Skew 序列铺到热力图那套列网格上，返回与 `grid.labels` **等长**的序列。
+   *
+   * 取组内**末值**而不是求和：热力图聚合的是 ΔIV（增量，可加），而 skew 是
+   * 水平量（两点 IV 之差），把一组里的 skew 加起来没有任何金融含义，只会得到
+   * 一个随周期变化的假数字。取末值等于"这一格画的是该周期结束时的读数"，
+   * 与 K 线取收盘价同理。
+   *
+   * 为什么要 drop：热力图列数超上限时会从尾部截取，被截掉的列在两块图里都
+   * 不该出现。前端不做二次裁剪，只把落在窗口外的点丢掉。
+   *
+   * 落在窗口**之前**的点（`col < 0`）是 `clipTail` 裁掉的历史段，属于正常
+   * 情况，静默丢弃 —— 30 秒粒度下每帧有 380 个，若也告警会每帧刷满日志，
+   * 把真正该响的"桶口径不符"淹掉。只有桶索引非法或落在网格**右端之外**
+   * 才告警：那说明帧里的 bucket 与热力图对不上，静默画到别的列上更糟。
+   */
+  function alignSkew(series, group, grid) {
+    if (!series || !series.bucket || !series.ts) { return null; }
+    if (!grid || !grid.labels || !grid.labels.length) { return null; }
+
+    var g = Math.floor(Number(group));
+    if (!(g > 0)) { return null; }
+
+    var cols = grid.labels.length;
+    var drop = Math.floor(Number(grid.drop));
+    if (!(drop > 0)) { drop = 0; }
+
+    var bucket = series.bucket;
+    var out = {
+      ts: nullArray(cols),
+      label: grid.labels.slice(),
+      skew: nullArray(cols),
+      atm: nullArray(cols),
+      put25: nullArray(cols),
+      call25: nullArray(cols),
+      spot: nullArray(cols),
+      count: cols
+    };
+
+    var stray = 0;
+    for (var i = 0; i < bucket.length; i++) {
+      var b = bucket[i];
+      if (typeof b !== "number" || !isFinite(b) || b < 0) { stray += 1; continue; }
+      var col = Math.floor(b / g) - drop;
+      /* 被 clipTail 裁掉的历史段：正常，静默丢弃（见上方说明）。 */
+      if (col < 0) { continue; }
+      if (col >= cols) { stray += 1; continue; }
+      out.ts[col] = series.ts[i];
+      out.skew[col] = series.skew[i];
+      out.atm[col] = series.atm[i];
+      out.put25[col] = series.put25[i];
+      out.call25[col] = series.call25[i];
+      out.spot[col] = series.spot[i];
+    }
+    if (stray) {
+      warn(stray + " 个 Skew 点的桶索引非法或超出列网格右端，已丢弃" +
+        "（两块图的桶口径应当同源，出现这个说明帧里的 bucket 与热力图对不上）");
+    }
+    return out;
+  }
+
+  /* ------------------------------------------------------------------ */
   /* 色标量程                                                            */
   /* ------------------------------------------------------------------ */
 
@@ -269,6 +346,7 @@
     options: options,
     aggregate: aggregate,
     clipTail: clipTail,
+    alignSkew: alignSkew,
     bound: bound
   };
 })(window);

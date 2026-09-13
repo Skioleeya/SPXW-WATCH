@@ -67,6 +67,7 @@ class FrameEncoder:
                 "latest": self._skew.encode_latest(
                     frame.skew_series[-1] if frame.skew_series else None
                 ),
+                "scale_policy": self._skew.scale_policy,
             },
             "cells": self._cells.encode(frame.cells),
         }

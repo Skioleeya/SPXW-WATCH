@@ -1,13 +1,17 @@
 # Handoff Index
-- Latest session: 2026-09-13/frame-strike-order-descending
-- Current session handoff: notes/sessions/2026-09-13/frame-strike-order-descending/handoff.md
+- Latest session: 2026-09-13/recheck-keyorder-memory
+- Current session handoff: notes/sessions/2026-09-13/recheck-keyorder-memory/handoff.md
 - Archive: notes/context/archive/handoff_2026-09.md
-- Status: 帧 `strikes` 与屏幕纵轴统一为**降序**（高行权价在前/在上）——
-  `HeatmapEngine.build()` 显式 `sorted(..., reverse=True)` +
-  `web/heatmap.js::yAxis.inverse = true` **成对**保证（缺一即翻转）。
-  实测**屏幕视觉零变化**（`SAME_AS_BEFORE: true`）；回归在
-  `tools/smoke_test.py`「矩阵 strikes 降序」（含非空转证伪）。
-  **已提交并推送 `7ffe882`**（24 文件，+1071/−68）；工作区干净，远端已核实。
+- Status: **交接复核 + 收尾**。复核上一轮 `skew-period-consistency` 报告：七条断言
+  全部属实；**另发现一处静默失效** —— 它记录的"已设一次性验收定时任务
+  `e4ad7495-…`"在系统里**并不存在**（`automation list` 空、`view` not found），
+  已按原时间重建（`8b4fe600-…`，2026-09-14 09:45 ET）。同时：**冷数据键序统一为
+  降序**（`dump_bucket()` 改 `reverse=True`，与帧 `strikes` 同向；回归用例翻向 +
+  双向证伪），`MEMORY.md` 按主题蒸馏（7958 → 7445 字符），上一轮 handoff 的
+  `CHANGED-PATHS` 缺口补记。
+  ⚠️ **真实链路渲染仍未验证**（周日服务 fail-closed，4 个需服务的检查跑不了）。
+- Previous: 2026-09-13/skew-period-consistency（notes/sessions/2026-09-13/skew-period-consistency/handoff.md）
+- Previous: 2026-09-13/frame-strike-order-descending（notes/sessions/2026-09-13/frame-strike-order-descending/handoff.md）
 - Previous: 2026-09-13/cold-data-strike-order（notes/sessions/2026-09-13/cold-data-strike-order/handoff.md）
 - Previous: 2026-09-13/live-verify-and-release（notes/sessions/2026-09-13/live-verify-and-release/handoff.md）
 - Previous: 2026-09-13/notes-dedup-tiering（notes/sessions/2026-09-13/notes-dedup-tiering/handoff.md）

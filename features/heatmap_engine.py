@@ -253,7 +253,7 @@ class HeatmapEngine:
 
     def dump_bucket(self, bucket_index: int) -> dict[float, float]:
         """
-        提取某一桶的原始 IV 字典 ``{strike: iv}``，**键按行权价升序**。
+        提取某一桶的原始 IV 字典 ``{strike: iv}``，**键按行权价降序**。
 
         只返回该桶有值的档位；空桶返回空字典。供 ``AsyncPersistenceWriter``
         序列化写入 SQLite。
@@ -265,13 +265,21 @@ class HeatmapEngine:
         一次 7700→7820→7600 的往返即可复现）。JSON 对象的键序会被原样写进
         ``ivs_json``，而 ``recover()`` / ``load_snapshot()`` 都不重排 —— 乱序
         会落盘并被继承下去。直接读 ``session.db`` 的人（或脚本）若默认"键序即
-        升序"，就会静默错配行号。
+        降序"，就会静默错配行号。
 
         排一次序，把这条不变量收回到快照的产出点，让落盘产物与内部字典的
         历史无关。由 ``tools/check_persistence.py`` 的键序用例守住。
+
+        为什么是**降序**（2026-09-13 统一）
+        ----------------------------------
+        对外帧的 ``strikes`` 与屏幕自上而下都是降序（见 ``build()`` 与
+        ``web/heatmap.js`` 的 ``yAxis.inverse``）。冷数据一度是升序，与帧方向
+        相反 —— 同一个系统里两处行序相反，读代码的人迟早串味。现在两边同向：
+        **高行权价在前**。冷数据仍是内部恢复产物（键序不影响 ``_buckets`` 的
+        查找，``build()`` 自己会显式排序），统一只为消除这层反向语义。
         """
         out: dict[float, float] = {}
-        for strike in sorted(self._buckets):
+        for strike in sorted(self._buckets, reverse=True):
             iv = self._buckets[strike].get(bucket_index)
             if iv is not None:
                 out[float(strike)] = float(iv)

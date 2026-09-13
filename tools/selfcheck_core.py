@@ -76,7 +76,7 @@ REQUIRED_KEYS: dict[str, tuple[str, ...]] = {
     "persistence": ("enabled", "db_path", "queue_maxsize", "write_interval_s"),
     "serialization": ("heatmap_bucket_seconds", "heatmap_color_quantile",
                       "heatmap_color_floor_vol_points", "iv_decimals",
-                      "impulse_decimals"),
+                      "impulse_decimals", "skew_scale_window_seconds"),
     "transport": ("host", "http_port", "ws_path", "push_interval_ms",
                   "client_queue_size"),
     "logging": ("level", "format"),

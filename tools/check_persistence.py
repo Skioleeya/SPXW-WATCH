@@ -7,7 +7,8 @@
 3. 同一桶多次写入：``INSERT OR REPLACE`` 幂等，最终值正确。
 4. 队列满时丢桶：``dropped_count`` 递增，不抛异常。
 5. ``load_snapshot`` 后 ``build()`` 的 ΔIV 与直接计算一致。
-6. 冷数据的键序恒为**升序**，与 ``_buckets`` 的首次出现顺序无关。
+6. 冷数据的键序恒为**降序**，与 ``_buckets`` 的首次出现顺序无关，且与对外帧
+   的 ``strikes`` 同向（高行权价在前）。
 """
 from __future__ import annotations
 
@@ -152,12 +153,16 @@ def _case_disabled_no_op() -> None:
         assert writer.recover() == []
 
 
-def _case_key_order_ascending() -> None:
-    """冷数据的键序恒为升序，与 ``_buckets`` 的首次出现顺序无关。
+def _case_key_order_descending() -> None:
+    """冷数据的键序恒为降序，与 ``_buckets`` 的首次出现顺序无关。
+
+    与对外帧同向：帧 ``strikes`` 是降序（高行权价在前，见
+    ``tools/smoke_test.py``「矩阵 strikes 降序」），冷数据此前是升序、
+    两处行序相反；2026-09-13 统一为降序。
 
     非空转要点：这里刻意把 ``_buckets`` 造成"低档位晚到"的形状（现价上移后
     回落到会话初低点之下，见 ``dump_bucket`` docstring）。若 ``dump_bucket``
-    不排序，本用例的三条断言都会 FAIL。
+    不排序，本用例的四条断言都会 FAIL。
     """
     clock = _make_clock()
     serial = _make_serial_cfg()
@@ -171,9 +176,9 @@ def _case_key_order_ascending() -> None:
         5490.0: {10: 0.14},
         5485.0: {10: 0.13},
     }
-    expected = [5485.0, 5490.0, 5500.0, 5505.0, 5510.0]
+    expected = [5510.0, 5505.0, 5500.0, 5490.0, 5485.0]
     dumped = list(engine.dump_bucket(10))
-    assert dumped == expected, f"dump_bucket 未升序: {dumped}"
+    assert dumped == expected, f"dump_bucket 未降序: {dumped}"
 
     with tempfile.TemporaryDirectory() as tmp:
         db = Path(tmp) / "test.db"
@@ -190,7 +195,7 @@ def _case_key_order_ascending() -> None:
             ).fetchone()[0]
         )
         on_disk = [float(k) for k in raw]
-        assert on_disk == sorted(on_disk), f"落盘键序非升序: {on_disk}"
+        assert on_disk == sorted(on_disk, reverse=True), f"落盘键序非降序: {on_disk}"
 
         recovered = writer.recover()
         writer._conn.close()
@@ -209,7 +214,7 @@ _CASES = [
     _case_idempotent_overwrite,
     _case_queue_drop,
     _case_disabled_no_op,
-    _case_key_order_ascending,
+    _case_key_order_descending,
 ]
 
 

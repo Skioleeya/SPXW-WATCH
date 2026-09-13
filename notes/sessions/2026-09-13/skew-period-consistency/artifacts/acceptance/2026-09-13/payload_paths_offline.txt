@@ -1,0 +1,68 @@
+线格式载荷顶层键: ['atm', 'cells', 'health', 'heatmap', 'seq', 'session', 'skew', 'spot', 'ts', 'type']
+heatmap 键: ['bm', 'bucket_index', 'bucket_seconds', 'cols', 'enc', 'filled', 'i16', 'labels', 'rights', 'rows', 'scale', 'scale_policy', 'spot', 'strikes', 'vmax']
+skew 键: ['latest', 'scale_policy', 'series']
+skew.series 键: ['atm', 'bucket', 'call25', 'count', 'label', 'put25', 'skew', 'spot', 'ts']
+skew.scale_policy: {'window_s': 3600.0}
+heatmap.bucket_seconds: 30
+heatmap.scale_policy: {'quantile': 0.95, 'floor': 0.5}
+
+  [ok] seq                                    int
+  [ok] ts                                     float
+  [ok] spot                                   float
+  [ok] atm                                    dict
+  [ok] session                                dict
+  [ok] health                                 dict
+  [ok] heatmap                                dict
+  [ok] skew                                   dict
+  [ok] cells                                  list
+  [ok] atm.atm_strike                         float
+  [ok] atm.atm_iv                             float
+  [ok] atm.straddle                           float
+  [ok] atm.put25_iv                           float
+  [ok] atm.call25_iv                          float
+  [ok] atm.butterfly                          float
+  [ok] atm.skew_25d                           float
+  [ok] session.expiry                         str
+  [ok] session.elapsed_s                      float
+  [ok] session.bucket_count                   int
+  [ok] session.bucket_index                   int
+  [ok] health.subscribed                      int
+  [ok] health.subscription_cap                int
+  [ok] health.last_tick_age_s                 float
+  [ok] health.store_cells                     int
+  [ok] health.connection                      str
+  [ok] health.mode                            str
+  [ok] health.messages                        list
+  [ok] heatmap.enc                            str
+  [ok] heatmap.scale                          int
+  [ok] heatmap.bm                             str
+  [ok] heatmap.i16                            str
+  [ok] heatmap.filled                         int
+  [ok] heatmap.rows                           int
+  [ok] heatmap.cols                           int
+  [ok] heatmap.strikes                        list
+  [ok] heatmap.labels                         list
+  [ok] heatmap.rights                         list
+  [ok] heatmap.vmax                           float
+  [ok] heatmap.bucket_seconds                 int
+  [ok] heatmap.scale_policy                   dict
+  [ok] heatmap.scale_policy.quantile          float
+  [ok] heatmap.scale_policy.floor             float
+  [ok] skew.series                            dict
+  [ok] skew.series.ts                         list
+  [ok] skew.series.bucket                     list
+  [ok] skew.series.label                      list
+  [ok] skew.series.skew                       list
+  [ok] skew.series.atm                        list
+  [ok] skew.series.put25                      list
+  [ok] skew.series.call25                     list
+  [ok] skew.scale_policy                      dict
+  [ok] skew.scale_policy.window_s             float
+  [ok] skew.latest                            dict
+  [ok] skew.latest.skew                       float
+  [ok] skew.latest.atm                        float
+
+  [ok] skew.series.skew_min                   应已从帧中移除
+  [ok] skew.series.skew_max                   应已从帧中移除
+
+共 55 条路径，缺失/异常 0 条

@@ -31,14 +31,29 @@ _CFG = "serialization"
 class SkewSerializer:
     """偏度序列与平值读数编码器。"""
 
-    __slots__ = ("_iv_decimals", "_price_decimals", "_clock")
+    __slots__ = ("_iv_decimals", "_price_decimals", "_scale_window_s", "_clock")
 
     def __init__(self, serial_cfg: dict, clock) -> None:
         self._iv_decimals = loader.as_int(serial_cfg, "iv_decimals", module=_CFG)
         self._price_decimals = loader.as_int(
             serial_cfg, "price_decimals", module=_CFG
         )
+        self._scale_window_s = loader.as_float(
+            serial_cfg, "skew_scale_window_seconds", module=_CFG
+        )
         self._clock = clock
+
+    @property
+    def scale_policy(self) -> dict:
+        """
+        折线纵轴的量程策略。
+
+        只下发**窗口长度**，不下发极值本身：前端会把 skew 按用户选的周期聚合，
+        聚合后的点数随周期变（30 秒 → 780 点，15 分 → 26 点），极值必须在前端
+        按"窗口内还剩哪些点"重算。后端算一份固定极值，一换周期就与曲线对不上。
+        窗口按**时间**定义而不是点数，这样粗细两种周期看到的是同一段行情。
+        """
+        return {"window_s": round(float(self._scale_window_s), 1)}
 
     # ------------------------------------------------------------------ #
     # 折线序列
@@ -48,24 +63,26 @@ class SkewSerializer:
         """
         编码整条 25Δ 偏度序列。
 
-        同时给出 ``skew_min`` / ``skew_max``，让前端能画一条稳定的纵轴参考线，
-        而不是每帧自动缩放导致折线"呼吸"。
+        ``bucket`` 是每个点所属的**基线时间桶序号**。前端按用户选的周期把基线桶
+        并组，必须知道每个点落在哪个基线桶里 —— 用下标推断不行（某个桶可能整段
+        没有读数，序列里就不存在那个点），用时间戳现算则是把后端的桶口径抄一遍。
+        随帧下发，前端只做 ``floor(bucket / group)``。
+
+        ``label`` 与 ``bucket`` 同源算出，不各算一次：两者都来自同一个
+        ``bucket_index_of_ts``，分开算等于把同一个换算跑两遍。
         """
         rows = list(points)
-        skew_values = [
-            p.skew_25d_vol_points for p in rows if p.skew_25d_vol_points is not None
-        ]
+        buckets = [self._clock.bucket_index_of_ts(p.ts) for p in rows]
 
         return {
             "ts": [round(float(p.ts), 3) for p in rows],
-            "label": [self._label(p.ts) for p in rows],
+            "bucket": buckets,
+            "label": [self._clock.bucket_label(b) for b in buckets],
             "skew": [round_opt(p.skew_25d_vol_points, 3) for p in rows],
             "atm": [round_opt(self._as_vol_points(p.atm_iv), 3) for p in rows],
             "put25": [round_opt(self._as_vol_points(p.put25_iv), 3) for p in rows],
             "call25": [round_opt(self._as_vol_points(p.call25_iv), 3) for p in rows],
             "spot": [round(float(p.spot), self._price_decimals) for p in rows],
-            "skew_min": round(min(skew_values), 3) if skew_values else None,
-            "skew_max": round(max(skew_values), 3) if skew_values else None,
             "count": len(rows),
         }
 

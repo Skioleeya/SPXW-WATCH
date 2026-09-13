@@ -45,6 +45,8 @@ python tools/check_web_contract.py             # 回归：前端引用 → 后�
 python tools/check_page_render.py              # 回归：真浏览器打开，断言画出来了
 python tools/check_period_aggregation.py       # 回归：前端周期聚合 ↔ 后端定义逐值对拍
 python tools/check_matrix_codec.py             # 回归：热力图数值块 Python 打包 ↔ JS 解包
+python tools/check_web_syntax.py               # 门禁：web/*.js 必须能被 JS 解析器读通
+python tools/check_skew_alignment.py           # 回归：Skew 折线与热力图列网格逐列对齐（含周期一致性）
 python tools/check_ws_compression.py           # 回归：WebSocket 必须真的协商 permessage-deflate
 python tools/ws_probe.py --frames 24           # 作为独立客户端抓帧并校验结构
 python tools/heatmap_stats.py                  # 打印矩阵里 ΔIV 的实际分布
@@ -295,6 +297,10 @@ Qualify contract to populate 'conId'.
 * **默认开启**（`persistence.json::enabled`）。置 `false` 时完全不碰 SQLite，
   行为与没有持久化时一致。
 
+落盘快照的 `ivs` 键序由产出点显式排序为**降序**（高行权价在前），与对外帧的
+`strikes` 同向 —— 冷数据与帧不再方向相反。由
+`tools/check_persistence.py::_case_key_order_descending` 守着。
+
 `data/` 在 `.gitignore` 里，不进版本控制。回归：`tools/check_persistence.py`。
 
 ---
@@ -343,7 +349,8 @@ def broadcast(self, text: str) -> int:   # 同步函数
 
 ## 7. 前端
 
-原生 JS + ECharts 5.5.1（`web/vendor/echarts.min.js` 已本地化，完全离线可用）。
+原生 JS + ECharts 5.5.1（`web/vendor/echarts.min.js` 已本地化，完全离线可用；
+内置 zrender 5.6.0，别把两者的版本号搞混）。
 
 | 文件 | 职责 |
 |---|---|
@@ -352,7 +359,7 @@ def broadcast(self, text: str) -> int:   # 同步函数
 | `runtime-config.js` | **由后端注入**（`window.SWATCH_RUNTIME`） |
 | `config.js` | 仅呈现参数：重连退避、渲染节流、色板、小数位 |
 | `ws_client.js` | 断线指数退避 + 抖动、帧合并（只留最新）、缺口统计 |
-| `period.js` | 时间周期切换：基线桶并组（ΔIV 相加）、尾部截断、色标重算 |
+| `period.js` | 时间周期切换：基线桶并组（ΔIV 相加）、尾部截断、色标重算、**Skew 列对齐** |
 | `matrix_codec.js` | 热力图数值块解包（位图 + 定标整数 → `block.values`） |
 | `heatmap.js` | ECharts heatmap，`animation:false`，`progressive` 分片绘制 |
 | `skew.js` | 25Δ Skew 主曲线 + ATM/Put25/Call25 副轴，纵轴不自动缩放 |
@@ -363,8 +370,46 @@ def broadcast(self, text: str) -> int:   # 同步函数
 * **陈旧看门狗用本地收帧时间**，不用帧里的 `ts` —— 帧里的 `ts` 是**会话时间**
   （由 `SessionClock` 给出），它与墙钟之间没有固定关系（离线回归还会把它推进
   若干小时），拿它算"多久没更新"会立刻误报。
-* **Skew 纵轴范围来自后端的 `skew_min`/`skew_max`**，不让 ECharts 自动缩放。
-  自动缩放会让曲线在剧烈波动时"看起来变平"，掩盖真实的量级变化。
+* **Skew 纵轴量程 = 时间窗口内的极值**，不让 ECharts 自动缩放。自动缩放会让曲线
+  在剧烈波动时"看起来变平"，掩盖真实的量级变化；但若按**整条序列**取极值，早盘
+  一次瞬时尖峰会把量程永久撑大，之后全天 0~1 的波动被压成一条平线。窗口长度
+  （`skew.scale_policy.window_s`）由**后端下发**：它是业务口径而非呈现参数，前端
+  自己写一个默认值就等于把口径抄了一份。实测早盘一个 +9 的尖峰会让上界从 0.84
+  变成 10.62（12.7 倍）。
+
+### 周期一致性：两块图共用一套列网格
+
+前端有 30 秒 / 1 分钟 / 3 分钟 / 5 分钟 / 15 分钟五个周期标签。**选了哪个周期，
+IV 热力图与 Skew 折线就必须都是哪个周期** —— 否则同一屏幕的横坐标在两块图里指向
+不同时刻，上下没法对着看。
+
+实现上只有**一份**列网格：热力图先算（`period.js::aggregate` 并组 → `clipTail`
+截尾），Skew 再对齐过去（`period.js::alignSkew`）。两处口径不同，各自算一遍就是
+把分组规则抄了两遍：
+
+* 热力图聚合的是 ΔIV（**增量，可加**），组内求和 —— 望远镜相消后
+  `Σ(k=a..b) ΔIV[k] = IV[b] − IV[a−1]`，是恒等式不是近似；
+* Skew 是**水平量**（两点 IV 之差），组内求和没有金融含义，取**组内末值**
+  （"这一格画的是该周期结束时的读数"，与 K 线取收盘价同理）。
+
+回归 `tools/check_skew_alignment.py` 钉住这条链，且判据刻意避开恒真断言：
+`alignSkew` 的 `label` 是从热力图网格**复制**来的，所以"两块图逐列标签相同"永远为
+真、抓不到任何东西；真正可失败的是 **[C1]** 聚合确实发生、**[C2]** 每列的 `ts` 落在
+该列覆盖的**时间区间**内（只用 `ts`，不碰 `bucket` 字段）、**[C4]** 取的是末值而非
+首值、**[C6]** 量程窗口生效。
+
+### 前端脚本语法门禁
+
+`tools/check_web_syntax.py` 按目录枚举 `web/*.js`，逐个跑 `node --check`。它存在
+的直接原因是一次真实事故：改动把 `web/skew.js` 的模块 docstring 拆成两段、中间多留
+了一个 `*/`，块注释提前闭合，后面的说明文字掉到注释外面，整个文件成了语法错误 ——
+`window.SkewPanel` 根本不存在，**Skew 面板整块空白**。
+
+而当时 `tools/` 里 13 个回归全绿：`check_period_aggregation.py` 只加载 `period.js`，
+`check_matrix_codec.py` 只加载 `matrix_codec.js`，`check_web_contract.py` 只加载
+`config.js` —— `skew.js` / `heatmap.js` / `app.js` / `ws_client.js` **没有任何检查器
+加载过**。不是断言写错了，是根本没人在看这几个文件。门禁按目录枚举而不写死名单，
+新增前端文件自动纳入。
 
 ---
 

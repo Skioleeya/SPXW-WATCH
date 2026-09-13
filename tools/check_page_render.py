@@ -6,9 +6,15 @@ L6 — 页面渲染回归。
 为什么需要它
 ------------
 探针校验的是"后端发的对不对"，契约检查校验的是"前端读的字段存不存在"，
-两者都绿也不代表页面能看：Skew 面板曾经因为一个 ``visualMap`` 配置在 ECharts
-5.6.0 上必抛 ``Cannot read properties of undefined (reading 'coord')``，整块曲线
-渲染中断 —— 后端数据完全正常、字段名也完全对得上，只有真拿浏览器打开才看得见。
+两者都绿也不代表页面能看：Skew 面板曾经因为一个 ``visualMap`` 配置在 vendor 的
+ECharts 5.5.1 上必抛 ``Cannot read properties of undefined (reading 'coord')``，
+整块曲线渲染中断 —— 后端数据完全正常、字段名也完全对得上，只有真拿浏览器打开
+才看得见。
+
+这也是"打开的到底是不是我们的页面"的封口检查：8060 上若有别的进程（代理 / 网关）
+在应答，Chrome 会拿到**别人的错误页**，而那页面上也有 ``<button>``，于是第 7 组
+断言里的"周期按钮已生成"会**假通过**。故第 0 组先用本项目独有的元素 id 做哨兵，
+哨兵不过即判失败并中止（见 ``SENTINELS`` 与 ``missing_sentinels``）。
 
 这是"没人真正看过页面"这个盲区的封口检查。它跑得比人快，也比人可靠。
 
@@ -48,6 +54,22 @@ CHROME_CANDIDATES: tuple[str, ...] = (
     "/usr/bin/chromium",
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
 )
+
+
+#: 本项目页面独有的元素 id，用作"拿到的确实是我们的面板"的哨兵。
+#: 见 main() 里第 0 组断言的说明 —— 少了它，代理错误页会被误判成"页面正常"。
+SENTINELS: tuple[str, ...] = ("topbar", "heatmap", "skew", "st-conn")
+
+
+def missing_sentinels(dom: str) -> list[str]:
+    """
+    返回 ``dom`` 里缺失的哨兵元素 id（空列表 = 拿到的确实是本项目的面板）。
+
+    抽成独立函数是为了让它**可被离线验证**：真实 ``web/index.html`` 必须返回空
+    列表，Chrome 的网络错误页必须返回非空列表。判据不能只靠"在真机上跑一次"来
+    证明 —— 本环境下 Chrome 连不到本地监听，跑不出正向用例。
+    """
+    return [eid for eid in SENTINELS if f'id="{eid}"' not in dom]
 
 
 def _check(label: str, condition: bool, detail: str = "") -> bool:
@@ -126,6 +148,26 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     passed = True
+
+    # 0) 哨兵：拿到的到底是不是本项目的页面。
+    #
+    # 为什么必须有这一步：2026-09-13 实测发现，当 8060 上没有我们的服务、而本机
+    # 环境里有一个 HTTP 代理在监听同一端口时，Chrome 会拿到代理的 502 错误页 ——
+    # 那页面上也有 `<button>`，于是下面第 7 组断言里的"周期按钮已生成（≥ 2 档）"
+    # 会**报 ok**，而面板其实一个字都没渲染。**假通过比假失败危险得多**，所以先
+    # 用本项目独有的元素 id 做哨兵；哨兵不过就直接判失败并返回，不再往下断言 ——
+    # 在一个陌生页面上跑后面的断言，结论没有意义。
+    missing = missing_sentinels(dom)
+    if missing:
+        _check("拿到的页面是本项目的面板（哨兵元素齐备）", False,
+               "缺失: " + ", ".join(missing) + " —— 打开的可能是代理/网关的错误页，"
+               "或服务没起来。后续断言已跳过。")
+        print()
+        print("=" * 72)
+        print(f"{RED}结果: 页面不是本项目的面板，检查中止{RESET}")
+        return 1
+    _check("拿到的页面是本项目的面板（哨兵元素齐备）", True,
+           "、".join(SENTINELS))
 
     # 1) 渲染异常：ws_client 捕获渲染回调异常后会写进状态栏。
     status = _text(dom, "sb-msg") or ""

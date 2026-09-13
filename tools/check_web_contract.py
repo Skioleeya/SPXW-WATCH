@@ -69,10 +69,12 @@ PAYLOAD_PATHS: tuple[str, ...] = (
     # period.js（周期聚合要用基线桶宽换算组大小，并用后端的色标规则重算量程）
     "heatmap.bucket_seconds", "heatmap.scale_policy",
     "heatmap.scale_policy.quantile", "heatmap.scale_policy.floor",
-    # skew.js
-    "skew.series", "skew.series.label", "skew.series.skew", "skew.series.atm",
+    # skew.js + app.js —— 折线对齐到热力图列网格（bucket 定列、ts 定量程窗口），
+    # 纵轴量程按后端下发的窗口长度在前端重算
+    "skew.series", "skew.series.ts", "skew.series.bucket", "skew.series.label",
+    "skew.series.skew", "skew.series.atm",
     "skew.series.put25", "skew.series.call25",
-    "skew.series.skew_min", "skew.series.skew_max",
+    "skew.scale_policy", "skew.scale_policy.window_s",
     "skew.latest", "skew.latest.skew", "skew.latest.atm",
 )
 

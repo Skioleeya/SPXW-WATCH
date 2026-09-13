@@ -1,0 +1,6 @@
+哨兵: ('topbar', 'heatmap', 'skew', 'st-conn')
+
+真实 index.html      (   2679 字符) → 缺失 []  PASS
+Chrome 网络错误页    ( 188020 字符) → 缺失 4/4 个  PASS
+
+判据非空转: PASS —— 真页面通过、错误页被拦下

@@ -90,8 +90,12 @@
     state.periodSeconds = seconds;
     renderPeriodButtons();
     /* 换周期只影响呈现，不必向后端要数据：拿缓存的最新一帧立刻重画。
-       否则要干等到下一次推送（最多 400ms）画面才变，点按钮像是没反应。 */
-    if (state.lastFrame) { renderHeatmap(state.lastFrame); }
+       否则要干等到下一次推送（最多 400ms）画面才变，点按钮像是没反应。
+       **两块图都要重画** —— 周期是两块图共用的时间尺度，只重画热力图会让
+       skew 停在旧粒度上，正是这次要消灭的不一致。 */
+    if (state.lastFrame) {
+      renderSkew(state.lastFrame, renderHeatmap(state.lastFrame));
+    }
   }
 
   function pickDefaultPeriod() {
@@ -202,6 +206,12 @@
       " · 推送 " + RT.pushIntervalMs + "ms");
   }
 
+  /*
+   * 返回**显示矩阵**，供 Skew 折线复用它的列网格（`labels` 与 `clipped`）。
+   * 两块图必须画在同一条时间轴上，列网格只能有一份来源 —— 让热力图算完
+   * 传给 skew，而不是两边各算一次（各算一次就等于把分组规则抄了两遍）。
+   * 无矩阵时返回 null，调用方据此保留上一帧画面。
+   */
   function renderHeatmap(frame) {
     syncPeriods(frame.heatmap);
 
@@ -213,6 +223,7 @@
         " · " + currentPeriodLabel());
     }
     setText("heatmap-foot", movers(view));
+    return view;
   }
 
   /* 取最新一列里绝对变动最大的几档，作为"雷达"读数。
@@ -238,13 +249,30 @@
     return "本桶(" + currentPeriodLabel() + ")冲量 Top: " + parts.join("   ");
   }
 
-  function renderSkew(frame) {
+  /*
+   * Skew 折线：先按当前周期对齐到热力图的列网格，再交给面板画。
+   *
+   * 对齐必须用**热力图这一帧实际显示的那套列**（含尾部截断），否则两块图的
+   * 横坐标指向不同时刻。热力图本帧没有矩阵时没有可用网格，此时整体不更新 ——
+   * 拿上一帧的网格去配这一帧的数据，会画出时间错位而不报任何错。
+   */
+  function renderSkew(frame, view) {
     var block = frame.skew;
-    var info = skewPanel.update(block);
+    if (!block || !block.series) { return; }
+    if (!view || !view.labels) { return; }
+
+    var aligned = global.SWATCH_PERIOD.alignSkew(
+      block.series,
+      groupOf(state.periodSeconds),
+      { labels: view.labels, drop: view.clipped || 0 }
+    );
+    if (!aligned) { return; }
+
+    var info = skewPanel.update(aligned, block.scale_policy);
     if (info && block.latest) {
-      setText("skew-meta", info.points + " 点 · 当前 " +
+      setText("skew-meta", info.points + "/" + info.cols + " 点 · 当前 " +
         signed(block.latest.skew, CFG.decimals.skew) + " · ATM " +
-        num(block.latest.atm, CFG.decimals.iv));
+        num(block.latest.atm, CFG.decimals.iv) + " · " + currentPeriodLabel());
     }
   }
 
@@ -260,8 +288,8 @@
 
     renderHeader(frame);
     renderStatus(frame);
-    renderHeatmap(frame);
-    renderSkew(frame);
+    /* 热力图先算：它产出两块图共用的列网格，skew 需要它。 */
+    renderSkew(frame, renderHeatmap(frame));
 
     setClass("st-dot", "dot on");
   }

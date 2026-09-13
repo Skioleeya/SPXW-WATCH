@@ -5,19 +5,31 @@
  * 辅序列：ATM IV / 25Δ Put IV / 25Δ Call IV（右侧纵轴），
  *         用来区分"整体波动率抬升"与"单纯偏度形变"。
  *
+ * 横轴：由 app.js 先对齐到热力图那套列网格（web/period.js::alignSkew），
+ *       所以本面板收到的 `series.label` 与热力图的列**逐列对应** —— 选 1 分钟
+ *       周期时两块图都是 1 分钟一格。本面板不做任何时间轴换算。
+ *
  * 纵轴不自动缩放
  * --------------
- * 后端每帧会带上 ``skew_min`` / ``skew_max``，前端取二者与 0 的并集再加留白。
- * 若让 ECharts 每帧自动 scale，曲线会因为量程随数据跳动而"呼吸"，反而看不清
- * 真实的斜率变化。
+ * 量程按后端下发的 ``skew.scale_policy.window_s``（窗口长度）在**窗口内**取
+ * 极值，再与 0 取并集、加留白。两条设计约束：
+ *
+ *   1. 若让 ECharts 每帧自动 scale，曲线会因为量程随数据跳动而"呼吸"，
+ *      反而看不清真实的斜率变化；
+ *   2. 但若按**整条序列**取极值，早盘一次瞬时尖峰（例如 +9）会把量程永久撑大，
+ *      之后全天 0~1 的波动被压成一条平线。窗口取最近一小时，尖峰会随时间
+ *      退出窗口，量程自动收回。
+ *
+ * 为什么窗口长度由后端下发：它是业务口径，不是呈现参数。前端自己写一个
+ * 默认值就等于把口径抄了一份，后端调整时两边会悄悄不一致。
  *
  * 为什么不用 visualMap 做正负着色
  * ------------------------------
  * 直觉写法是给主序列挂一个 ``visualMap``（``pieces: [{gt:0},{lte:0}]``）按
- * 正负分段着色。**这条路在本项目的 ECharts 5.6.0 上走不通**：只要用 ``pieces``
- * 模式，渲染时必抛 ``Cannot read properties of undefined (reading 'coord')``，
- * 整块 Skew 面板渲染中断（实测 ``type:'piecewise'`` / ``show:true`` / 二维
- * 数据 / 去掉 seriesIndex 全都一样失败，而 ``continuous`` 模式正常）。
+ * 正负分段着色。**这条路在本项目 vendor 的 ECharts 5.5.1 上走不通**：只要用
+ * ``pieces`` 模式，渲染时必抛 ``Cannot read properties of undefined (reading
+ * 'coord')``，整块 Skew 面板渲染中断（实测 ``type:'piecewise'`` / ``show:true`` /
+ * 二维数据 / 去掉 seriesIndex 全都一样失败，而 ``continuous`` 模式正常）。
  *
  * 所以改成把主序列按正负拆成**两条同名曲线**，各自固定颜色，另一侧填 null。
  * 效果与 ``pieces`` 的硬分割完全一致，且不依赖 visualMap 的实现细节。拆出的
@@ -67,25 +79,69 @@
     return { positive: positive, negative: negative };
   }
 
-  function axisRange(series) {
+  /*
+   * 纵轴量程：窗口内的极值 ∪ {0}，再加留白。
+   *
+   * 窗口按**时间**定义（后端下发的 window_s），与用户选的周期无关 —— 30 秒
+   * 视图和 15 分视图看到的是同一段行情，量程可比，切换周期时纵轴不会跳。
+   *
+   * 基准时刻取序列里**最后一个有时间戳的列**，而不是最后一个有 skew 值的列：
+   * 断流恢复后末尾可能挂着若干空列，拿空列当基准会把整个窗口往后挪。
+   */
+  function axisRange(series, policy) {
+    var values = series.skew || [];
+    var stamps = series.ts || [];
+
+    var windowS = policy ? Number(policy.window_s) : 0;
+    if (!isFinite(windowS) || windowS < 0) { windowS = 0; }
+
+    var latest = null;
+    for (var i = stamps.length - 1; i >= 0; i--) {
+      var s = stamps[i];
+      if (typeof s === "number" && isFinite(s)) { latest = s; break; }
+    }
+
     var lo = 0;
     var hi = 0;
-    if (series.skew_min !== null && series.skew_min !== undefined) {
-      lo = Math.min(lo, series.skew_min);
-      hi = Math.max(hi, series.skew_min);
+    var seen = 0;
+
+    for (var k = 0; k < values.length; k++) {
+      var v = values[k];
+      if (v === null || v === undefined) { continue; }
+      if (windowS > 0 && latest !== null) {
+        var st = stamps[k];
+        if (typeof st === "number" && isFinite(st) && latest - st > windowS) {
+          continue;
+        }
+      }
+      lo = Math.min(lo, v);
+      hi = Math.max(hi, v);
+      seen += 1;
     }
-    if (series.skew_max !== null && series.skew_max !== undefined) {
-      lo = Math.min(lo, series.skew_max);
-      hi = Math.max(hi, series.skew_max);
+
+    /* 窗口内一个点都没有：可见数据整体短于窗口，或最近一段断流而更早还有
+       读数。两种情况下"窗口内的极值"都退化成"全部可见数据的极值" —— 若这时
+       仍按空窗口给 ±0.18，画出来的曲线会整条跑到轴外被裁掉。 */
+    if (!seen) {
+      for (var j = 0; j < values.length; j++) {
+        var w = values[j];
+        if (w === null || w === undefined) { continue; }
+        lo = Math.min(lo, w);
+        hi = Math.max(hi, w);
+      }
     }
+
     var span = Math.max(hi - lo, 1);
     var pad = span * CFG.skew.padRatio;
     return [lo - pad, hi + pad];
   }
 
-  SkewPanel.prototype.update = function (block) {
-    if (!block || !block.series) { return false; }
-    var series = block.series;
+  /*
+   * `series` 已由 app.js 对齐到热力图那套列网格（逐列数值 + 等长的 label），
+   * `policy` 是后端下发的纵轴量程策略。本方法只负责画，不做时间轴换算。
+   */
+  SkewPanel.prototype.update = function (series, policy) {
+    if (!series) { return false; }
     var labels = series.label || [];
     var count = labels.length;
     if (!count) { return false; }
@@ -94,7 +150,7 @@
     var atm = series.atm || [];
     var put25 = series.put25 || [];
     var call25 = series.call25 || [];
-    var range = axisRange(series);
+    var range = axisRange(series, policy);
     var sign = splitBySign(skew);
 
     /* 主序列按正负拆成两条同名曲线。见模块 docstring「为什么不用 visualMap」。 */
@@ -204,7 +260,11 @@
         axisLabel: {
           color: CFG.theme.textFaint,
           fontSize: 10,
-          interval: Math.max(Math.floor(count / 14) - 1, 0)
+          interval: Math.max(Math.floor(count / 14) - 1, 0),
+          /* interval 是**强制**间隔：一旦算成 0，ECharts 就不再自动防重叠。
+             窄窗口（或列数恰好落在 15 附近）时标签会糊成一团，所以额外允许
+             它按实际宽度自行省略。 */
+          hideOverlap: true
         }
       },
       yAxis: [
@@ -253,7 +313,15 @@
 
     this._chart.setOption(option, { notMerge: true });
     this._count = count;
-    return { points: count, range: range };
+
+    /* points 是**有读数的列数**，cols 是列总数。两者分开报：对齐之后列网格
+       由热力图决定，可能出现"有列无值"（该周期内这一点没有读数），只报列数
+       会让人以为满屏都有数据。 */
+    var filled = 0;
+    for (var q = 0; q < skew.length; q++) {
+      if (skew[q] !== null && skew[q] !== undefined) { filled += 1; }
+    }
+    return { points: filled, cols: count, range: range };
   };
 
   SkewPanel.prototype.stats = function () {

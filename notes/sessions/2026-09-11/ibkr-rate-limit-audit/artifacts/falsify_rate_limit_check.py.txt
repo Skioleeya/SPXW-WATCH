@@ -1,0 +1,70 @@
+"""临时：验证自检 [11] 的四条规则真的会 FAIL（非空转验证）。
+
+放在工程目录之外，避免被 iter_py_files() 扫到（那会让检查 [10] 误报硬编码）。
+"""
+
+import json
+import subprocess
+from pathlib import Path
+
+ROOT = Path(r"E:\US.market\SPXW SWATCH\spxw_swatch")
+PY = r"C:/Users/Lenovo/.workbuddy-ai/binaries/python/envs/default/Scripts/python.exe"
+
+FILES = {
+    "ibkr": ROOT / "config" / "ibkr.json",
+    "subscription": ROOT / "config" / "subscription.json",
+}
+ORIG = {k: p.read_text(encoding="utf-8") for k, p in FILES.items()}
+
+CASES = [
+    ("容量 60 超官方上限 50", "ibkr", "rate_limit_max_requests", 60),
+    ("容量 0（会静默关掉限速）", "ibkr", "rate_limit_max_requests", 0),
+    ("滑动窗口 0", "ibkr", "rate_limit_interval_s", 0),
+    ("qualify 单批 50 超桶 45", "ibkr", "qualify_batch_size", 50),
+    ("订阅节奏 200/s 超桶 45/s", "subscription", "min_request_interval_s", 0.005),
+]
+
+
+def run_case(label, module, key, value):
+    cfg = json.loads(ORIG[module])
+    cfg[key] = value
+    FILES[module].write_text(
+        json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    try:
+        out = subprocess.run(
+            [PY, "run.py", "--check"], cwd=ROOT, capture_output=True, text=True,
+        )
+        text = out.stdout + out.stderr
+    finally:
+        FILES[module].write_text(ORIG[module], encoding="utf-8")
+
+    lines = [ln.strip() for ln in text.splitlines()
+             if "[11]" in ln or "[FAIL]" in ln]
+    print(f"--- {label}  (rc={out.returncode})")
+    for ln in lines:
+        print("    " + ln)
+
+
+print("=" * 72)
+print("自检 [11] 非空转验证：逐条把配置改坏，确认会 FAIL")
+print("=" * 72)
+for case in CASES:
+    run_case(*case)
+
+print()
+print("=" * 72)
+print("恢复后复跑一次，确认回到全绿")
+print("=" * 72)
+restored = subprocess.run(
+    [PY, "run.py", "--check"], cwd=ROOT, capture_output=True, text=True,
+)
+tail = [ln for ln in restored.stdout.splitlines()
+        if "结果:" in ln or "[11]" in ln or "[ok] 桶" in ln]
+for ln in tail:
+    print("    " + ln.strip())
+print(f"    rc={restored.returncode}")
+
+for k, p in FILES.items():
+    same = p.read_text(encoding="utf-8") == ORIG[k]
+    print(f"    config/{k}.json 已还原为原始内容: {same}")

@@ -1,0 +1,79 @@
+task_id: simulator-hard-cut
+date: 2026-09-13
+status: complete
+scope: >
+  硬切删除模拟盘全部依赖，让系统成为纯实盘系统：物理删除 simulator/ 4 个文件
+  （582 行）与 config/simulator.json；删除 run.py 的 --sim/--live 与
+  _resolve_simulate()；app/pipeline.py 删除 simulate 参数与 SimClock /
+  SyntheticFeed 两条分支（367 → 341 行）；移除 FeedMode.SIM；
+  抽出 tools/fixtures.py（188 行，FakeClock + SyntheticSurface）让 4 个
+  原本依赖模拟盘的离线回归活下来；同轮清理自检里的 simulator 登记项；
+  同步 README。同会话另完成记录体系拓扑：导入并放宽 skill
+  notes-session-records、把 5 条工程要求提升到用户级 MEMORY.md 并在项目级去重、
+  按 KAI 决策复活 notes/。
+change_id: N/A
+proposal_path: N/A
+tasks_path: N/A
+
+deliverables:
+  - tools/fixtures.py
+  - app/pipeline.py
+  - run.py
+  - contracts/enums.py
+  - contracts/ports.py
+  - core/clock.py
+  - acquisition/__init__.py
+  - tools/selfcheck_core.py
+  - tools/selfcheck_hardcode.py
+  - tools/check_clock_protocol.py
+  - tools/check_side_flip.py
+  - tools/check_session_rollover.py
+  - tools/smoke_test.py
+  - README.md
+  - C:/Users/Lenovo/.workbuddy-ai/skills/notes-session-records/SKILL.md
+  - C:/Users/Lenovo/.workbuddy-ai/MEMORY.md
+  - .workbuddy-ai/memory/MEMORY.md
+  - notes/
+
+removed:
+  - simulator/__init__.py
+  - simulator/scenario.py
+  - simulator/sim_clock.py
+  - simulator/synthetic_feed.py
+  - config/simulator.json
+  - C:/Users/Lenovo/.workbuddy-ai/skills/notes-session-records/agents/openai.yaml
+
+validation_commands:
+  - "python run.py --check"
+  - "python tools/smoke_test.py"
+  - "python tools/check_clock_protocol.py"
+  - "python tools/check_side_flip.py"
+  - "python tools/check_subscription_qualify.py"
+  - "python tools/check_tick_router.py"
+  - "python tools/check_session_rollover.py"
+  - "python tools/check_matrix_codec.py"
+  - "python tools/check_period_aggregation.py"
+  - "python tools/check_reconnect_gap.py"
+  - "python tools/check_persistence.py"
+  - "python tools/check_reconnect_flow.py"
+  - "python tools/check_web_contract.py"
+  - "python tools/check_page_render.py"
+  - "python tools/check_ws_compression.py"
+  - "python tools/ws_probe.py"
+
+notes:
+  - 本机三个解释器都没有 tzdata，必须用隔离 venv 跑（否则时间类构造抛 ZoneInfoNotFoundError）。
+  - 隔离 venv 路径：C:/Users/Lenovo/.workbuddy-ai/binaries/python/envs/default
+  - 环境变量需设 NO_PROXY=127.0.0.1,localhost，否则本机回环请求会被代理拦成 502。
+  - check_web_contract / check_page_render / check_ws_compression / ws_probe
+    需要服务已在 8060 监听；本会话未起服务，这 4 项未跑通。
+  - 模拟盘备份在仓库之外：E:/US.market/SPXW SWATCH/simulator_removed_20260913/
+  - >
+    tools/ 的自检豁免范围是实测确认的：豁免 [2] 分层 / [9] 单一职能 /
+    [10] 硬编码，不豁免 [1] 行数与 [8] __slots__ —— 这直接决定
+    tools/fixtures.py 必须 < 400 行（实测 188 行）。
+  - >
+    改动未提交：git diff --stat = 18 files changed, 186 insertions(+),
+    814 deletions(-)，另有 2 个未跟踪项（notes/、tools/fixtures.py）。
+    HEAD 仍是 3eeb55b。是否推送 origin/main 待 KAI 指示。
+  - git 全程刷 "LF will be replaced by CRLF" 警告，属仓库 autocrlf 历史残留，非本次引入。

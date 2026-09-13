@@ -32,7 +32,7 @@ from contracts.tick import (
 
 @runtime_checkable
 class ClockPort(Protocol):
-    """时间源。实盘用墙上时钟，模拟用合成时钟。"""
+    """时间源。生产实现是墙上时钟（``core.clock.WallClock``）。"""
 
     def now(self) -> float:
         """返回当前时间（epoch 秒）。"""
@@ -68,15 +68,18 @@ class TickSink(Protocol):
 
 
 # --------------------------------------------------------------------------- #
-# 数据源（L1 与模拟器共同实现）
+# 数据源（L1 实现）
 # --------------------------------------------------------------------------- #
 
 
 @runtime_checkable
 class FeedPort(Protocol):
     """
-    行情源。``IbkrFeed``（实盘）与 ``SyntheticFeed``（离线）都实现它，
-    因此 L6 组装层可以在不改动任何下游代码的前提下切换数据源。
+    行情源。目前唯一的生产实现是 ``IbkrFeed``（IBKR）。
+
+    之所以仍然定义为协议、而不是让组装层直接依赖 ``IbkrFeed``：L6 只认识本
+    协议，于是"换一个数据源"（接入别的经纪商、或另写一个实现）不必改动任何
+    下游代码，也不会让组装层反向依赖 L1 的具体模块。
     """
 
     def set_sink(self, sink: TickSink) -> None:
@@ -85,8 +88,7 @@ class FeedPort(Protocol):
 
     def set_reconnect_hook(self, hook: Callable[[], None]) -> None:
         """
-        注册"连接重建成功"之后要执行的回调。实盘源在自动重连成功时触发；
-        离线源不会重连，实现为 no-op。
+        注册"连接重建成功"之后要执行的回调，由行情源在自动重连成功时触发。
 
         为什么这条钩子必须进端口
         ------------------------

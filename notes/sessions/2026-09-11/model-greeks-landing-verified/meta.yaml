@@ -1,0 +1,47 @@
+task_id: model-greeks-landing-verified
+date: 2026-09-11
+status: complete
+scope: >
+  两件事。①（主）KAI 提问「实盘 tick 回流后 106 模型 Greeks 落地（paper 无实时
+  OPRA 权限）什么意思？」—— 用一支绕开项目代码的直接探针回答：验证
+  config/ibkr.json 的 generic_tick_list="106" 是否真的让 IBKR 推送
+  tickOptionComputation，且 ticker.modelGreeks 是否非空。结论：**确实回流**，
+  且本次观测到的是**实时数据**（marketDataType=1），推翻了"paper 无实时权限"
+  的旧假设。②（次）落地 KAI 决策：IV 热力图 ΔIV ≈ 0 **不退回中性色**。
+change_id: N/A
+proposal_path: N/A
+tasks_path: N/A
+
+deliverables:
+  - notes/context/open_tasks.md
+  - notes/context/project_state.md
+  - notes/sessions/2026-09-11/model-greeks-landing-verified/artifacts/probe_model_greeks.py.txt
+  - notes/sessions/2026-09-11/model-greeks-landing-verified/artifacts/probe_output_20260911_1147.txt
+
+validation_commands:
+  - "NO_PROXY=127.0.0.1,localhost <VENV>/python.exe -u C:/Users/Lenovo/.workbuddy-ai/tmp/probe_model_greeks.py"
+  - "python run.py --check"
+
+notes:
+  - >
+    探针**必须**放在工程目录之外（C:/Users/Lenovo/.workbuddy-ai/tmp/）：
+    工程内的 .py 会被 tools/selfcheck_core.iter_py_files() 扫到并让自检 [10]
+    误报硬编码。归档进 artifacts/ 时改后缀 .py.txt（同样原因）。
+  - >
+    坑：ib_async 的 `ib.sleep()` 是**同步**方法（内部走 util.run），在 async 函数里
+    调用会抛 `RuntimeError: This event loop is already running`。async 上下文里
+    必须用 `await asyncio.sleep()`。第一版探针就踩了这个，在 [6] 步崩掉。
+  - >
+    "open orders request timed out" / "completed orders request timed out" 是
+    IB 在 paper 环境下的常规告警，与本次验证无关。
+  - >
+    关键观测：modelGreeks 与 bid/ask/last 三档 greeks **四者并存且值不同**
+    （model iv=0.12483/delta=0.43913；bid 0.12329/0.46919；ask 0.12629/0.46995；
+    last 0.11728/0.46756）⇒ 证明 MODEL_OPTION 是独立的一条 tick 通道，
+    不是同一份数据的拷贝。
+  - >
+    残留不确定：ib_async 的 GREEKS_TICK_MAP 把 tickType 13（实时模型）与
+    83（延迟模型）合并到同一个 `modelGreeks` 属性，**无法从属性层区分**。
+    故 TickRouter 把 source_tick_type 一律记为 13 —— 这是名义值。
+    本次 marketDataType=1 倾向于是 13，属间接推断。
+  - 本次未改任何生产代码；未重启项目服务（探针用独立 clientId=97）。

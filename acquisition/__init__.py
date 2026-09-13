@@ -13,13 +13,13 @@ L1 — 采集层。
 ------------------------
 本包中 ``contract_factory`` 与 ``ibkr_gateway`` 会在模块加载时 import
 ``ib_async``。如果 ``__init__.py`` 把全部子模块都导出来，那么仅仅 ``import
-acquisition`` 就会强制拉起 ``ib_async``——离线模拟模式（只跑
-``simulator`` + ``state`` + ``features`` + ``transport``）将无法脱离该依赖。
+acquisition`` 就会强制拉起 ``ib_async``——``run.py --check`` 与 ``tools/``
+下的离线回归（它们只跑 ``state`` + ``features`` + ``serialization`` +
+``transport``，完全不碰行情通道）将无法脱离该依赖。
 
 因此本文件刻意保持为空壳，调用方按需显式 import 具体子模块：
 
 ::
 
-    from acquisition.feed_service import IbkrFeed      # 实盘
-    from simulator.synthetic_feed import SyntheticFeed  # 离线
+    from acquisition.feed_service import IbkrFeed
 """

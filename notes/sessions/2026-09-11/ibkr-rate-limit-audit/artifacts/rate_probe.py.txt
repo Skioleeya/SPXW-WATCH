@@ -1,0 +1,88 @@
+"""临时探针：核实 IBKR 限速桶的真实位置与阈值。用完即删，不进项目包。"""
+
+import asyncio
+import time
+
+from ib_async import IB, Option
+
+HOST = "127.0.0.1"
+
+
+def make_contracts(n, base):
+    return [
+        Option("SPX", "20260911", base + 5 * i, "C", "SMART",
+               tradingClass="SPXW", multiplier="100")
+        for i in range(n)
+    ]
+
+
+async def probe_port(port):
+    ib = IB()
+    try:
+        await ib.connectAsync(HOST, port, clientId=99, timeout=8, readonly=True)
+    except Exception as exc:
+        print(f"[port {port}] 连接失败: {type(exc).__name__}: {exc}")
+        return None
+    print(f"[port {port}] 连接成功 serverVersion={ib.client.serverVersion()}")
+    return ib
+
+
+async def main():
+    print("=== 1. 项目配置端口 7497（TWS 模拟盘） ===")
+    ib = await probe_port(7497)
+    if ib is not None:
+        ib.disconnect()
+
+    print()
+    print("=== 2. 实际监听端口 4002（IB Gateway 模拟盘） ===")
+    ib = await probe_port(4002)
+    if ib is None:
+        return
+
+    client = ib.client
+    print(f"[limiter] MaxRequests={client.MaxRequests} "
+          f"RequestsInterval={client.RequestsInterval}")
+    print(f"[limiter] 库层速率上限 = "
+          f"{client.MaxRequests / client.RequestsInterval:.0f} msg/s")
+
+    errors = []
+    ib.errorEvent += lambda rid, code, msg, ctr: errors.append(code)
+    throttle_marks = []
+    client.throttleStart += lambda: throttle_marks.append(("start", time.monotonic()))
+    client.throttleEnd += lambda: throttle_marks.append(("end", time.monotonic()))
+
+    async def burst(n, label, base):
+        contracts = make_contracts(n, base)
+        throttle_marks.clear()
+        peak = 0
+        t0 = time.monotonic()
+
+        async def sampler():
+            nonlocal peak
+            while time.monotonic() - t0 < 8:
+                peak = max(peak, len(client._msgQ))
+                await asyncio.sleep(0.01)
+
+        task = asyncio.create_task(sampler())
+        await asyncio.gather(*[ib.reqContractDetailsAsync(c) for c in contracts])
+        dt = time.monotonic() - t0
+        task.cancel()
+
+        starts = [m for m in throttle_marks if m[0] == "start"]
+        print(f"[burst {label}] n={n:3d} wall={dt:.3f}s "
+              f"peak_msgQ={peak:3d} throttle_start={len(starts)}")
+        return dt
+
+    print()
+    print("=== 3. 突发发送实测（reqContractDetails，不占行情行数） ===")
+    await burst(30, "below", base=5000.0)
+    await asyncio.sleep(1.5)
+    await burst(90, "above", base=6000.0)
+
+    print()
+    print(f"[errors] 收到的 IBKR 错误码: {sorted(set(errors)) or '无'}")
+
+    ib.disconnect()
+
+
+asyncio.run(main())

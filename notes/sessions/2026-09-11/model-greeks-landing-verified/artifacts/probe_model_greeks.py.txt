@@ -1,0 +1,159 @@
+"""
+直接观测：generic tick "106" 是否让 IBKR 推送 tickOptionComputation（MODEL_OPTION）。
+
+要回答的问题
+------------
+项目声称 IV / Greeks **全部来自 IBKR 的 MODEL_OPTION 推送**（`config/ibkr.json`
+的 `generic_tick_list: "106"` 是开关，`use_model_greeks: true` 表示不接受降级来源）。
+但 paper 账户没有实时 OPRA 权限，实测只看到 Error 10090（"Delayed market data is
+available"），所以"106 模型 Greeks 是否真的落地"一直被标为**未验证**。
+
+本探针绕开项目代码，用与项目**完全相同**的参数直接订阅一个 SPXW 0DTE 合约，观测：
+
+  1. `ticker.marketDataType` —— 实际走的是实时(1)还是延迟(3)
+  2. `ticker.modelGreeks` 是否非空 —— 即 MODEL_OPTION 是否真的回流
+  3. `bidGreeks` / `askGreeks` / `lastGreeks` —— 作对照。项目 `use_model_greeks=true`
+     时 `TickRouter._pick_computation()` 会**拒绝**这三档降级来源
+
+注意：本文件**必须**放在工程目录之外 —— 工程内的 `.py` 会被
+`tools/selfcheck_core.iter_py_files()` 扫到并让自检 [10] 误报硬编码。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import datetime as dt
+
+from ib_async import IB, Index, Option
+
+HOST = "127.0.0.1"
+PORT = 4002
+CLIENT_ID = 97
+
+SYMBOL = "SPX"
+UNDERLYING_EXCHANGE = "CBOE"
+TRADING_CLASS = "SPXW"
+OPTION_EXCHANGE = "SMART"
+GENERIC_TICKS = "106"
+WAIT_S = 30.0
+
+
+def _show(name: str, comp: object) -> str:
+    if comp is None:
+        return f"{name:11s} = None"
+    return (
+        f"{name:11s} = iv={getattr(comp, 'impliedVol', None)} "
+        f"delta={getattr(comp, 'delta', None)} "
+        f"gamma={getattr(comp, 'gamma', None)} "
+        f"vega={getattr(comp, 'vega', None)} "
+        f"theta={getattr(comp, 'theta', None)} "
+        f"undPrice={getattr(comp, 'undPrice', None)} "
+        f"optPrice={getattr(comp, 'optPrice', None)}"
+    )
+
+
+async def main() -> int:
+    ib = IB()
+    await ib.connectAsync(HOST, PORT, clientId=CLIENT_ID, timeout=20)
+    print(f"[1] connected={ib.isConnected()}  clientId={CLIENT_ID}")
+
+    ib.reqMarketDataType(3)
+    print("[2] reqMarketDataType(3) —— 与 config/ibkr.json 的 market_data_type 一致")
+
+    idx = Index(SYMBOL, UNDERLYING_EXCHANGE, "USD")
+    await ib.qualifyContractsAsync(idx)
+    if not idx.conId:
+        print("!! 标的 qualify 失败")
+        ib.disconnect()
+        return 2
+    print(f"[3] 标的 {idx.symbol} conId={idx.conId} secType={idx.secType}")
+
+    chains = await ib.reqSecDefOptParamsAsync(idx.symbol, "", idx.secType, idx.conId)
+    print(f"[4] 链参数 {len(chains)} 片")
+
+    today = dt.date.today().strftime("%Y%m%d")
+    target = None
+    for chain in chains:
+        if getattr(chain, "tradingClass", "") != TRADING_CLASS:
+            continue
+        if today in {str(e) for e in getattr(chain, "expirations", ())}:
+            target = chain
+            break
+    if target is None:
+        avail = sorted(
+            {
+                str(e)
+                for chain in chains
+                if getattr(chain, "tradingClass", "") == TRADING_CLASS
+                for e in getattr(chain, "expirations", ())
+            }
+        )
+        print(f"!! 未找到 {TRADING_CLASS} 当日到期 {today}；最近可用: {avail[:6]}")
+        ib.disconnect()
+        return 3
+    print(
+        f"[5] 命中 {TRADING_CLASS} {today} exchange={target.exchange} "
+        f"strikes={len(target.strikes)}"
+    )
+
+    spot_ticker = ib.reqMktData(idx, "", False, False)
+    await asyncio.sleep(3.0)
+    spot = spot_ticker.marketPrice()
+    print(
+        f"[6] 标的现价 ≈ {spot}  "
+        f"marketDataType={spot_ticker.marketDataType} (1=实时 2=冻结 3=延迟 4=延迟冻结)"
+    )
+
+    strikes = sorted(float(s) for s in target.strikes)
+    atm = (
+        min(strikes, key=lambda s: abs(s - spot))
+        if spot and spot > 0
+        else strikes[len(strikes) // 2]
+    )
+    print(f"[7] 取 ATM 行权价 {atm}")
+
+    opt = Option(
+        SYMBOL, today, atm, "C", OPTION_EXCHANGE,
+        tradingClass=TRADING_CLASS, currency="USD",
+    )
+    await ib.qualifyContractsAsync(opt)
+    if not opt.conId:
+        print("!! 期权 qualify 失败")
+        ib.disconnect()
+        return 4
+    print(f"[8] 期权 {opt.localSymbol} conId={opt.conId}")
+
+    ticker = ib.reqMktData(opt, GENERIC_TICKS, False, False)
+    print(f'[9] 已订阅 genericTickList="{GENERIC_TICKS}"，最多等 {WAIT_S:.0f}s ...')
+
+    appeared_at = None
+    for second in range(int(WAIT_S)):
+        await asyncio.sleep(1.0)
+        if ticker.modelGreeks is not None:
+            appeared_at = second + 1
+            break
+
+    print("\n===== 观测结果 =====")
+    print(f"marketDataType = {ticker.marketDataType} (1=实时 2=冻结 3=延迟 4=延迟冻结)")
+    print(_show("modelGreeks", ticker.modelGreeks))
+    print(_show("bidGreeks", getattr(ticker, "bidGreeks", None)))
+    print(_show("askGreeks", getattr(ticker, "askGreeks", None)))
+    print(_show("lastGreeks", getattr(ticker, "lastGreeks", None)))
+    print(f"bid / ask / last = {ticker.bid} / {ticker.ask} / {ticker.last}")
+
+    if appeared_at is not None:
+        print(
+            f"\nVERDICT: modelGreeks 在第 {appeared_at}s 出现 —— "
+            f'"106" → tickOptionComputation → MODEL_OPTION 数据**确实回流**。'
+        )
+    else:
+        print(f"\nVERDICT: {WAIT_S:.0f}s 内 modelGreeks 始终为空 —— **未回流**。")
+
+    ib.cancelMktData(opt)
+    ib.cancelMktData(idx)
+    ib.disconnect()
+    return 0 if appeared_at is not None else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(asyncio.run(main()))

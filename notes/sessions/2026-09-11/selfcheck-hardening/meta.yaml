@@ -1,0 +1,46 @@
+task_id: selfcheck-hardening
+date: 2026-09-11
+status: complete
+scope: >
+  把五条项目硬约束补齐为可执行检查（新增 [9] 单一职能、[10] 禁止硬编码、
+  [7] 配置键归属与接线）；把 state.prune_interval_s 接进 L6 维护循环；
+  拆分 tools/selfcheck.py；修复 SessionClock 未实现 ClockPort 导致的裁剪失效；
+  为全部新增检查做非空转验证；同步 README。
+change_id: N/A
+proposal_path: N/A
+tasks_path: N/A
+
+deliverables:
+  - tools/selfcheck.py
+  - tools/selfcheck_core.py
+  - tools/selfcheck_structure.py
+  - tools/selfcheck_config.py
+  - tools/selfcheck_slots.py
+  - tools/selfcheck_duty.py
+  - tools/selfcheck_hardcode.py
+  - tools/check_clock_protocol.py
+  - state/tick_store.py
+  - app/pipeline.py
+  - core/clock.py
+  - config/pipeline.json
+  - config/state.json
+  - README.md
+
+validation_commands:
+  - "python run.py --check"
+  - "python tools/smoke_test.py"
+  - "python tools/check_side_flip.py"
+  - "python tools/check_subscription_qualify.py"
+  - "python tools/check_tick_router.py"
+  - "python tools/check_session_rollover.py"
+  - "python tools/check_clock_protocol.py"
+  - "python tools/check_web_contract.py"
+  - "python tools/check_page_render.py"
+  - "python tools/ws_probe.py --frames 6"
+
+notes:
+  - 本机三个解释器都没有 tzdata，必须用隔离 venv 跑（否则 5 个回归抛 ZoneInfoNotFoundError）。
+  - check_web_contract / check_page_render / ws_probe 需要服务已在跑。
+  - check_page_render 依赖本机 Chrome，找不到时跳过并返回 0。
+  - 隔离 venv 路径：C:/Users/Lenovo/.workbuddy-ai/binaries/python/envs/default
+  - 环境变量需设 NO_PROXY=127.0.0.1,localhost，否则本机回环请求会被代理拦成 502。

@@ -6,9 +6,11 @@ L0 — 时间与会话时钟。
 
 为什么需要时间源抽象
 --------------------
-实盘模式下"现在"就是墙上时钟；离线模拟模式下需要把整个交易日压缩到几分钟内
-跑完。两条路径必须共用同一套分桶逻辑，否则热力图横轴对不齐。因此本模块
-依赖一个 ``ClockPort``（定义在 ``contracts/ports.py``）而不是直接调 ``time.time()``。
+生产环境下"现在"就是墙上时钟，但**离线回归**需要把一整个交易日压缩进几秒钟
+跑完 —— 否则验证一次 0DTE 热力图要等到收盘。两条路径必须共用同一套分桶逻辑，
+否则热力图横轴对不齐。因此本模块依赖一个 ``ClockPort``（定义在
+``contracts/ports.py``）而不是直接调 ``time.time()``：生产注入 ``WallClock``，
+回归注入 ``tools/fixtures.FakeClock``。
 """
 
 from __future__ import annotations
@@ -71,7 +73,7 @@ class SessionClock:
     bucket_seconds
         热力图横轴的时间粒度（秒）。60 表示一分钟一格。
     clock
-        时间源，默认墙上时钟。模拟模式注入 ``SimClock``。
+        时间源，默认墙上时钟。离线回归可注入 ``tools/fixtures.FakeClock``。
     """
 
     __slots__ = ("_tz", "_open_min", "_close_min", "_bucket_s", "_clock")

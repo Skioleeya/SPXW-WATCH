@@ -31,8 +31,8 @@ from contracts.enums import OptionRight  # noqa: E402
 from contracts.ports import ClockPort  # noqa: E402
 from contracts.tick import OptionRef, OptionTick, SpotTick  # noqa: E402
 from core.clock import SessionClock, WallClock  # noqa: E402
-from simulator.sim_clock import SimClock  # noqa: E402
 from state.tick_store import TickStore  # noqa: E402
+from tools.fixtures import FakeClock  # noqa: E402
 
 GREEN, RED, RESET = "\033[32m", "\033[31m", "\033[0m"
 
@@ -57,12 +57,12 @@ def main() -> int:
     # 1. 三个时间源都必须满足 ClockPort
     # ---------------------------------------------------------------- #
     print("[1] 时间源的协议一致性")
-    sim_clock = SimClock(tz, open_hm, speedup=1.0)
-    session = SessionClock(tz, open_hm, close_hm, bucket_s, clock=sim_clock)
+    fake = FakeClock(tz, open_hm)
+    session = SessionClock(tz, open_hm, close_hm, bucket_s, clock=fake)
 
     for name, source in (
         ("WallClock", WallClock()),
-        ("SimClock", sim_clock),
+        ("FakeClock", fake),
         ("SessionClock", session),
     ):
         if isinstance(source, ClockPort):
@@ -91,7 +91,7 @@ def main() -> int:
     print(f"  写入 1 个现价样本 + 1 个期权样本（ts={ts0:.1f}）")
 
     # 推进到远超两个缓冲窗口
-    sim_clock.advance(max(option_age, spot_age) + 60.0)
+    fake.advance(max(option_age, spot_age) + 60.0)
     print(f"  会话时间推进 {max(option_age, spot_age) + 60.0:.0f}s "
           f"（现价窗 {spot_age:.0f}s / 期权窗 {option_age:.0f}s）")
 

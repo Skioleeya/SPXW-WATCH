@@ -1,0 +1,97 @@
+task_id: ibkr-rate-limit-audit
+date: 2026-09-11
+status: complete
+scope: >
+  第一轮（审计 + 端口处置）：核实 IBKR 官方限速与配额；确认项目是否存在"专门的
+  限速桶"；实测订阅/退订路径在真实 IB Gateway 10.50 模拟账户上是否流畅；核实限速
+  参数是否满足"禁止硬编码"约束。结论：限速桶存在且实测生效，但位于 ib_async 2.1.0
+  库层（45 msg/s），项目未声明/未观测/未校验；共发现 8 条缺陷。处置（KAI 指派）：
+  config/ibkr.json 的 port 7497 → 4002，并用 run.py --live + ws_probe 双路实测联通。
+
+  第二轮（KAI 指派：限速桶显式化）：把 45 msg/s 从库的隐式默认值变成配置项，
+  并观测 Client.throttleStart / throttleEnd。同时把项目里同名的 Error 300 退避
+  字段改名消歧。缺陷 2/3/4/5 已处置，新增自检项 [11] 把"行数÷2"规则变成机械校验。
+change_id: N/A
+proposal_path: N/A
+tasks_path: N/A
+
+deliverables:
+  - config/ibkr.json
+  - acquisition/rate_limit_watch.py            # 新增：桶容量显式化 + throttleStart/End 观测
+  - acquisition/ibkr_gateway.py
+  - acquisition/subscription_manager.py
+  - acquisition/feed_service.py
+  - contracts/tick.py
+  - contracts/frame.py
+  - contracts/__init__.py
+  - state/market_state.py
+  - serialization/frame_encoder.py
+  - simulator/synthetic_feed.py
+  - tools/selfcheck_core.py
+  - tools/selfcheck_config.py
+  - tools/selfcheck.py
+  - notes/sessions/2026-09-11/ibkr-rate-limit-audit/startup.md
+  - notes/sessions/2026-09-11/ibkr-rate-limit-audit/project_state.md
+  - notes/sessions/2026-09-11/ibkr-rate-limit-audit/open_tasks.md
+  - notes/sessions/2026-09-11/ibkr-rate-limit-audit/handoff.md
+  - notes/sessions/2026-09-11/ibkr-rate-limit-audit/meta.yaml
+  - notes/sessions/2026-09-11/ibkr-rate-limit-audit/artifacts/rate_probe.py
+  - notes/sessions/2026-09-11/ibkr-rate-limit-audit/artifacts/e2e_probe.py
+  - notes/sessions/2026-09-11/ibkr-rate-limit-audit/artifacts/falsify_rate_limit_check.py
+  - notes/sessions/2026-09-11/ibkr-rate-limit-audit/artifacts/falsify_rate_limit_watch.py
+  - notes/sessions/2026-09-11/ibkr-rate-limit-audit/artifacts/live_rate_limit_probe.py
+  - notes/sessions/2026-09-11/ibkr-rate-limit-audit/artifacts/panel_live_20260911_1029.png
+
+validation_commands:
+  - "python run.py --check                    # 11 项（新增 [11] 限速桶容量与配额）"
+  - "python run.py --live                     # 真实入口联通；本地站点 http://127.0.0.1:8060/"
+  - "python tools/ws_probe.py                 # 端到端（需服务在跑）"
+  - "python tools/check_web_contract.py       # 前端契约（需服务在跑）"
+  - "python tools/check_page_render.py        # 真浏览器渲染（需服务在跑 + Chrome）"
+  - "python tools/check_clock_protocol.py"
+  - "python tools/check_session_rollover.py"
+  - "python tools/check_side_flip.py"
+  - "python tools/check_tick_router.py"
+  - "python tools/check_subscription_qualify.py"
+  - "python tools/smoke_test.py"
+  - "python .workbuddy-ai/tmp/falsify_rate_limit_check.py   # 已归档为 artifacts/*.py.txt"
+  - "python .workbuddy-ai/tmp/falsify_rate_limit_watch.py   # 已归档为 artifacts/*.py.txt"
+  - "python .workbuddy-ai/tmp/live_rate_limit_probe.py      # 已归档为 artifacts/*.py.txt"
+
+notes:
+  - >
+    第二轮改了生产代码（第一轮是只读审计）。改动全在"限速桶显式化 + 消歧命名 +
+    机械校验"范围内，未触碰计算逻辑。
+  - >
+    桶只在 ib_async 的 Client 上观测，**不另建第二个桶**：两个桶互相不知情，
+    容量对不上时反而更容易撞上 Error 100。
+  - >
+    观测必须挂在 ib.client 上 —— IB.events 元组里没有 throttleStart / throttleEnd，
+    IB 类也不转发它们。
+  - >
+    载荷字段做了消歧拆分：原 health.throttled（实为 Error 300 退避）拆成
+    health.rate_limit（库层消息桶）与 health.sub_limit_backoff（Error 300）。
+    前端一个都没读，故无前端改动。
+  - >
+    顺带删掉 contracts/tick.py::FeedStatus.with_message()：零调用点，且把 10 个
+    字段名重抄一遍（每加字段要改两处），属重复真相。
+  - >
+    实测：实盘冷启动（40 条一批 qualify + 72 条订阅）桶事件 0 次 —— 45 条/s 是宽的。
+    审计轮的 90 条瞬时突发会跳 1 次（订阅路径被 min_request_interval_s 摊成 20 条/s）。
+  - >
+    实测需 IB Gateway 在 127.0.0.1:4002 监听（模拟盘）。7497 是 TWS 模拟盘端口。
+  - >
+    paper 账户无实时 OPRA 权限，实测收到 Error 10090（Delayed market data
+    is available）；故 tick 回流后的 106 模型 Greeks 落地仍未验证。
+  - >
+    环境：隔离 venv C:/Users/Lenovo/.workbuddy-ai/binaries/python/envs/default；
+    需 NO_PROXY=127.0.0.1,localhost。
+  - >
+    临时探针一律放在工程目录之外（C:/Users/Lenovo/.workbuddy-ai/tmp/）——
+    工程内的 .py 会被 selfcheck_core.iter_py_files() 扫到并让检查 [10] 误报。
+  - >
+    KAI 决策（2026-09-11）：①限速桶读数**不上前端**（web/ 刻意不动）；
+    ②acquisition/feed_service.py **不拆分**（保持 396/400，下次加字段前必须先解决上限）。
+  - >
+    本地站点：run.py --live 后访问 http://127.0.0.1:8060/（需 NO_PROXY=127.0.0.1,localhost）。
+    冷启动后约 1 分钟热力图才有值（ΔIV 是差分，需 ≥2 个时间桶）。

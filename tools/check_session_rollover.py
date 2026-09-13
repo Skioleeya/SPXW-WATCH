@@ -12,9 +12,12 @@ L3 — 会话翻篇回归。
 而且看起来完全正常：颜色、数值量级都对，只是它从来不存在。
 
 这个缺陷曾经真的出现过：``FeatureEngine.reset()`` 一直存在，但**没有任何地方
-调用它**。模拟器在收盘后停手，会话时钟继续走到下一个交易日，于是热力图从
+调用它**。喂价在收盘后停手，会话时钟继续走到下一个交易日，于是热力图从
 "36 档 × 304 桶"塌成 "36 档 × 1 桶 · 0 格"——看起来像渲染坏了，实际是旧数据
 被新会话的桶序号重新解释了一遍。
+
+行情由 ``tools.fixtures.SyntheticSurface`` 解析生成、时间由
+``tools.fixtures.FakeClock`` 推进，因此本回归不依赖 IBKR、不依赖网络。
 
 用法::
 
@@ -34,11 +37,18 @@ from contracts.enums import OptionRight  # noqa: E402
 from contracts.tick import OptionRef, OptionTick, QuoteTick, SpotTick  # noqa: E402
 from core.clock import SessionClock  # noqa: E402
 from features.feature_engine import FeatureEngine  # noqa: E402
-from simulator.scenario import Scenario  # noqa: E402
-from simulator.sim_clock import SimClock  # noqa: E402
 from state.tick_store import TickStore  # noqa: E402
+from tools.fixtures import FakeClock, SyntheticSurface  # noqa: E402
 
 GREEN, RED, RESET = "\033[32m", "\033[31m", "\033[0m"
+
+#: 合成曲面参数。回归走的是确定性路径，取值只需保证 IV 为正、Delta 单调。
+BASE_SPOT = 6500.0
+BASE_ATM_IV = 0.14
+SURFACE_SLOPE = -1.1
+SURFACE_CURVATURE = 1.8
+DELTA_SCALE = 0.6
+STRIKE_STEP = 5.0
 
 
 def _check(label: str, condition: bool, detail: str = "") -> bool:
@@ -47,9 +57,9 @@ def _check(label: str, condition: bool, detail: str = "") -> bool:
     return condition
 
 
-def _goto(sim_clock: SimClock, session: SessionClock, offset_s: float) -> None:
+def _goto(fake: FakeClock, session: SessionClock, offset_s: float) -> None:
     """把会话时间推到开盘后第 ``offset_s`` 秒。"""
-    sim_clock.advance(offset_s - session.elapsed_s())
+    fake.advance(offset_s - session.elapsed_s())
 
 
 def _row_of(matrix, strike: float):
@@ -64,7 +74,6 @@ def _row_of(matrix, strike: float):
 
 def main() -> int:
     app_cfg = loader.load("app")
-    sim_cfg = loader.load("simulator")
     sub_cfg = loader.load("subscription")
     state_cfg = loader.load("state")
     feat_cfg = loader.load("features")
@@ -74,19 +83,18 @@ def main() -> int:
     open_hm = loader.as_str(app_cfg, "session_open", module="app")
     close_hm = loader.as_str(app_cfg, "session_close", module="app")
     bucket_s = loader.as_int(serial_cfg, "heatmap_bucket_seconds", module="serialization")
-    step = loader.as_float(sim_cfg, "strike_step", module="simulator")
     each_side = loader.as_int(sub_cfg, "num_strikes_each_side", module="subscription")
 
-    sim_clock = SimClock(tz, open_hm, speedup=1.0)
-    session = SessionClock(tz, open_hm, close_hm, bucket_s, clock=sim_clock)
-    scenario = Scenario(sim_cfg)
+    fake = FakeClock(tz, open_hm)
+    session = SessionClock(tz, open_hm, close_hm, bucket_s, clock=fake)
+    surface = SyntheticSurface(SURFACE_SLOPE, SURFACE_CURVATURE, DELTA_SCALE)
 
     store = TickStore(state_cfg, session)
     engine = FeatureEngine(store, session, feat_cfg, serial_cfg)
 
-    spot = scenario.spot_at(0.0, real_elapsed_s=0.0)
-    atm_iv = scenario.atm_iv_at(0.0)
-    grid = scenario.strike_grid(spot, step, each_side)
+    spot = BASE_SPOT
+    atm_iv = BASE_ATM_IV
+    grid = surface.strike_grid(spot, STRIKE_STEP, each_side)
     # 取现价下方第 3 档：热力图会取它的 Put 一侧，与取边规则无关地稳定存在。
     watched = float(grid[3])
 
@@ -97,11 +105,11 @@ def main() -> int:
             for right in (OptionRight.PUT, OptionRight.CALL):
                 is_put = right is OptionRight.PUT
                 ref = OptionRef(strike=float(strike), right=right, expiry=expiry)
-                iv = scenario.iv_at(strike, spot, atm_iv) + iv_bias
+                iv = surface.iv_at(strike, spot, atm_iv) + iv_bias
                 store.on_option_tick(
                     OptionTick(
                         ref=ref, iv=iv, ts=ts,
-                        delta=scenario.delta_for(strike, spot, is_put),
+                        delta=surface.delta_for(strike, spot, is_put),
                         opt_price=max(iv * spot * 0.008, 0.5),
                         und_price=spot,
                         source_tick_type=13, model_greeks=True,
@@ -124,7 +132,7 @@ def main() -> int:
     cols_a: list[int] = []
 
     for bucket in range(6):
-        _goto(sim_clock, session, (bucket + 1) * bucket_s - 1.0)
+        _goto(fake, session, (bucket + 1) * bucket_s - 1.0)
         ts = session.now_ts()
         feed(session_a, iv_a * bucket, ts)
         bundle = engine.compute(now=ts)
@@ -144,7 +152,7 @@ def main() -> int:
     old_bucket0_iv = None
     if row_a is not None:
         # 反推会话 A 第 0 桶的 IV：第 1 桶的值 = (iv1 - iv0) * 100
-        old_bucket0_iv = (scenario.iv_at(watched, spot, atm_iv) + iv_a * 0.0)
+        old_bucket0_iv = (surface.iv_at(watched, spot, atm_iv) + iv_a * 0.0)
         print(f"      会话 A 观察行末列 ΔIV = {row_a[-1]}")
 
     # ------------------------------------------------------------------ #
@@ -154,14 +162,14 @@ def main() -> int:
     # 如果桶序号被跨会话复用，新会话第 1 桶的 IV 会去减会话 A 第 0 桶残留的 IV，
     # 差出一个凭空造出来的冲量；正确行为是没有前值 → 该格为空。
     print("\n[2] 翻篇到下一个交易日，只喂新会话第 1 桶")
-    sim_clock.set_day(sim_clock.session_datetime() + timedelta(days=1))
-    sim_clock.reset()
+    fake.set_day(fake.session_datetime() + timedelta(days=1))
+    fake.reset()
     session_b = session.expiry_str()
     passed &= _check("到期日已翻篇", session_b != session_a,
                      f"{session_a} → {session_b}")
 
     iv_b = 0.0200          # 与 A 拉开巨大差距，污染值会非常显眼
-    _goto(sim_clock, session, 1 * bucket_s + 1.0)
+    _goto(fake, session, 1 * bucket_s + 1.0)
     ts_b = session.now_ts()
     feed(session_b, iv_b, ts_b)
     bundle_b = engine.compute(now=ts_b)
@@ -195,10 +203,10 @@ def main() -> int:
     # 会话时钟继续走，但没有任何新 tick。此时若不清空，旧矩阵会以新会话的身份
     # 继续被推送出去 —— 画面上是一张"看起来正常"的图，实际全是上一个交易日的。
     print("\n[4] 翻篇后无新 tick（旧数据不得冒充当天）")
-    sim_clock.set_day(sim_clock.session_datetime() + timedelta(days=1))
-    sim_clock.reset()
+    fake.set_day(fake.session_datetime() + timedelta(days=1))
+    fake.reset()
     session_c = session.expiry_str()
-    _goto(sim_clock, session, 3 * bucket_s)
+    _goto(fake, session, 3 * bucket_s)
 
     bundle_c = engine.compute(now=session.now_ts())
     passed &= _check("到期日再次翻篇", session_c != session_b,

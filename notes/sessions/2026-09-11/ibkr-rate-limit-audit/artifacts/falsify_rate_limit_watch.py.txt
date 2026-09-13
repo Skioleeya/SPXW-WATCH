@@ -1,0 +1,134 @@
+"""临时：限速桶观测路径的非空转验证。
+
+分两段，各自证伪一个假设：
+
+A. 「配置真的在驱动桶，而不是落回库的隐式默认值 45/1」
+   用 rate_limit_max_requests=12 / interval=0.5 造一个 RateLimitWatch，
+   apply 到一个裸 IB() 上，断言 client.MaxRequests == 12。
+   如果 apply() 没生效，读到的会是库的类属性默认值 45 —— 这个断言就会红。
+
+B. 「throttleStart / throttleEnd 真的接上了」
+   连真 IBKR，一次性打 200 条出站消息（reqMarketDataType，语义无害且
+   不属于 IBKR 官方计速的六类请求，因此不会消耗官方配额），断言
+   events >= 1、throttling 翻真、排空后 throttled_total_s > 0。
+   如果事件没挂上，events 会恒为 0 —— 断言红。
+
+放在工程目录之外，避免被 iter_py_files() 扫到。
+"""
+
+import asyncio
+import sys
+from pathlib import Path
+
+ROOT = Path(r"E:\US.market\SPXW SWATCH\spxw_swatch")
+sys.path.insert(0, str(ROOT))
+
+from ib_async import IB  # noqa: E402
+
+from acquisition.ibkr_gateway import IbkrGateway  # noqa: E402
+from acquisition.rate_limit_watch import RateLimitWatch  # noqa: E402
+from config import loader  # noqa: E402
+from core.logging_setup import configure  # noqa: E402
+
+BURST = 200
+
+passed = True
+
+
+def check(label, cond, detail=""):
+    global passed
+    passed &= bool(cond)
+    print(f"  [{'ok' if cond else 'FAIL'}] {label}" + (f"  {detail}" if detail else ""))
+    return cond
+
+
+def part_a():
+    print("=" * 72)
+    print("A. 配置是否真的驱动桶（对照库的隐式默认值）")
+    print("=" * 72)
+
+    probe = IB()
+    check("裸 IB() 的库默认值确实是 45 / 1s",
+          probe.client.MaxRequests == 45 and probe.client.RequestsInterval == 1,
+          f"MaxRequests={probe.client.MaxRequests} "
+          f"RequestsInterval={probe.client.RequestsInterval}")
+
+    watch = RateLimitWatch({"rate_limit_max_requests": 12,
+                            "rate_limit_interval_s": 0.5})
+    watch.apply(probe)
+    check("apply() 后 client.MaxRequests 变成配置值 12",
+          probe.client.MaxRequests == 12, f"MaxRequests={probe.client.MaxRequests}")
+    check("apply() 后 client.RequestsInterval 变成配置值 0.5",
+          probe.client.RequestsInterval == 0.5,
+          f"RequestsInterval={probe.client.RequestsInterval}")
+
+    snap = watch.snapshot()
+    check("snapshot 回显的是配置值而不是库默认值",
+          snap.capacity == 12 and snap.interval_s == 0.5,
+          f"capacity={snap.capacity} interval_s={snap.interval_s}")
+
+
+async def part_b():
+    print()
+    print("=" * 72)
+    print(f"B. throttleStart / throttleEnd 是否真的接上（真连 IBKR，突发 {BURST} 条）")
+    print("=" * 72)
+
+    gateway = IbkrGateway(loader.load("ibkr"))
+    before = gateway.rate_limit
+    print(f"  连接前: capacity={before.capacity} events={before.events} "
+          f"throttling={before.throttling} total_s={before.throttled_total_s}")
+
+    await gateway.connect()
+    try:
+        connected = gateway.rate_limit
+        print(f"  已连接: capacity={connected.capacity} events={connected.events}")
+        check("连接后桶事件仍为 0（还没打突发）", connected.events == 0,
+              f"events={connected.events}")
+
+        print(f"  突发 {BURST} 条出站消息 …")
+        for _ in range(BURST):
+            gateway.set_market_data_type(3)
+
+        during = gateway.rate_limit
+        print(f"  突发后: events={during.events} throttling={during.throttling} "
+              f"total_s={during.throttled_total_s:.3f}")
+        check("突发把桶打满，events 涨到 ≥1", during.events >= 1,
+              f"events={during.events}")
+        check("throttling 翻真（队列里还有积压）", during.throttling is True,
+              f"throttling={during.throttling}")
+
+        print("  等待队列排空（200 条 / 45 条每秒 ≈ 5s）…")
+        await asyncio.sleep(7.0)
+
+        after = gateway.rate_limit
+        print(f"  排空后: events={after.events} throttling={after.throttling} "
+              f"total_s={after.throttled_total_s:.3f}")
+        check("排空后 throttling 翻回假", after.throttling is False,
+              f"throttling={after.throttling}")
+        check("累计被限速时长 > 0", after.throttled_total_s > 0,
+              f"total_s={after.throttled_total_s:.3f}")
+        check("events 未重复计数（throttleStart 只在翻转时发一次）",
+              after.events == during.events,
+              f"{during.events} → {after.events}")
+    finally:
+        await gateway.disconnect()
+
+    after_stop = gateway.rate_limit
+    check("disconnect 后 throttling 归假（不留挂死状态）",
+          after_stop.throttling is False, f"throttling={after_stop.throttling}")
+
+
+async def main() -> int:
+    configure(loader.load("logging"))
+    part_a()
+    await part_b()
+    print()
+    print("=" * 72)
+    print("结果: 全部通过" if passed else "结果: 存在失败项")
+    print("=" * 72)
+    return 0 if passed else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(asyncio.run(main()))

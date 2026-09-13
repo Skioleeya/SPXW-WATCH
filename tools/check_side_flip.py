@@ -5,12 +5,14 @@
 那么翻转之后这一行就看不到翻转之前的任何数据——前半段明明采到了，却躺在
 另一个键下。表现出来就是图上"现价附近凭空出现一块黑色空洞"。
 
-这个脚本用"现价从 6500 单调跌到 6450"的确定性路径复现并断言它不再发生，
-不依赖模拟器，也不依赖行情通道。
+这个脚本用"现价从 6500 单调跌到 6450"的确定性路径复现并断言它不再发生。
+行情由 ``tools.fixtures.SyntheticSurface`` 解析生成、时间由
+``tools.fixtures.FakeClock`` 推进，因此不依赖 IBKR、不依赖网络，
+每次运行结果完全一致。
 
 用法::
 
-    python tools/repro_side_flip.py
+    python tools/check_side_flip.py
 """
 
 from __future__ import annotations
@@ -25,9 +27,8 @@ from contracts.enums import OptionRight  # noqa: E402
 from contracts.tick import OptionRef, OptionTick, SpotTick  # noqa: E402
 from core.clock import SessionClock  # noqa: E402
 from features.feature_engine import FeatureEngine  # noqa: E402
-from simulator.scenario import Scenario  # noqa: E402
-from simulator.sim_clock import SimClock  # noqa: E402
 from state.tick_store import TickStore  # noqa: E402
+from tools.fixtures import FakeClock, SyntheticSurface  # noqa: E402
 
 BUCKETS = 40
 STRIKE_STEP = 5.0
@@ -36,30 +37,33 @@ EACH_SIDE = 18
 #: 每轮推进的会话秒数。
 STEP_SECONDS = 60.0
 
+#: 合成曲面参数。回归走的是确定性路径，取值只需保证 IV 为正、Delta 单调，
+#: 不必与任何真实行情对齐。
+BASE_SPOT = 6500.0
+BASE_ATM_IV = 0.14
+SURFACE_SLOPE = -1.1
+SURFACE_CURVATURE = 1.8
+DELTA_SCALE = 0.6
+
 GREEN, RED, RESET = "\033[32m", "\033[31m", "\033[0m"
 
 
 def main() -> int:
     app_cfg = loader.load("app")
-    sim_cfg = loader.load("simulator")
-    sub_cfg = loader.load("subscription")
     state_cfg = loader.load("state")
     feat_cfg = loader.load("features")
     serial_cfg = loader.load("serialization")
 
-    sim_clock = SimClock(
-        loader.as_str(app_cfg, "timezone", module="app"),
-        loader.as_str(app_cfg, "session_open", module="app"),
-        speedup=1.0,
+    tz = loader.as_str(app_cfg, "timezone", module="app")
+    open_hm = loader.as_str(app_cfg, "session_open", module="app")
+    close_hm = loader.as_str(app_cfg, "session_close", module="app")
+    bucket_s = loader.as_int(
+        serial_cfg, "heatmap_bucket_seconds", module="serialization"
     )
-    session = SessionClock(
-        loader.as_str(app_cfg, "timezone", module="app"),
-        loader.as_str(app_cfg, "session_open", module="app"),
-        loader.as_str(app_cfg, "session_close", module="app"),
-        loader.as_int(serial_cfg, "heatmap_bucket_seconds", module="serialization"),
-        clock=sim_clock,
-    )
-    scenario = Scenario(sim_cfg)
+
+    fake = FakeClock(tz, open_hm)
+    session = SessionClock(tz, open_hm, close_hm, bucket_s, clock=fake)
+    surface = SyntheticSurface(SURFACE_SLOPE, SURFACE_CURVATURE, DELTA_SCALE)
     store = TickStore(state_cfg, session)
     engine = FeatureEngine(store, session, feat_cfg, serial_cfg)
 
@@ -69,34 +73,34 @@ def main() -> int:
     #: 差分，本身也是空的；再往后一格才有值。这个偏移**必须由桶宽推出来**，
     #: 不能写死 —— 桶宽从 60 秒改成 30 秒时，写死的 2 会立刻变成假警报，然后
     #: 被人顺手调大，于是这条检查就不再拦任何东西了。
-    bucket_s = loader.as_int(serial_cfg, "heatmap_bucket_seconds", module="serialization")
     startup_offset = int(STEP_SECONDS // bucket_s) + 1
 
     expiry = session.expiry_str()
-    atm_iv = loader.as_float(sim_cfg, "base_atm_iv", module="simulator")
-    open_spot = loader.as_float(sim_cfg, "base_spot", module="simulator")
+    atm_iv = BASE_ATM_IV
+    open_spot = BASE_SPOT
 
     # 现价从 6500 线性跌到 6450，跨越 6480 / 6460 等档位
     watched = 6480.0
     side_log: list[str] = []
 
     for bucket in range(BUCKETS):
-        sim_clock.advance(STEP_SECONDS)
+        fake.advance(STEP_SECONDS)
         ts = session.now_ts()
         spot = open_spot - (50.0 * bucket / (BUCKETS - 1))
-        # 每次都按当前现价重算网格（与 SyntheticFeed 的行为一致）
-        grid = scenario.strike_grid(spot, STRIKE_STEP, EACH_SIDE)
+        # 每次都按当前现价重算网格（与实盘订阅窗口随现价重建的行为一致）
+        grid = surface.strike_grid(spot, STRIKE_STEP, EACH_SIDE)
         store.on_spot_tick(SpotTick(price=spot, ts=ts))
         for strike in grid:
             for right in (OptionRight.PUT, OptionRight.CALL):
                 is_put = right is OptionRight.PUT
+                iv = surface.iv_at(strike, spot, atm_iv)
                 store.on_option_tick(
                     OptionTick(
                         ref=OptionRef(strike=float(strike), right=right, expiry=expiry),
-                        iv=scenario.iv_at(strike, spot, atm_iv),
+                        iv=iv,
                         ts=ts,
-                        delta=scenario.delta_for(strike, spot, is_put),
-                        opt_price=max(scenario.iv_at(strike, spot, atm_iv) * spot * 0.008, 0.5),
+                        delta=surface.delta_for(strike, spot, is_put),
+                        opt_price=max(iv * spot * 0.008, 0.5),
                         und_price=spot,
                         source_tick_type=13,
                         model_greeks=True,

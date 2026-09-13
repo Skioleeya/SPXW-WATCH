@@ -1,0 +1,157 @@
+"""临时：实盘端到端验证限速桶观测是否真的贯通到推送帧。
+
+做四件事：
+1. 起 run.py --live，等它就绪；
+2. 连 ws://127.0.0.1:8060/ws 抓一批帧；
+3. 断言 health.rate_limit 存在、容量=配置值、事件计数单调；
+   并断言旧的歧义字段名 health.throttled 已经消失；
+4. 读服务端日志里 RateLimitWatch 的输出，停服。
+
+放在工程目录之外，避免被 iter_py_files() 扫到。
+"""
+
+import asyncio
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import aiohttp
+
+ROOT = Path(r"E:\US.market\SPXW SWATCH\spxw_swatch")
+PY = r"C:/Users/Lenovo/.workbuddy-ai/binaries/python/envs/default/Scripts/python.exe"
+URL = "ws://127.0.0.1:8060/ws"
+LOG = Path(r"C:/Users/Lenovo/.workbuddy-ai/tmp/live_rl.log")
+
+FRAMES = 30
+READY_TIMEOUT = 90.0
+
+os.environ["NO_PROXY"] = "127.0.0.1,localhost"
+os.environ["no_proxy"] = "127.0.0.1,localhost"
+
+
+async def grab(url: str, want: int, deadline: float) -> list[dict]:
+    frames: list[dict] = []
+    while time.monotonic() < deadline and len(frames) < want:
+        try:
+            session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=READY_TIMEOUT)
+            )
+        except Exception:
+            await asyncio.sleep(1.0)
+            continue
+        try:
+            ws = await session.ws_connect(url, heartbeat=20)
+        except Exception:
+            await session.close()
+            await asyncio.sleep(1.0)
+            continue
+        try:
+            async for msg in ws:
+                if msg.type is aiohttp.WSMsgType.TEXT:
+                    frames.append(json.loads(msg.data))
+                    if len(frames) >= want or time.monotonic() >= deadline:
+                        break
+                elif msg.type in (aiohttp.WSMsgType.CLOSED,
+                                  aiohttp.WSMsgType.ERROR):
+                    break
+        finally:
+            await ws.close()
+            await session.close()
+    return frames
+
+
+def check(label: str, cond: bool, detail: str = "") -> bool:
+    print(f"  [{'ok' if cond else 'FAIL'}] {label}" + (f"  {detail}" if detail else ""))
+    return cond
+
+
+async def main() -> int:
+    if LOG.exists():
+        LOG.unlink()
+
+    env = dict(os.environ)
+    with LOG.open("w", encoding="utf-8") as fh:
+        proc = subprocess.Popen(
+            [PY, "run.py", "--live"], cwd=ROOT, env=env,
+            stdout=fh, stderr=subprocess.STDOUT, text=True,
+        )
+
+    passed = True
+    frames: list[dict] = []
+    try:
+        frames = await grab(URL, FRAMES, time.monotonic() + READY_TIMEOUT)
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+    print("=" * 72)
+    print(f"抓到 {len(frames)} 帧")
+    print("=" * 72)
+
+    if not frames:
+        print("  [FAIL] 一帧都没抓到，看日志: " + str(LOG))
+        print(LOG.read_text(encoding="utf-8", errors="replace")[-3000:])
+        return 1
+
+    first, last = frames[0], frames[-1]
+    h0, h1 = first["health"], last["health"]
+    print("health 键: " + ", ".join(sorted(h1)))
+
+    passed &= check("每帧都有 health.rate_limit",
+                    all("rate_limit" in f["health"] for f in frames))
+    passed &= check("旧的歧义字段 health.throttled 已消失",
+                    all("throttled" not in f["health"] for f in frames))
+    passed &= check("新的 health.sub_limit_backoff 已就位",
+                    all("sub_limit_backoff" in f["health"] for f in frames))
+
+    rl0, rl1 = h0["rate_limit"], h1["rate_limit"]
+    print(f"  rate_limit 首帧: {json.dumps(rl0, ensure_ascii=False)}")
+    print(f"  rate_limit 末帧: {json.dumps(rl1, ensure_ascii=False)}")
+
+    passed &= check("桶容量回显 = 配置值 45", rl1["capacity"] == 45,
+                    f"capacity={rl1['capacity']}")
+    passed &= check("窗口回显 = 配置值 1.0", rl1["interval_s"] == 1.0,
+                    f"interval_s={rl1['interval_s']}")
+
+    totals = [f["health"]["rate_limit"]["throttled_total_s"] for f in frames]
+    events = [f["health"]["rate_limit"]["events"] for f in frames]
+    passed &= check("throttled_total_s 单调不减",
+                    all(b >= a for a, b in zip(totals, totals[1:])),
+                    f"{totals[0]} → {totals[-1]}")
+    passed &= check("events 单调不减",
+                    all(b >= a for a, b in zip(events, events[1:])),
+                    f"{events[0]} → {events[-1]}")
+    passed &= check("throttling 是布尔量",
+                    isinstance(rl1["throttling"], bool),
+                    f"throttling={rl1['throttling']}")
+    passed &= check("无 Error 300 退避", h1["sub_limit_backoff"] is False)
+
+    print(f"  实测：桶事件 {events[-1]} 次 / 累计被限速 {totals[-1]}s "
+          f"/ 当前在限速 {rl1['throttling']}")
+    print(f"  订阅 {h1['subscribed']}/{h1['subscription_cap']}，"
+          f"连接 {h1['connection']}，模式 {h1['mode']}")
+
+    text = LOG.read_text(encoding="utf-8", errors="replace")
+    bucket_lines = [ln.strip() for ln in text.splitlines() if "限速桶" in ln]
+    print("  服务端限速桶日志行:")
+    for ln in bucket_lines or ["    （无——说明桶从未被填满）"]:
+        print("    " + ln)
+    passed &= check("日志里能看到显式容量设置或桶事件",
+                    bool(bucket_lines),
+                    f"{len(bucket_lines)} 行")
+
+    print()
+    print("=" * 72)
+    print("结果: 全部通过" if passed else "结果: 存在失败项")
+    print("=" * 72)
+    return 0 if passed else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(asyncio.run(main()))

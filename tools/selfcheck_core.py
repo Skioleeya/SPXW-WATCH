@@ -38,7 +38,6 @@ LAYER_OF: dict[str, int] = {
     "features": 3,
     "serialization": 4,
     "transport": 5,
-    "simulator": 6,
     "app": 6,
 }
 
@@ -52,7 +51,8 @@ EXEMPT_PACKAGES = {"tools"}
 # 刻意用"排除表"而不是"只收已知源码包"：排除表漏了目录 → 误报（响，能发现）；
 # 白名单漏了包 → 漏检（静默，发现不了）。方向必须选响的那一侧。
 NON_SOURCE_DIRS: dict[str, str] = {
-    "notes": "已废弃的会话证据目录（2026-09-11 KAI 决策移除）；保留排除以防残留",
+    "notes": "会话证据目录（2026-09-13 KAI 决策复活，skill notes-session-records 的落点）；"
+             "内含探针归档，不是产品代码",
     ".workbuddy-ai": "工作记忆，随会话变动，不是产品代码",
     "logs": "运行日志输出目录",
     "web": "前端静态资源（JS/CSS/HTML），不含 Python",
@@ -79,7 +79,6 @@ REQUIRED_KEYS: dict[str, tuple[str, ...]] = {
     "transport": ("host", "http_port", "ws_path", "push_interval_ms",
                   "client_queue_size"),
     "logging": ("level", "format"),
-    "simulator": ("enabled", "scenario", "tick_rate_hz", "session_speedup"),
     "pipeline": ("compute_interval_ms",),
 }
 

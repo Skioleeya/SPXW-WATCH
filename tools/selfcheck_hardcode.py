@@ -65,9 +65,6 @@ EXEMPT_CONSTANTS: dict[str, dict[str, str]] = {
         "_RIGHTS_PER_STRIKE":
             "领域结构不变量：一个行权价恒有 1 张 call + 1 张 put，不可配置",
     },
-    "simulator/scenario.py": {
-        "_DIRECTION_SIGN": "配置取值（down/up）到符号的语义映射，非可调参数",
-    },
     "transport/http_static.py": {
         "_CONTENT_TYPES": "静态资源扩展名到标准 MIME 类型的映射表",
     },

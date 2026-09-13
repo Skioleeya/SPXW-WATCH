@@ -22,13 +22,16 @@ class OptionRight(StrEnum):
 
 
 class FeedMode(StrEnum):
-    """数据来源模式，用于前端标注与健康面板。"""
+    """行情来源模式，用于前端标注与健康面板。
+
+    取值一一对应 IBKR 的 ``marketDataType``，由
+    ``from_market_data_type`` 翻译；``UNKNOWN`` 覆盖未知取值。
+    """
 
     LIVE = "live"
     DELAYED = "delayed"
     FROZEN = "frozen"
     DELAYED_FROZEN = "delayed_frozen"
-    SIM = "sim"
     UNKNOWN = "unknown"
 
     @staticmethod

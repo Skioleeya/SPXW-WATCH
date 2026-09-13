@@ -20,17 +20,14 @@
 # 依赖（Windows 上 tzdata 是必需的，见 §6）
 pip install -r requirements.txt
 
-# 离线模拟：无 TWS、无行情权限也能跑通全链路
-python run.py --sim
+# 启动：需要 TWS / IB Gateway 已开 API，端口与 client_id 见 config/ibkr.json
+python run.py
 
 # 浏览器打开
 #   http://127.0.0.1:8060
 
 # 架构与配置自检（不需要联网）
 python run.py --check
-
-# 实盘：需要 TWS / IB Gateway 已开 API，端口与 client_id 见 config/ibkr.json
-python run.py --live
 ```
 
 辅助工具：
@@ -58,8 +55,10 @@ python tools/heatmap_stats.py --rows           # 逐行覆盖情况（排查"空
 `self._clock.now()` 每 10 秒抛一次 `AttributeError`，被维护循环的 `except`
 吞成一行 warning。表现出来只是"按时间窗裁剪从未真正发生"，缓冲区只靠 `maxlen`
 兜底，`option_buffer_seconds` 形同虚设 —— 而所有探针、所有回归当时都是绿的。
-这个脚本既断言三个时间源（`WallClock` / `SimClock` / `SessionClock`）都满足
+这个脚本既断言三个时间源（`WallClock` / `FakeClock` / `SessionClock`）都满足
 协议，也用真实的 `SessionClock` 走一遍裁剪路径、断言过期样本确实被丢掉。
+（`FakeClock` 是 `tools/fixtures.py` 里的测试夹具 —— 时间只随显式 `advance()`
+前进，因此回归每次运行都落在相同的桶号上。）
 
 `run.py --check` 里的第 [7] 项专门盯"配置键有没有接线"：它按工程既有的
 `module=` 约定，把每处取键调用与它声明的配置文件对照。这项检查一上线就抓出
@@ -76,9 +75,9 @@ python tools/heatmap_stats.py --rows           # 逐行覆盖情况（排查"空
 两者修法完全不同。
 
 `tools/check_tick_router.py` 补的是 L1 采集层的离线覆盖 —— 在此之前整层
-`acquisition/` 从未被离线执行过：模拟模式在 `app/pipeline.py::_build_feed` 里懒加载
-绕过它，`acquisition/__init__.py` 又是刻意留空的。这正是"只会在实盘暴露的 bug"能
-藏住的结构性原因（订阅前未确认合约那条就是从这里漏出去的）。它用忠实的假对象把
+`acquisition/` 从未被离线执行过：`app/pipeline.py::_build_feed` 里 `ib_async` 是
+懒加载的，离线回归根本走不到那里，`acquisition/__init__.py` 又是刻意留空的。这正是
+"只会在实盘暴露的 bug"能藏住的结构性原因（订阅前未确认合约那条就是从这里漏出去的）。它用忠实的假对象把
 `TickRouter` 真跑一遍，钉住两条规则：`use_model_greeks=true` 时**拒绝**降级到
 `lastGreeks`/`bidGreeks`（宁可无值，也不拿过期值冒充模型值），以及 IV 越界 / `None` /
 `NaN` / `inf` 一律拦下、NaN 的 Greeks 归一化为 `None`。假对象自身先自证保真
@@ -115,8 +114,7 @@ L2  state/       分片时序存储 + 只读聚合
 L3  features/    毛刺过滤 → IV 冲量 → ΔIV 矩阵 → 25Δ Skew
 L4  serialization/ 契约对象 → JSON 文本
 L5  transport/   HTTP 静态 + WebSocket 广播（fail-closed）
-L6  simulator/   合成行情源、合成时钟
-    app/         组装根（唯一允许 import 所有层的模块）
+L6  app/         组装根（唯一允许 import 所有层的模块）
 ```
 
 数据流严格单向，反向**没有任何一条路径**：
@@ -151,7 +149,6 @@ config/
   features.json     冲量窗口、毛刺过滤五道闸门、25Δ 目标与容差
   serialization.json 时间桶粒度、色标量程取法、小数位
   transport.json    监听地址、WS 路径、推送频率、客户端队列深度
-  simulator.json    合成行情与合成时钟参数
   pipeline.json     计算/统计循环的节奏与生命周期
   logging.json      日志级别与格式
 ```
@@ -343,27 +340,34 @@ def broadcast(self, text: str) -> int:   # 同步函数
 
 两个细节值得说明：
 
-* **陈旧看门狗用本地收帧时间**，不用帧里的 `ts` —— 模拟模式下会话时间被加速
-  60 倍，拿它算"多久没更新"会立刻误报。
+* **陈旧看门狗用本地收帧时间**，不用帧里的 `ts` —— 帧里的 `ts` 是**会话时间**
+  （由 `SessionClock` 给出），它与墙钟之间没有固定关系（离线回归还会把它推进
+  若干小时），拿它算"多久没更新"会立刻误报。
 * **Skew 纵轴范围来自后端的 `skew_min`/`skew_max`**，不让 ECharts 自动缩放。
   自动缩放会让曲线在剧烈波动时"看起来变平"，掩盖真实的量级变化。
 
 ---
 
-## 8. 模拟模式
+## 8. 离线回归：不连 IBKR 也能验证 L0–L4
 
-`run.py --sim` 用 `SyntheticFeed` 替换 `IbkrFeed`，`SimClock` 替换墙钟。
-因为 L1–L5 全部通过 L0 契约通信，**替换行情源不需要改动其他任何一层**。
+运行时是**纯实盘**的 —— 数据源只有 `IbkrFeed` 一条路径，没有模拟分支。但
+L0–L4 的回归全部离线运行，靠的是 `tools/fixtures.py` 里的两件测试夹具：
 
-合成时钟把 390 分钟的交易日压缩到约 6.5 分钟跑完（`session_speedup: 60`）。
-关键在于下游完全不知道时间被加速了 —— `SessionClock` 只是拿到一个更大的 epoch
-数值，分桶、到期日、剩余时间全部照常工作。
+* `FakeClock` —— 实现 L0 的 `ClockPort`，时间**只随显式 `advance()` 前进**，
+  不掺真实时间流逝。同一份脚本每次运行都落在完全相同的桶号上，这是回归能给出
+  确定性断言的前提。
+* `SyntheticSurface` —— 解析式的 IV 微笑与 Delta 曲线，同参数必然同结果，
+  不含任何随机数。
 
-`acquisition/__init__.py` 刻意留空、`app/pipeline.py` 的 `_build_feed()` 用
-延迟 import —— 两者共同保证离线模式下**永远不会加载 `ib_async`**。
+它们**不是产品代码**：位于 `tools/`，因此不参与分层检查（[2]）、单一职能检查
+（[9]）与禁止硬编码检查（[10]），但仍受文件长度（[1]，< 400 行）与 `__slots__`
+一致性（[8]）约束。夹具刻意只保留回归真正用到的部分 —— 随机噪声、冲击剧本、
+毛刺探针都不在其中：回归走的是确定性路径，夹具越小，"测试通过"越能说明
+产品代码本身正确。
 
-场景 `chop_then_shock` 先横盘再向下冲击，并周期性在最外侧两档注入 3 倍 IV
-尖峰，用来验证毛刺过滤既拦得住分母效应、又不误杀正常点。
+`app/pipeline.py` 的 `_build_feed()` 用延迟 import、`acquisition/__init__.py`
+刻意留空 —— 两者共同保证 `run.py --check` 与上述离线回归**永远不会加载
+`ib_async`**（它是本工程唯一的重依赖，缺包时自检仍要能跑完）。
 
 ---
 
@@ -377,9 +381,9 @@ def broadcast(self, text: str) -> int:   # 同步函数
 |---|---|---|---|---|
 | [1] | 文件长度 | 文件 < 400 行 | 全量行数统计 | **强**（全量） |
 | [2] | 依赖方向 | L0→L1→…→L6 单向 | `LAYER_OF` 映射 + AST 扫描 import 方向 | **强** |
-| [3] | 配置可读 | 禁止硬编码 | 10 份 JSON 逐个解析 | 强 |
+| [3] | 配置可读 | 禁止硬编码 | 9 份 JSON 逐个解析 | 强 |
 | [4] | 配置零耦合 | 配置彼此独立 | 禁 `$ref`/`include` 等跨文件引用键 | 强 |
-| [5] | 关键键存在 | 禁止硬编码 | 41 个关键配置项逐一核对 | 中 |
+| [5] | 关键键存在 | 禁止硬编码 | 37 个关键配置项逐一核对 | 中 |
 | [6] | 订阅容量 | 不触发 Error 300 | ±18 档 → 73 条 ≤ 自设 92 ≤ IBKR 100 | 强 |
 | [7] | 配置键归属与接线 | 一个文件不得含跨模块变量 | 按 `module=` 约定对照归属；死键即失败 | **强** |
 | [8] | `__slots__` 一致性 | 单一职能的静态护栏 | AST 比对声明与赋值 | **强** |
@@ -406,8 +410,8 @@ def broadcast(self, text: str) -> int:   # 同步函数
 `__slots__` 中声明。这个错误在开发过程中反复出现四次，每次都只在运行时才暴露，
 所以用 AST 静态检查彻底堵死。
 
-当前状态：**70 个 Python 文件，最长 397 行（`acquisition/feed_service.py`），
-11 项检查全部通过。**
+当前状态：**52 个产品代码文件（另 26 个 `tools/` 脚本，合计 78 个），产品代码最长
+360 行（`acquisition/ibkr_gateway.py`），11 项检查全部通过。**
 
 ---
 

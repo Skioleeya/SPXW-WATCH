@@ -1,0 +1,71 @@
+命令：
+  NO_PROXY=127.0.0.1,localhost <VENV>/python.exe -u \
+    C:/Users/Lenovo/.workbuddy-ai/tmp/probe_model_greeks.py
+
+环境：2026-09-11 11:47 EDT（开盘后）、IB Gateway 模拟盘 :4002 在听、
+      探针 clientId=97（独立于项目的 71）、run.py 未运行。
+
+--------------------------------------------------------------------------------
+open orders request timed out
+completed orders request timed out
+[1] connected=True  clientId=97
+[2] reqMarketDataType(3) —— 与 config/ibkr.json 的 market_data_type 一致
+[3] 标的 SPX conId=416904 secType=IND
+[4] 链参数 6 片
+[5] 命中 SPXW 20260911 exchange=CBOE strikes=744
+[6] 标的现价 ≈ 7673.27  marketDataType=3 (1=实时 2=冻结 3=延迟 4=延迟冻结)
+[7] 取 ATM 行权价 7675.0
+[8] 期权 SPXW  260911C07675000 conId=904013316
+[9] 已订阅 genericTickList="106"，最多等 30s ...
+Error 10090, reqId 7: Part of requested market data is not subscribed.
+  Subscription-independent ticks are still active. Delayed market data is
+  available. SPX S&P 500 Stock Index/TOP/ALL, contract:
+  Option(conId=904013316, symbol='SPX', lastTradeDateOrContractMonth='20260911',
+         strike=7675.0, right='C', multiplier='100', exchange='SMART',
+         currency='USD', localSymbol='SPXW  260911C07675000', tradingClass='SPXW')
+
+===== 观测结果 =====
+marketDataType = 1 (1=实时 2=冻结 3=延迟 4=延迟冻结)
+modelGreeks = iv=0.12483217945625776 delta=0.43912893904975525 gamma=0.01882958304356287 vega=0.6620526707306453 theta=-6.836877475302572 undPrice=None optPrice=6.836877475302572
+bidGreeks   = iv=0.12328953466747428 delta=0.46919206549445525 gamma=0.019201576668898993 vega=0.6682853482222594 theta=-6.599999904632568 undPrice=None optPrice=6.599999904632568
+askGreeks   = iv=0.12629442288605747 delta=0.4699495237138469 gamma=0.018747444252305626 vega=0.6683825132000618 theta=-6.800000190734863 undPrice=None optPrice=6.800000190734863
+lastGreeks  = iv=0.11727663975725848 delta=0.46756221115709956 gamma=0.020179497931739915 vega=0.668068055808032 theta=-6.699999809265137 undPrice=None optPrice=6.699999809265137
+bid / ask / last = 6.8 / 6.9 / 6.8
+
+VERDICT: modelGreeks 在第 5s 出现 —— "106" → tickOptionComputation → MODEL_OPTION 数据**确实回流**。
+
+--------------------------------------------------------------------------------
+观测要点（供判读）
+
+1. **modelGreeks 非空**：iv=12.48% / delta=0.4391 / gamma=0.01883 /
+   vega=0.6621 / theta=-6.8369。`config/ibkr.json` 的
+   `generic_tick_list: "106"` 确实打开了 `tickOptionComputation`。
+
+2. **modelGreeks 与 bid/ask/last 三档 greeks 明显不同**（不是同一份数据的拷贝）：
+     属性        iv        delta
+     model     0.12483    0.43913   ← MODEL_OPTION（tickType 13）
+     bid       0.12329    0.46919   ← tickType 10
+     ask       0.12629    0.46995   ← tickType 11
+     last      0.11728    0.46756   ← tickType 12
+   四者并存 ⇒ 它们来自不同的 tick 通道，MODEL_OPTION 是**独立存在**的一条。
+   项目 `use_model_greeks: true` 时 `TickRouter._pick_computation()` 只接受
+   modelGreeks（其余一律 return None），所以项目拿到的就是第一行那组值。
+
+3. **marketDataType = 1（实时），不是 3（延迟）。**
+   标的现价那条 ticker 报 3（符合 `reqMarketDataType(3)`），
+   但**期权合约的 ticker 报 1** —— 说明 IB 对这张 SPXW 期权**给的是实时数据**。
+   同时 Error 10090 的原文是 "**Part of** requested market data is not
+   subscribed"（**部分**未订阅），并非"完全没有权限"。
+   ⇒ 此前"paper 账户无实时 OPRA 权限，只返回延迟数据"的假设**与本次观测不符**。
+
+4. 探针绕开了项目代码，但订阅参数与项目**逐字相同**
+   （SPX / IND / CBOE / SPXW / SMART / genericTickList="106" / marketDataType=3），
+   因此结论可外推到项目路径。项目路径的交叉证据见
+   `notes/context/project_state.md` 记录的 2026-09-11 实盘读数
+   （ATM IV 15.70/16.83、25Δ Skew、热力图 36 格有效数值）——
+   在 `use_model_greeks=true` 下这些 IV/Δ **只能**来自 modelGreeks。
+
+5. 未验证的残留：**无法从 ib_async 属性层区分 tickType 是 13（实时模型）
+   还是 83（延迟模型）** —— 库的 `GREEKS_TICK_MAP` 把两者合并到同一个
+   `modelGreeks` 属性。`TickRouter` 也因此把 `source_tick_type` 一律记为 13。
+   本次观测到 marketDataType=1，倾向于是 13，但这是间接推断。

@@ -31,7 +31,6 @@ from pathlib import Path
 from typing import Any
 
 from config import loader
-from contracts.enums import FeedMode
 from core.clock import SessionClock, WallClock
 from core.logging_setup import configure, get_logger
 
@@ -51,7 +50,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 class Pipeline:
     """把各层装配成可运行的系统。"""
 
-    def __init__(self, *, simulate: bool | None = None) -> None:
+    def __init__(self) -> None:
         self._cfg = {
             "app": loader.load("app"),
             "ibkr": loader.load("ibkr"),
@@ -60,14 +59,9 @@ class Pipeline:
             "features": loader.load("features"),
             "serialization": loader.load("serialization"),
             "transport": loader.load("transport"),
-            "simulator": loader.load("simulator"),
             "pipeline": loader.load("pipeline"),
             "persistence": loader.load("persistence"),
         }
-
-        if simulate is None:
-            simulate = loader.as_bool(self._cfg["simulator"], "enabled", module="simulator")
-        self._simulate = bool(simulate)
 
         self._log = get_logger("pipeline")
         self._clock = self._build_clock()
@@ -105,38 +99,19 @@ class Pipeline:
         close_hm = loader.as_str(app, "session_close", module=_APP)
         bucket = loader.as_int(serial, "heatmap_bucket_seconds", module="serialization")
 
-        if self._simulate:
-            from simulator.sim_clock import SimClock
-
-            source = SimClock(
-                tz,
-                open_hm,
-                loader.as_float(self._cfg["simulator"], "session_speedup", module="simulator"),
-            )
-        else:
-            source = WallClock()
-
-        return SessionClock(tz, open_hm, close_hm, bucket, clock=source)
+        return SessionClock(tz, open_hm, close_hm, bucket, clock=WallClock())
 
     def _build_feed(self):
         """
-        按模式实例化行情源。
+        实例化行情源。
 
-        两个分支的 import 都写在这里（延迟导入）：离线模式下永远不会去加载
-        ``ib_async``，实盘模式下也不会加载模拟器。
+        ``ib_async`` 的 import 写在这里（延迟导入）而不是模块顶部：它是本工程
+        唯一的重依赖，``run.py --check`` 与 ``tools/`` 下的离线回归都不该被它
+        拖住（缺包时自检仍要能跑完）。
         """
-        if self._simulate:
-            from simulator.synthetic_feed import SyntheticFeed
-
-            self._log.info("行情源: SyntheticFeed（离线模拟）")
-            return SyntheticFeed(
-                self._cfg["app"], self._cfg["simulator"],
-                self._cfg["subscription"], self._clock,
-            )
-
         from acquisition.feed_service import IbkrFeed
 
-        self._log.info("行情源: IbkrFeed（IBKR 实盘/延迟）")
+        self._log.info("行情源: IbkrFeed（IBKR）")
         return IbkrFeed(
             self._cfg["app"], self._cfg["ibkr"], self._cfg["subscription"], self._clock
         )
@@ -340,7 +315,7 @@ class Pipeline:
 
     @property
     def mode(self) -> str:
-        return str(FeedMode.SIM) if self._simulate else str(self._feed.mode)
+        return str(self._feed.mode)
 
     @property
     def url(self) -> str:

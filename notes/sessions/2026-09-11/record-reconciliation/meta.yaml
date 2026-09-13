@@ -1,0 +1,41 @@
+task_id: record-reconciliation
+date: 2026-09-11
+status: complete
+scope: >
+  按 KAI 指令「加载项目记忆」加载全部记忆与上下文后，做一次"记录 vs 现实"
+  核对（KAI 反复关注的失效模式），把发现的 4 处不一致在**活文档**上改正。
+  零生产代码改动；notes/sessions 下的历史会话快照一律不回改。
+change_id: N/A
+proposal_path: N/A
+tasks_path: N/A
+
+deliverables:
+  - README.md
+  - notes/context/project_state.md
+  - notes/context/open_tasks.md
+  - .workbuddy-ai/memory/MEMORY.md
+  - notes/sessions/2026-09-11/record-reconciliation/
+
+validation_commands:
+  - "python run.py --check"
+  - "wc -l acquisition/feed_service.py"
+  - "git ls-files '*.py' | wc -l"
+  - "ls tools/check_*.py | wc -l"
+
+notes:
+  - >
+    行数口径：自检 [1] 用 `len(path.read_text().splitlines())`（见
+    tools/selfcheck_structure.py:38），与 `wc -l` 一致（文件末尾有换行符）。
+    实测 feed_service.py = 397，记录写的是 396 —— **记录错，不是口径差**。
+  - >
+    4 处不一致：① feed_service.py 396 → **397**（余 3 行，非 4 行）；
+    ② README §9「69 个文件 / 最长 395 行 / 10 项检查」→ **70 / 397 / 11 项**；
+    ③ README §9 检查表缺 **[11]** 行、[5] 写 40 个关键键 → 实测 **41 个**；
+    ④ README §10「**实盘未验证**」→ 实际 **2026-09-11 已实测联通**
+    （11～14 秒就绪、仅 72 × Error 10090、ws_probe 全过）。
+  - >
+    README §10 端口段同步改：默认 `7497`（TWS 模拟）→ **`4002`**（IB Gateway 模拟）。
+  - >
+    `notes/sessions/**` 下提到 395/396 的历史 handoff 保持原样 —— 它们是当时的
+    事实快照（dead-key-resolution 轮确实拆到 395 行），回改会伪造历史。
+  - 本会话未跑实盘、未重启服务、未改任何生产代码。

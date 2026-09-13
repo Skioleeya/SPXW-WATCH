@@ -1,5 +1,9 @@
 """L0–L4 全链路离线冒烟测试（不依赖 IBKR）。
 
+行情由 ``tools.fixtures.SyntheticSurface`` 解析生成、时间由
+``tools.fixtures.FakeClock`` 推进，因此本测试不连网、不需要行情权限，
+每次运行结果完全一致。
+
 用法::
 
     python tools/smoke_test.py
@@ -26,13 +30,21 @@ from core.clock import SessionClock  # noqa: E402
 from core.logging_setup import configure  # noqa: E402
 from features.feature_engine import FeatureEngine  # noqa: E402
 from serialization.payload_builder import PayloadBuilder  # noqa: E402
-from simulator.scenario import Scenario  # noqa: E402
-from simulator.sim_clock import SimClock  # noqa: E402
 from state.market_state import MarketState  # noqa: E402
 from state.tick_store import TickStore  # noqa: E402
+from tools.fixtures import FakeClock, SyntheticSurface  # noqa: E402
 
 OK = "  [ok] "
 FAIL = "  [FAIL] "
+
+#: 合成曲面参数。回归走的是确定性路径，取值只需保证 IV 为正、Delta 单调、
+#: 偏斜为"左高右低"（skew 为正）。
+BASE_SPOT = 6500.0
+BASE_ATM_IV = 0.14
+SURFACE_SLOPE = -1.1
+SURFACE_CURVATURE = 1.8
+DELTA_SCALE = 0.6
+STRIKE_STEP = 5.0
 
 
 def check(label: str, condition: bool, detail: str = "") -> bool:
@@ -42,7 +54,6 @@ def check(label: str, condition: bool, detail: str = "") -> bool:
 
 def main() -> int:
     app_cfg = loader.load("app")
-    sim_cfg = loader.load("simulator")
     sub_cfg = loader.load("subscription")
     state_cfg = loader.load("state")
     feat_cfg = loader.load("features")
@@ -57,23 +68,17 @@ def main() -> int:
     # ------------------------------------------------------------------ #
     # 时间与场景
     # ------------------------------------------------------------------ #
-    sim_clock = SimClock(
-        loader.as_str(app_cfg, "timezone", module="app"),
-        loader.as_str(app_cfg, "session_open", module="app"),
-        speedup=1.0,
-    )
-    session = SessionClock(
-        loader.as_str(app_cfg, "timezone", module="app"),
-        loader.as_str(app_cfg, "session_open", module="app"),
-        loader.as_str(app_cfg, "session_close", module="app"),
-        loader.as_int(serial_cfg, "heatmap_bucket_seconds", module="serialization"),
-        clock=sim_clock,
-    )
-    scenario = Scenario(sim_cfg)
-
+    tz = loader.as_str(app_cfg, "timezone", module="app")
+    open_hm = loader.as_str(app_cfg, "session_open", module="app")
+    close_hm = loader.as_str(app_cfg, "session_close", module="app")
     bucket_s = loader.as_int(
         serial_cfg, "heatmap_bucket_seconds", module="serialization"
     )
+
+    fake = FakeClock(tz, open_hm)
+    session = SessionClock(tz, open_hm, close_hm, bucket_s, clock=fake)
+    surface = SyntheticSurface(SURFACE_SLOPE, SURFACE_CURVATURE, DELTA_SCALE)
+
     print(f"\n会话: {session.describe()}")
     # 不写死"= 390"：桶宽是可配的，写死会让这条检查在改桶宽时变成一个假警报，
     # 然后被人顺手改掉。改成校验真正的不变量 —— 桶必须**恰好铺满**会话，
@@ -96,13 +101,13 @@ def main() -> int:
     builder = PayloadBuilder(market, serial_cfg, session)
 
     expiry = session.expiry_str()
-    step = loader.as_float(sim_cfg, "strike_step", module="simulator")
     each_side = loader.as_int(sub_cfg, "num_strikes_each_side", module="subscription")
-    base_spot = loader.as_float(sim_cfg, "base_spot", module="simulator")
-    base_atm_iv = loader.as_float(sim_cfg, "base_atm_iv", module="simulator")
+    step = STRIKE_STEP
+    base_spot = BASE_SPOT
+    base_atm_iv = BASE_ATM_IV
 
     # ------------------------------------------------------------------ #
-    # 模拟 60 个会话分钟，每分钟推进一次完整流水线
+    # 推进 60 个会话分钟，每分钟推进一次完整流水线
     # ------------------------------------------------------------------ #
     print("\n推进 60 个会话分钟（每轮都跑完整流水线）...")
     open_epoch = session.session_open_dt().timestamp()
@@ -111,9 +116,9 @@ def main() -> int:
     for minute in range(60):
         session_seconds = (minute + 1) * 60.0
         now = open_epoch + session_seconds
-        spot = scenario.spot_at(session_seconds, real_elapsed_s=0.0)
-        atm_iv = scenario.atm_iv_at(0.0)
-        strikes = scenario.strike_grid(spot, step, each_side)
+        spot = base_spot
+        atm_iv = base_atm_iv
+        strikes = surface.strike_grid(spot, step, each_side)
 
         for sub in range(4):
             ts = now + sub * 15.0
@@ -121,7 +126,7 @@ def main() -> int:
             for strike in strikes:
                 for right in (OptionRight.PUT, OptionRight.CALL):
                     is_put = right is OptionRight.PUT
-                    iv = scenario.iv_at(strike, spot, atm_iv)
+                    iv = surface.iv_at(strike, spot, atm_iv)
                     # 共模抬升 + 偏斜变陡：模拟"恐慌逐渐积累"的真实形态，
                     # 也让热力图出现非零 ΔIV。
                     iv += 0.0002 * minute
@@ -130,9 +135,9 @@ def main() -> int:
                     store.on_option_tick(
                         OptionTick(
                             ref=ref, iv=iv, ts=ts,
-                            delta=scenario.delta_for(strike, spot, is_put),
+                            delta=surface.delta_for(strike, spot, is_put),
                             opt_price=max(
-                                scenario.iv_at(strike, spot, atm_iv) * spot * 0.008, 0.5
+                                surface.iv_at(strike, spot, atm_iv) * spot * 0.008, 0.5
                             ),
                             und_price=spot, source_tick_type=13, model_greeks=True,
                         )
@@ -210,30 +215,30 @@ def main() -> int:
     # ------------------------------------------------------------------ #
     # 回归：compute() 省略 now 时必须取会话时钟，而不是墙上时钟
     # ------------------------------------------------------------------ #
-    # 这条曾经真实出过问题：compute() 默认调 core.clock.now_ts()（墙钟）。模拟
-    # 模式下墙钟早于开盘，分桶全部钳到第 0 桶，于是热力图恒为 null、Skew 序列
-    # 永远只有一个点。显式传 now 的调用路径掩盖了这个缺陷，所以这里必须用
-    # "不传 now" 的方式断言。
+    # 这条曾经真实出过问题：compute() 默认调 core.clock.now_ts()（墙钟）。在
+    # 推进过的会话里，墙钟会落在开盘之前，分桶全部钳到第 0 桶，于是热力图恒为
+    # null、Skew 序列永远只有一个点。显式传 now 的调用路径掩盖了这个缺陷，
+    # 所以这里必须用"不传 now"的方式断言。
     print("\n回归：默认时间源 = 注入的会话时钟")
     probe_store = TickStore(state_cfg, session)
     probe_engine = FeatureEngine(probe_store, session, feat_cfg, serial_cfg)
     probe_advance_s = 1800.0
-    sim_clock.advance(probe_advance_s)  # 把会话时间推到开盘后 30 分钟
+    fake.advance(probe_advance_s)  # 把会话时间推到开盘后 30 分钟
 
     probe_ts = session.now_ts()
-    probe_spot = scenario.spot_at(probe_advance_s, real_elapsed_s=0.0)
-    probe_atm = scenario.atm_iv_at(0.0)
+    probe_spot = base_spot
+    probe_atm = base_atm_iv
     probe_store.on_spot_tick(SpotTick(price=probe_spot, ts=probe_ts))
-    for strike in scenario.strike_grid(probe_spot, step, each_side):
+    for strike in surface.strike_grid(probe_spot, step, each_side):
         for right in (OptionRight.PUT, OptionRight.CALL):
             is_put = right is OptionRight.PUT
             probe_ref = OptionRef(strike=float(strike), right=right, expiry=expiry)
             probe_store.on_option_tick(
                 OptionTick(
                     ref=probe_ref,
-                    iv=scenario.iv_at(strike, probe_spot, probe_atm),
+                    iv=surface.iv_at(strike, probe_spot, probe_atm),
                     ts=probe_ts,
-                    delta=scenario.delta_for(strike, probe_spot, is_put),
+                    delta=surface.delta_for(strike, probe_spot, is_put),
                     opt_price=1.0,
                     und_price=probe_spot,
                     source_tick_type=13,
@@ -264,25 +269,24 @@ def main() -> int:
     # 于是毛刺过滤器拦下来的分母效应尖峰转头就被写进了矩阵（实测 32 个波动率
     # 点）。这里注入一个 ×10 尖峰，断言它既被标记为 GLITCH，又没进矩阵。
     print("\n回归：GLITCH 点不得进入热力图")
-    bucket_s = loader.as_int(serial_cfg, "heatmap_bucket_seconds", module="serialization")
     glitch_store = TickStore(state_cfg, session)
     glitch_engine = FeatureEngine(glitch_store, session, feat_cfg, serial_cfg)
 
-    flat_spot = scenario.spot_at(0.0, real_elapsed_s=0.0)
-    flat_atm = scenario.atm_iv_at(0.0)
-    grid = scenario.strike_grid(flat_spot, step, each_side)
+    flat_spot = base_spot
+    flat_atm = base_atm_iv
+    grid = surface.strike_grid(flat_spot, step, each_side)
     target_strike = grid[3]          # 现价下方，热力图会取它的 Put 一侧
     spike_multiplier = 10.0
 
     glitch_bundles = []
     for bucket in range(3):
-        sim_clock.advance(float(bucket_s))
+        fake.advance(float(bucket_s))
         ts = session.now_ts()
         glitch_store.on_spot_tick(SpotTick(price=flat_spot, ts=ts))
         for strike in grid:
             for right in (OptionRight.PUT, OptionRight.CALL):
                 is_put = right is OptionRight.PUT
-                iv = scenario.iv_at(strike, flat_spot, flat_atm)
+                iv = surface.iv_at(strike, flat_spot, flat_atm)
                 spiking = bucket == 2 and strike == target_strike and is_put
                 if spiking:
                     iv *= spike_multiplier
@@ -290,7 +294,7 @@ def main() -> int:
                 glitch_store.on_option_tick(
                     OptionTick(
                         ref=ref, iv=iv, ts=ts,
-                        delta=scenario.delta_for(strike, flat_spot, is_put),
+                        delta=surface.delta_for(strike, flat_spot, is_put),
                         opt_price=max(iv * flat_spot * 0.008, 0.5),
                         und_price=flat_spot,
                         source_tick_type=13, model_greeks=True,
@@ -350,7 +354,7 @@ def main() -> int:
 
 def _status() -> FeedStatus:
     return FeedStatus(
-        mode=FeedMode.SIM, connection=ConnectionState.CONNECTED,
+        mode=FeedMode.LIVE, connection=ConnectionState.CONNECTED,
         subscribed=74, subscription_cap=92,
     )
 

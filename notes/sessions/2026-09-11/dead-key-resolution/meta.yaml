@@ -1,0 +1,51 @@
+task_id: dead-key-resolution
+date: 2026-09-11
+status: complete
+scope: >
+  处理检查 [7] 抓出的 7 个死配置键：4 接线（transport.access_log、
+  ibkr.max_underlying_age_s、pipeline.shutdown_timeout_s、
+  pipeline.reset_feature_state_on_reconnect）、3 删除
+  （features.atm_max_bracket_strikes 连同死方法 atm_bracket()、
+  ibkr.handshake_timeout_s、ibkr.chain_ready_timeout_s）；
+  把 UNWIRED_IS_FAILURE 收紧为 True；拆出 acquisition/spot_tap.py 以满足 400 行约束；
+  为全部新增接线做非空转验证；同步 README 与 notes。
+change_id: N/A
+proposal_path: N/A
+tasks_path: N/A
+
+deliverables:
+  - transport/server.py
+  - contracts/ports.py
+  - acquisition/feed_service.py
+  - acquisition/spot_tap.py
+  - simulator/synthetic_feed.py
+  - app/pipeline.py
+  - features/strike_window.py
+  - config/ibkr.json
+  - config/features.json
+  - tools/selfcheck_config.py
+  - README.md
+
+validation_commands:
+  - "python run.py --check"
+  - "python tools/smoke_test.py"
+  - "python tools/check_side_flip.py"
+  - "python tools/check_subscription_qualify.py"
+  - "python tools/check_tick_router.py"
+  - "python tools/check_session_rollover.py"
+  - "python tools/check_clock_protocol.py"
+  - "python tools/check_web_contract.py"
+  - "python tools/check_page_render.py"
+  - "python tools/ws_probe.py"
+
+notes:
+  - 本机三个解释器都没有 tzdata，必须用隔离 venv 跑（否则 5 个回归抛 ZoneInfoNotFoundError）。
+  - check_web_contract / check_page_render / ws_probe 需要服务已在跑。
+  - check_page_render 依赖本机 Chrome，找不到时跳过并返回 0。
+  - 隔离 venv 路径：C:/Users/Lenovo/.workbuddy-ai/binaries/python/envs/default
+  - 环境变量需设 NO_PROXY=127.0.0.1,localhost，否则本机回环请求会被代理拦成 502。
+  - >
+    aiohttp 3.14.3 实测：AppRunner 签名里**没有**显式 access_log 参数，它经 **kwargs
+    透传到 RequestHandler；而 RequestHandler 的默认值是 access_logger
+    （logging.getLogger("aiohttp.access")），即**默认开启**，必须显式传 None 才关闭。
+  - 非空转验证脚本写在系统 temp（spxw_probe_deadkey / wiring / lifecycle），不进仓库。

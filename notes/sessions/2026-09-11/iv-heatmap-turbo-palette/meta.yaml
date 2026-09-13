@@ -1,0 +1,44 @@
+task_id: iv-heatmap-turbo-palette
+date: 2026-09-11
+status: complete
+scope: >
+  按 KAI 指令「将前端 IV 变化的色调改为原项目的热力图色调，只改色调」，把
+  web/config.js 的 heatmap.palette 从自拟 11 段发散色标，换成参考项目
+  live-volatility-surface 的 Plotly `Turbo` 15 色顺序色阶。
+  只改色板数组 + 其上方注释；不动 vmax 策略、坐标、tooltip、数据结构，
+  不动 heatmap.js / app.js / style.css，不动任何后端文件。
+change_id: N/A
+proposal_path: N/A
+tasks_path: N/A
+
+deliverables:
+  - web/config.js
+
+validation_commands:
+  - "node --check web/config.js"
+  - "python run.py --check"
+  - "python tools/check_web_contract.py"
+  - "python tools/check_page_render.py"
+
+notes:
+  - >
+    色源查证：参考项目 dash_surface.py 的 make_iv_heatmap_figure（即 KAI 截图
+    "QQQ Current OTM IV Heatmap" 那张图）用 colorscale=IV_COLORSCALE，其
+    DASHBOARD_CONFIG_DEFAULTS["IV_COLORSCALE"] == "Turbo"，**未反转**。
+    参考项目的 *change* 热力图（make_change_heatmap_figure）用的是硬编码
+    "RdBu_r"，本会话未采用。
+  - >
+    Turbo 权威定义取自 Plotly 源码 _plotly_utils/colors/sequential.py（15 色）。
+    plotly.js 的 scales.js 里没有 Turbo，那是 plotly.py 侧定义的命名色阶。
+  - >
+    取位规则：ECharts 的 visualMap.inRange.color 数组与 Plotly 的 list 色阶
+    一致 —— 都是在数组上等距取点，故 15 色落在 0, 1/14, …, 1。与本图
+    visualMap 的 [-vmax, +vmax] 对齐后，两端读数与原项目同色。
+  - >
+    本机 8060 端口被先前的 run.py --sim 占着（PID 23240），新起进程报
+    OSError 10048 直接退出；**不杀它，复用既有服务** —— 静态目录按请求读盘，
+    改完即生效（已用 curl 复核线上 config.js 是新色板）。
+  - >
+    无头 Chrome 截图必须用绝对路径；相对路径会静默失败（"cannot find the path
+    specified"）而 exit code 仍为 0，必须 `ls -la` 复核文件真的生成。
+  - 本会话未跑 IBKR 实盘（纯前端配色改动，无需联通）。

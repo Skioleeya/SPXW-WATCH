@@ -1,0 +1,92 @@
+"""临时探针：用项目自身的 SubscriptionManager 走真实订阅/退订路径，只覆盖 port。"""
+
+import asyncio
+import json
+import pathlib
+import sys
+import time
+
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+
+from acquisition.chain_resolver import ChainResolver
+from acquisition.contract_factory import ContractFactory
+from acquisition.ibkr_gateway import IbkrGateway
+from acquisition.subscription_manager import SubscriptionManager
+from config import loader
+
+
+def load(name):
+    return json.loads((ROOT / "config" / f"{name}.json").read_text(encoding="utf-8"))
+
+
+APP = load("app")
+IBKR = load("ibkr")
+SUB = load("subscription")
+IBKR["port"] = 4002  # 本机实际监听端口（仅探针内覆盖，不改配置文件）
+IBKR["client_id"] = 98
+
+TODAY = "20260911"
+
+
+async def main():
+    gw = IbkrGateway(IBKR)
+    factory = ContractFactory(APP)
+    resolver = ChainResolver(APP, SUB)
+    mgr = SubscriptionManager(gw, factory, SUB)
+
+    await gw.connect()
+    ib = gw.ib
+    client = ib.client
+    print(f"[connect] ok serverVersion={client.serverVersion()} "
+          f"limiter={client.MaxRequests}/{client.RequestsInterval}")
+
+    marks, errs = [], []
+    client.throttleStart += lambda: marks.append(("start", time.monotonic()))
+    client.throttleEnd += lambda: marks.append(("end", time.monotonic()))
+    ib.errorEvent += lambda rid, code, msg, ctr: errs.append(code)
+
+    gw.set_market_data_type(loader.as_int(IBKR, "market_data_type", module="ibkr"))
+
+    und = await gw.qualify(factory.underlying())
+    print(f"[underlying] conId={und.conId} {und.symbol}/{und.secType}")
+    gw.subscribe_spot(und)
+
+    chains = await gw.fetch_chain(
+        factory.symbol, APP["underlying_sec_type"], factory.underlying_exchange,
+        int(und.conId),
+    )
+    await asyncio.sleep(loader.as_float(IBKR, "chain_settle_s", module="ibkr"))
+    print(f"[chain] reqSecDefOptParams 返回 {len(chains)} 片")
+
+    sl = resolver.pick_zero_dte(chains, TODAY, int(und.conId))
+    print(f"[slice] expiry={sl.expiry} class={sl.trading_class} "
+          f"strikes={len(sl.strikes)} exchange={sl.exchange}")
+
+    mid = sl.strikes[len(sl.strikes) // 2]
+    window = resolver.window(sl.strikes, mid)
+    print(f"[window] {len(window)} 档  {window[:2]}..{window[-2:]}")
+
+    t0 = time.monotonic()
+    plan = await mgr.reconcile(sl.expiry, window)
+    dt = time.monotonic() - t0
+    print(f"[subscribe] wall={dt:.3f}s total={plan.projected_total} "
+          f"add={len(plan.add)} failed={len(plan.failed)} "
+          f"throttle={len([m for m in marks if m[0]=='start'])}")
+
+    marks.clear()
+    window2 = resolver.window(sl.strikes, mid + 60.0)
+    t1 = time.monotonic()
+    plan2 = await mgr.reconcile(sl.expiry, window2)
+    dt2 = time.monotonic() - t1
+    print(f"[recenter]  wall={dt2:.3f}s drop={len(plan2.drop)} add={len(plan2.add)} "
+          f"total={plan2.projected_total} "
+          f"throttle={len([m for m in marks if m[0]=='start'])}")
+
+    await mgr.clear()
+    print(f"[errors] {sorted(set(errs)) or '无'}")
+    await gw.disconnect()
+    print("[done]")
+
+
+asyncio.run(main())

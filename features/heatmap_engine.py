@@ -29,6 +29,15 @@ IV 的绝对水平在 0DTE 上几乎不变，画出来是一片均匀的色块�
 "断流恢复"的那一刻传 ``break_now=True``，本桶的值**只作为新段的起点、不与
 前一个值做差**，即该桶输出 ``None``（留白）。宁可留白，也不画假信号。
 
+同一类留白的第二个来源：**会话之间的空档**（2026-09-13 起）
+----------------------------------------------------------
+网格覆盖整个交易日之后，GTH（20:15 → 09:25）与 RTH（09:30 → 16:00）之间
+那 5 分钟不交易的时间也在横轴上占了桶位。跨过它做差，就是把整段空档的变化
+压进一个 30 秒桶 —— 与断线恢复**机制上完全一样**，只是触发者从"网络断了"
+换成"交易所中场"。所以区段起点桶同样留白，由时钟的 ``zone_start_indexes()``
+给出（静态的网格几何，见 ``_zone_starts``）。前端在「全时段」视图里把那几列
+整段切掉；切掉之后相邻的两列本来就不该有差分关系，两边语义自洽。
+
 为什么断代标记是**全局**的而不是逐档的
 --------------------------------------
 断流是喂价层的事件，所有行权价同时停。而单个远虚值档本来就可能几分钟没有
@@ -65,7 +74,9 @@ _CellKey = float
 class HeatmapEngine:
     """按时间桶累积 IV，并产出 ΔIV 矩阵。"""
 
-    __slots__ = ("_clock", "_max_buckets", "_min_buckets", "_buckets", "_breaks")
+    __slots__ = (
+        "_clock", "_max_buckets", "_min_buckets", "_buckets", "_breaks", "_zone_starts",
+    )
 
     def __init__(self, clock, serial_cfg: dict) -> None:
         self._clock = clock
@@ -80,6 +91,11 @@ class HeatmapEngine:
         # 断代桶序号：这些桶的值是新段的起点，差分时必须留白。全局集合，
         # 因为断流是所有档位同时发生的事件（见模块 docstring）。
         self._breaks: set[int] = set()
+        # 区段起点桶（会话之间的空档边界）：静态的网格几何，一天内不变，
+        # 因此不进持久化、也不随裁剪淘汰（见模块 docstring）。
+        self._zone_starts: frozenset[int] = frozenset(
+            int(index) for index in clock.zone_start_indexes()
+        )
 
     # ------------------------------------------------------------------ #
     # 累积
@@ -196,11 +212,16 @@ class HeatmapEngine:
         差分天然全为空——此时仍然返回定长行，让前端能立刻画出带正确坐标轴的
         空网格，而不是整块面板空白。``null`` 与 ``0`` 语义不同，前端会跳过空值。
 
-        三种情况输出 ``None``（留白），它们的含义不同但都"不该画颜色"：
+        四种情况输出 ``None``（留白），它们的含义不同但都"不该画颜色"：
         1. 该桶从未有过 IV（``previous is None``）—— 序列还没开始；
         2. 该桶是断代桶（``index in self._breaks``）—— 前一个值来自断线前，
            做差会造出假冲量；
-        3. 该桶本身没有值（整行一个桶都没写过时由调用方提前返回 ``None``）。
+        3. 该桶是区段起点（``index in self._zone_starts``）—— 前一个值来自
+           上一个会话，中间隔着整段不交易的空档（GTH 收盘 09:25 → RTH 开盘
+           09:30），做差就是把空档里的全部变化压进一个桶，与断线恢复是同一类
+           假信号。**这是"5 分钟空档"在数据侧的落点**：前端把那几列整段切掉，
+           而切掉之后相邻的两列本来就不该有差分关系；
+        4. 该桶本身没有值（整行一个桶都没写过时由调用方提前返回 ``None``）。
         """
         if not bucket:
             return None
@@ -209,13 +230,14 @@ class HeatmapEngine:
         if first > current:
             return None
 
+        blocked = self._breaks | self._zone_starts
         out: list[float | None] = []
         carried: float | None = None
         previous: float | None = None
 
         for index in range(current + 1):
             value = bucket.get(index, carried)
-            if value is None or previous is None or index in self._breaks:
+            if value is None or previous is None or index in blocked:
                 out.append(None)
             else:
                 out.append((value - previous) * 100.0)

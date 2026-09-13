@@ -18,6 +18,29 @@ from contracts.tick import RateLimitStatus
 
 
 @dataclass(frozen=True, slots=True)
+class SessionZone:
+    """
+    交易日网格里的一个区段。
+
+    ``is_session=True`` 是一个真实会话（GTH / RTH），``False`` 是两个会话之间的
+    **空档**（例如 GTH 收盘 09:25 → RTH 开盘 09:30）。空档里没有任何行情，
+    前端在「全时段」视图里把它整段丢掉 —— 这就是"隐藏 5 分钟空档"的落点。
+
+    ``first`` / ``last`` 是区段覆盖的桶序号区间（含两端），由 L0 的
+    ``SessionClock`` 按会话定义算出。前端只按这两个数切列，**不自己推算时刻**：
+    让它自己算就等于把网格几何抄了第二份。
+    """
+
+    id: str = ""
+    label: str = ""
+    is_session: bool = True
+    first: int = 0
+    last: int = 0
+    open: str = ""
+    close: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class SessionBlock:
     """会话坐标。"""
 
@@ -30,6 +53,7 @@ class SessionBlock:
     seconds_to_close: float = 0.0
     bucket_index: int = 0
     bucket_count: int = 0
+    zones: tuple[SessionZone, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

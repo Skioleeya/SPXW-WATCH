@@ -45,11 +45,19 @@ from core.clock import SessionClock  # noqa: E402
 from serialization.heatmap_matrix import HeatmapSerializer  # noqa: E402
 from serialization.skew_series import SkewSerializer  # noqa: E402
 
-#: 整会话 30 秒粒度 = 780 列，刻意超过 ``maxColumns=400`` —— 于是
-#: ``clipTail`` 一定会被走到，"被裁掉的历史段不该告警"这条路径才有覆盖。
+#: 整会话 30 秒粒度 = 780 列。夹具刻意**不**用整张交易日网格（2370 列）：这里
+#: 要钉的是"周期对齐 + 尾部截断"这条链，网格越小越容易把别的东西混进来。
+#: 时段切列（GTH/空档/RTH）由 tools/check_period_aggregation.py 单独覆盖。
 BUCKETS = 780
 BASE_SECONDS = 30
 ROWS = 24
+
+#: 夹具自己指定的列数上限。**不读** web/config.js 的 maxColumns —— 那个值现在
+#: 大到"一个交易日内永不生效"，拿它做上限会让 clipTail 这条路径彻底空转，
+#: 于是"漏掉截断偏移"这类缺陷再也抓不到。上限只对"截断这件事"有意义，
+#: 取多少由夹具决定；真实值够不够大由 check_period_aggregation 的跨文件
+#: 不变量单独核对。
+CLIP_COLUMNS = 400
 
 #: 尖峰所在基线桶。刻意放得很早：这样它会**退出** ``skew.scale_policy.window_s``
 #: 定义的量程窗口，量程窗口开着与关掉才会有可观测差异（否则该判据是空转）。
@@ -84,7 +92,8 @@ const S = sandbox;
 const P = S.SWATCH_PERIOD;
 const CFG = S.SWATCH_CONFIG;
 const F = S.SWATCH_MATRIX.decodeFrame(JSON.parse(fs.readFileSync(framePath, "utf8")));
-const MAX_COLS = CFG.heatmap.maxColumns;
+/* 列数上限由夹具给（见 skew_reference.CLIP_COLUMNS），缺省才退回配置值 */
+const MAX_COLS = Number(process.argv[3]) || CFG.heatmap.maxColumns;
 
 const out = {
   base: F.heatmap.bucket_seconds,
@@ -133,15 +142,27 @@ process.stdout.write(JSON.stringify(out));
 # 合成帧
 # --------------------------------------------------------------------------- #
 
-def _config() -> dict:
+def _app_config() -> dict:
+    return json.loads((ROOT / "config" / "app.json").read_text("utf-8"))
+
+
+def _serial_config() -> dict:
+    """序列化配置 —— 两个序列化器的构造参数（``HeatmapSerializer`` 单参、
+    ``SkewSerializer`` 双参）。与 ``app.json`` 分开读：会话定义与推送帧形状
+    是两个不同层级的真相，不从一个文件里取两样东西。"""
     return json.loads((ROOT / "config" / "serialization.json").read_text("utf-8"))
 
 
 def build() -> tuple[dict, dict]:
     """造一整个帧（热力图**经生产编码器**编码）+ 供参考实现用的源序列。"""
-    cfg = _config()
-    clock = SessionClock("America/New_York", "09:30", "16:00", BASE_SECONDS)
-    open_dt = clock.session_open_dt()
+    cfg = _serial_config()
+    app = _app_config()
+    # 会话定义取自 config/app.json（时段真相的唯一归属），网格起点由产品时钟
+    # 算出来 —— 夹具不自己推"网格从哪一刻开始"，那是把几何抄第二份。
+    clock = SessionClock(
+        str(app["timezone"]), list(app["sessions"]), BASE_SECONDS
+    )
+    open_dt = clock.grid_start_dt()
 
     labels = clock.bucket_labels()[:BUCKETS]
     #: strikes 降序 —— 与真实帧一致（帧与屏幕同向，见项目 MEMORY）
@@ -246,19 +267,21 @@ def ref_column_span(col: int, group: int, drop: int) -> tuple[int, int]:
 
 def run_node(frame: dict) -> dict:
     """把合成帧交给 node，取回真实前端在各周期下的对齐结果。"""
-    return run_node_in(frame, ROOT / "web")
+    return run_node_in(frame, ROOT / "web", CLIP_COLUMNS)
 
 
-def run_node_in(frame: dict, web_dir: Path) -> dict:
+def run_node_in(frame: dict, web_dir: Path, max_columns: int = CLIP_COLUMNS) -> dict:
     """
-    同上，但前端目录可指定 —— ``--selftest`` 用它加载被注入缺陷的副本，
-    免得为了跑一次变异去改动工程里的真实文件。
+    同上，但前端目录与列数上限可指定 —— ``--selftest`` 用前者加载被注入缺陷的
+    副本，免得为了跑一次变异去改动工程里的真实文件；后者让"截断"这条路径在
+    夹具里可控（真实的 maxColumns 大到永不生效，见 CLIP_COLUMNS 的说明）。
     """
     with tempfile.TemporaryDirectory(prefix="swatch-skew-") as tmp:
         frame_file = Path(tmp) / "frame.json"
         frame_file.write_text(json.dumps(frame), encoding="utf-8")
         proc = subprocess.run(
-            ["node", "-e", NODE_DRIVER, str(web_dir), str(frame_file)],
+            ["node", "-e", NODE_DRIVER, str(web_dir), str(frame_file),
+             str(int(max_columns))],
             capture_output=True, text=True, encoding="utf-8", timeout=120,
         )
     if proc.returncode != 0:

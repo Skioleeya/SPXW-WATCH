@@ -193,6 +193,44 @@ main {
 }
 
 /* ------------------------------------------------------------------ */
+/* 时段切换（GTH / RTH / 全时段）                                      */
+/* ------------------------------------------------------------------ */
+
+.sessions {
+  display: flex;
+  gap: 3px;
+  flex: 0 0 auto;
+}
+.sessions button {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--text-dim);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 7px;
+  cursor: pointer;
+}
+.sessions button:hover {
+  color: var(--text);
+  border-color: var(--border-2);
+}
+.sessions button.on {
+  color: #06222a;
+  background: var(--accent);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
+/* 时段按钮与周期按钮之间留一道竖线，两组是不同维度的选择 */
+.sessions + .periods {
+  margin-left: 6px;
+  padding-left: 9px;
+  border-left: 1px solid var(--border);
+}
+
+/* ------------------------------------------------------------------ */
 /* 时间周期切换                                                        */
 /* ------------------------------------------------------------------ */
 

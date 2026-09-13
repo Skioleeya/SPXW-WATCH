@@ -6,14 +6,14 @@ L3 — 会话翻篇回归。
 
 为什么需要它
 ------------
-热力图与 Skew 序列的键都是**会话内**桶序号（``0..389``），它只在一天之内唯一。
-引擎本身不带日期，于是跨过会话边界之后，新一天第 1 桶的 IV 会去减上一天第 1 桶
-的 IV —— 差出一个**毫无根据的冲量**。这不是"数据缺失"，是凭空造出来的信号，
-而且看起来完全正常：颜色、数值量级都对，只是它从来不存在。
+热力图与 Skew 序列的键都是**网格内**桶序号，它只在一天之内唯一（跨过午夜会绕
+回低位）。引擎本身不带日期，于是跨过交易日边界之后，新一天第 1 桶的 IV 会去减
+上一天第 1 桶的 IV —— 差出一个**毫无根据的冲量**。这不是"数据缺失"，是凭空造
+出来的信号，而且看起来完全正常：颜色、数值量级都对，只是它从来不存在。
 
 这个缺陷曾经真的出现过：``FeatureEngine.reset()`` 一直存在，但**没有任何地方
 调用它**。喂价在收盘后停手，会话时钟继续走到下一个交易日，于是热力图从
-"36 档 × 304 桶"塌成 "36 档 × 1 桶 · 0 格"——看起来像渲染坏了，实际是旧数据
+"多档 × 多桶"塌成 "多档 × 1 桶 · 0 格"——看起来像渲染坏了，实际是旧数据
 被新会话的桶序号重新解释了一遍。
 
 行情由 ``tools.fixtures.SyntheticSurface`` 解析生成、时间由
@@ -38,7 +38,7 @@ from contracts.tick import OptionRef, OptionTick, QuoteTick, SpotTick  # noqa: E
 from core.clock import SessionClock  # noqa: E402
 from features.feature_engine import FeatureEngine  # noqa: E402
 from state.tick_store import TickStore  # noqa: E402
-from tools.fixtures import FakeClock, SyntheticSurface  # noqa: E402
+from tools.fixtures import FakeClock, SyntheticSurface, make_session_clock  # noqa: E402
 
 GREEN, RED, RESET = "\033[32m", "\033[31m", "\033[0m"
 
@@ -80,14 +80,13 @@ def main() -> int:
     serial_cfg = loader.load("serialization")
 
     tz = loader.as_str(app_cfg, "timezone", module="app")
-    open_hm = loader.as_str(app_cfg, "session_open", module="app")
-    close_hm = loader.as_str(app_cfg, "session_close", module="app")
-    bucket_s = loader.as_int(serial_cfg, "heatmap_bucket_seconds", module="serialization")
     each_side = loader.as_int(sub_cfg, "num_strikes_each_side", module="subscription")
+    bucket_s = int(serial_cfg["heatmap_bucket_seconds"])
 
-    fake = FakeClock(tz, open_hm)
-    session = SessionClock(tz, open_hm, close_hm, bucket_s, clock=fake)
+    session, fake = make_session_clock(app_cfg, serial_cfg)
     surface = SyntheticSurface(SURFACE_SLOPE, SURFACE_CURVATURE, DELTA_SCALE)
+    print(f"  网格起点 {fake.grid_start().isoformat()}（{tz}）· "
+          f"{session.bucket_count()} 桶 × {bucket_s}s")
 
     store = TickStore(state_cfg, session)
     engine = FeatureEngine(store, session, feat_cfg, serial_cfg)
@@ -162,7 +161,7 @@ def main() -> int:
     # 如果桶序号被跨会话复用，新会话第 1 桶的 IV 会去减会话 A 第 0 桶残留的 IV，
     # 差出一个凭空造出来的冲量；正确行为是没有前值 → 该格为空。
     print("\n[2] 翻篇到下一个交易日，只喂新会话第 1 桶")
-    fake.set_day(fake.session_datetime() + timedelta(days=1))
+    fake.set_grid_start(fake.grid_start() + timedelta(days=1))
     fake.reset()
     session_b = session.expiry_str()
     passed &= _check("到期日已翻篇", session_b != session_a,
@@ -203,7 +202,7 @@ def main() -> int:
     # 会话时钟继续走，但没有任何新 tick。此时若不清空，旧矩阵会以新会话的身份
     # 继续被推送出去 —— 画面上是一张"看起来正常"的图，实际全是上一个交易日的。
     print("\n[4] 翻篇后无新 tick（旧数据不得冒充当天）")
-    fake.set_day(fake.session_datetime() + timedelta(days=1))
+    fake.set_grid_start(fake.grid_start() + timedelta(days=1))
     fake.reset()
     session_c = session.expiry_str()
     _goto(fake, session, 3 * bucket_s)

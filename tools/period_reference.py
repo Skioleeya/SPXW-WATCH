@@ -4,17 +4,14 @@ L6 — 周期聚合回归的对照夹具。
 唯一职责：为 ``tools/check_period_aggregation.py`` 提供三样东西 —— 确定性的
 合成矩阵、独立的 Python 参考实现、以及取回 JS 结果的 node 驱动。
 
-为什么单独一个文件：``check_*`` 脚本的正文应该是"怎么对照"，造数与参考实现是
-夹具。混在一起会同时撑破 400 行上限与单一职能 —— 两条都是项目硬约束。
+为什么单独一个文件：``check_*`` 脚本的正文应该是"怎么对照"，造数与参考实现是夹具。
+混在一起会同时撑破 400 行上限与单一职能 —— 两条都是项目硬约束。
 
-为什么参考实现另写一份，而不是直接调 ``web/period.js``
-------------------------------------------------------
-对拍的意义就在两侧**独立**。这里刻意用最直白的写法（朴素双重循环 + 显式 null
-传播），不图效率，只图"读一遍就能确认它对"。
-
-唯一的例外是色标那一环：它直接 import 生产代码
-``serialization.numeric.robust_bound``。前端那份 ``bound()`` 是它的镜像，要钉住的
-正是这个镜像有没有漂移 —— 抄一份参考实现来对拍等于两边一起错，没有意义。
+为什么参考实现另写一份，而不是直接调 ``web/period.js``：对拍的意义就在两侧**独立**。
+这里刻意用最直白的写法（朴素双重循环 + 显式 null 传播），不图效率，只图"读一遍就能
+确认它对"。唯一的例外是色标那一环 —— 它直接 import 生产代码
+``serialization.numeric.robust_bound``：前端那份 ``bound()`` 是它的镜像，要钉住的正是
+这个镜像有没有漂移，抄一份参考实现来对拍等于两边一起错，没有意义。
 """
 
 from __future__ import annotations
@@ -34,6 +31,25 @@ COLS = 125
 WIDE_COLS = 780
 BASE_SECONDS = 30
 OPEN_MINUTE = 9 * 60 + 30
+
+#: 时段切列用例：一个 3 区段的小网格（GTH / 空档 / RTH），刻意与真实配置
+#: 无关 —— 这里要钉的是"按 first/last 切列、空档整段消失"这条规则本身。
+ZONE_COLS = 60
+ZONE_TABLE: list[dict[str, Any]] = [
+    {"id": "gth", "label": "GTH", "is_session": True,
+     "first": 0, "last": 29, "open": "20:15", "close": "09:25"},
+    {"id": "gap", "label": "空档", "is_session": False,
+     "first": 30, "last": 33, "open": "09:25", "close": "09:30"},
+    {"id": "rth", "label": "RTH", "is_session": True,
+     "first": 34, "last": 59, "open": "09:30", "close": "16:00"},
+]
+ZONE_KEEPS: tuple[tuple[str, ...], ...] = (
+    ("gth",),
+    ("rth",),
+    ("gth", "rth"),     # 全时段：空档不选，于是被整段切掉
+    (),                 # 空列表 = 不切（恒等），前端要能容忍缺 zones
+    ("nosuch",),        # 选了一个帧里没有的时段：必须返回空，前端保留上一帧
+)
 
 #: node 侧驱动：求值 config.js + period.js，把结果原样吐成 JSON。
 #: 数据由 Python 生成后经临时文件传入 —— 两侧各自造数的话，"对拍对象其实不是
@@ -55,7 +71,7 @@ const cases = JSON.parse(fs.readFileSync(casesPath, "utf8"));
 const out = {
   declared: (cfg.heatmap && cfg.heatmap.periods) || [],
   maxColumns: cfg.heatmap ? cfg.heatmap.maxColumns : null,
-  options: {}, bound: {}, aggregate: {}, clip: null
+  options: {}, bound: {}, aggregate: {}, clip: null, slice: {}, index: null
 };
 
 for (const key of Object.keys(cases.options)) {
@@ -83,6 +99,29 @@ out.clip = {
   clipped: cl.clipped === undefined ? null : cl.clipped
 };
 
+for (const c of cases.slice.cases) {
+  const r = P.sliceZones(c.block, cases.slice.zones, c.keep);
+  out.slice[c.name] = r === null ? null : {
+    cols: r.block.cols, labels: r.block.labels, values: r.block.values,
+    bucket_index: r.block.bucket_index, index: r.index
+  };
+}
+
+/* 时段切列对 Skew 的影响：带 index 的路径必须与"先把桶号预映射一遍再走普通
+   路径"逐值相同；而**不带** index（用原始桶号）必须不同 —— 后者是非空转判据，
+   少了它，"index 被忽略"这个缺陷会静默通过。 */
+const idx = cases.index;
+function runSkew(series, index) {
+  const a = P.alignSkew(series, idx.group,
+    { labels: idx.labels, drop: idx.drop, index: index });
+  return a === null ? null : a.skew;
+}
+out.index = {
+  withIndex: runSkew(idx.series, idx.index),
+  premapped: runSkew(idx.premapped, null),
+  unsliced: runSkew(idx.raw, null)
+};
+
 process.stdout.write(JSON.stringify(out));
 """
 
@@ -99,13 +138,11 @@ def _label(index: int) -> str:
 
 
 def _cell(row: int, col: int) -> float | None:
-    """
-    造一格 ΔIV。
+    """造一格 ΔIV。
 
-    ``null`` 只出现在**每行开头**（``col < row * 3``），模拟真实情形：某一档在
-    它被第一次观测之前没有任何时间桶。于是既会产生"整组全空"的组（该行第一
-    组），也会产生"组内部分为空"的组（第二组）—— 后者正是"少加了一段却报一个
-    数"最容易发生的地方。
+    ``null`` 只出现在**每行开头**（``col < row * 3``），模拟真实情形：某一档在它被
+    第一次观测之前没有任何时间桶。于是既会产生"整组全空"的组（该行第一组），也会
+    产生"组内部分为空"的组（第二组）—— 后者正是"少加了一段却报一个数"的易发处。
     """
     if col < row * 3:
         return None
@@ -131,7 +168,7 @@ def block(cols: int = COLS) -> dict[str, Any]:
 
 
 def cases() -> dict[str, Any]:
-    """四组对照的全部输入。"""
+    """五组对照的全部输入。"""
     base = block()
     flat = [v for row in base["values"] for v in row if v is not None]
 
@@ -151,6 +188,66 @@ def cases() -> dict[str, Any]:
         "aggregate": [{"name": f"g{g}", "group": g, "block": base}
                       for g in (1, 2, 6, 10, 30, 60, 200)],
         "clip": {"block": block(WIDE_COLS), "maxColumns": 400},
+        "slice": {
+            "zones": ZONE_TABLE,
+            "cases": [
+                {"name": "keep=" + ("+".join(k) if k else "none"),
+                 "block": block(ZONE_COLS), "keep": list(k)}
+                for k in ZONE_KEEPS
+            ],
+        },
+        "index": _index_case(),
+    }
+
+
+def _skew_series(buckets: list) -> dict[str, Any]:
+    """造一条与帧同形状的 Skew 序列（只填 alignSkew 真正读的字段）。"""
+    n = len(buckets)
+    return {
+        "bucket": list(buckets),
+        "ts": [1000.0 + i for i in range(n)],
+        "skew": [round(1.0 + i * 0.5, 3) for i in range(n)],
+        "atm": [0.12] * n,
+        "put25": [0.13] * n,
+        "call25": [0.11] * n,
+        "spot": [6500.0] * n,
+    }
+
+
+def _index_case() -> dict[str, Any]:
+    """时段切列下 Skew 落列的对拍输入。
+
+    ``series`` + ``index`` 是**真实路径**（帧里的原始桶号 + 切列映射）；``premapped``
+    是"先把桶号换成切后位置、把被切掉的点丢掉"的等价序列；``raw`` 是**错误的做法**
+    （拿原始桶号直接除，即忽略 index）—— 非空转判据。
+    """
+    base = block(ZONE_COLS)
+    sliced = ref_slice_zones(base, ZONE_TABLE, ["gth", "rth"])
+    if sliced is None:
+        raise RuntimeError("切列夹具自坏：所选时段一列都没有")
+    index = sliced["index"]
+
+    # 每 7 个桶掺一个 null，覆盖"序列里有洞"的情形
+    buckets = [None if i % 7 == 0 else i for i in range(ZONE_COLS)]
+    raw = _skew_series(buckets)
+
+    kept, values = [], []
+    for i, b in enumerate(buckets):
+        if b is None or index[b] < 0:
+            continue
+        kept.append(index[b])
+        values.append(raw["skew"][i])
+    premapped = _skew_series(kept)
+    premapped["skew"] = values
+
+    return {
+        "series": raw,
+        "raw": raw,
+        "premapped": premapped,
+        "index": index,
+        "group": 3,
+        "drop": 2,
+        "labels": sliced["labels"],
     }
 
 
@@ -212,6 +309,68 @@ def ref_clip(base: dict, limit: int) -> dict[str, Any]:
         "bucket_index": base["bucket_index"] - drop,
         "clipped": drop,
     }
+
+
+def ref_slice_zones(
+    base: dict, zones: list, keep_ids: list
+) -> dict[str, Any] | None:
+    """只保留所选区段覆盖的列，其余整列切掉。
+
+    ``keep_ids`` 为空 = 不切（恒等，前端在帧缺 ``session.zones`` 时走这条路）；
+    所选区段一列都没有时返回 ``None``（前端据此保留上一帧）。
+    """
+    cols = len(base["labels"])
+    if not keep_ids:
+        return {"cols": cols, "labels": list(base["labels"]),
+                "values": [list(row) for row in base["values"]],
+                "bucket_index": base["bucket_index"],
+                "index": list(range(cols))}
+
+    keep = set(keep_ids)
+    index = [-1] * cols
+    labels: list = []
+    picked: list[int] = []
+    for zone in zones:
+        if zone["id"] not in keep:
+            continue
+        first = max(0, int(zone["first"]))
+        last = min(cols - 1, int(zone["last"]))
+        for c in range(first, last + 1):
+            index[c] = len(labels)
+            labels.append(base["labels"][c])
+            picked.append(c)
+    if not labels:
+        return None
+
+    here = index[base["bucket_index"]]
+    if here < 0:
+        here = len(labels) - 1
+    return {
+        "cols": len(labels),
+        "labels": labels,
+        "values": [[row[c] for c in picked] for row in base["values"]],
+        "bucket_index": here,
+        "index": index,
+    }
+
+
+def ref_align_indexed(
+    series: dict, group: int, cols: int, drop: int, index: list
+) -> list:
+    """带时段映射的 Skew 落列：桶号先经 ``index`` 换成切后位置（-1 = 已切掉），
+    再走"整除 + 平移"。等价于"把序列预映射一遍再走普通公式"。
+    """
+    out: list = [None] * cols
+    for i, b in enumerate(series["bucket"]):
+        if b is None or b < 0:
+            continue
+        pos = index[b] if b < len(index) else -1
+        if pos < 0:
+            continue
+        col = pos // group - drop
+        if 0 <= col < cols:
+            out[col] = series["skew"][i]
+    return out
 
 
 # --------------------------------------------------------------------------- #

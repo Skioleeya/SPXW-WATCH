@@ -26,13 +26,12 @@ from contracts.tick import (  # noqa: E402
     QuoteTick,
     SpotTick,
 )
-from core.clock import SessionClock  # noqa: E402
 from core.logging_setup import configure  # noqa: E402
 from features.feature_engine import FeatureEngine  # noqa: E402
 from serialization.payload_builder import PayloadBuilder  # noqa: E402
 from state.market_state import MarketState  # noqa: E402
 from state.tick_store import TickStore  # noqa: E402
-from tools.fixtures import FakeClock, SyntheticSurface  # noqa: E402
+from tools.fixtures import SyntheticSurface, make_session_clock  # noqa: E402
 
 OK = "  [ok] "
 FAIL = "  [FAIL] "
@@ -68,26 +67,25 @@ def main() -> int:
     # ------------------------------------------------------------------ #
     # 时间与场景
     # ------------------------------------------------------------------ #
-    tz = loader.as_str(app_cfg, "timezone", module="app")
-    open_hm = loader.as_str(app_cfg, "session_open", module="app")
-    close_hm = loader.as_str(app_cfg, "session_close", module="app")
     bucket_s = loader.as_int(
         serial_cfg, "heatmap_bucket_seconds", module="serialization"
     )
 
-    fake = FakeClock(tz, open_hm)
-    session = SessionClock(tz, open_hm, close_hm, bucket_s, clock=fake)
+    # 网格起点由产品时钟按 app.sessions 算出来（交易日网格从前一晚 GTH 20:15
+    # 起算、跨午夜），夹具只把它记成一个时刻 —— 见 tools/fixtures。
+    session, fake = make_session_clock(app_cfg, serial_cfg)
     surface = SyntheticSurface(SURFACE_SLOPE, SURFACE_CURVATURE, DELTA_SCALE)
 
     print(f"\n会话: {session.describe()}")
     # 不写死"= 390"：桶宽是可配的，写死会让这条检查在改桶宽时变成一个假警报，
-    # 然后被人顺手改掉。改成校验真正的不变量 —— 桶必须**恰好铺满**会话，
-    # 既不留余数（最后一截数据没有桶可落），也不重叠。
+    # 然后被人顺手改掉。改成校验真正的不变量 —— 桶必须**恰好铺满整个交易日
+    # 网格**（各会话 + 它们之间的空档），既不留余数（最后一截数据没有桶可落），
+    # 也不重叠。
     passed &= check(
-        "时间桶恰好铺满会话（无余数、无重叠）",
+        "时间桶恰好铺满交易日网格（无余数、无重叠）",
         session.bucket_count() * bucket_s == int(session.session_len_s()),
         f"{session.bucket_count()} 桶 × {bucket_s}s = "
-        f"{session.bucket_count() * bucket_s}s / 会话 {int(session.session_len_s())}s",
+        f"{session.bucket_count() * bucket_s}s / 网格 {int(session.session_len_s())}s",
     )
     passed &= check("到期日格式 YYYYMMDD", len(session.expiry_str()) == 8,
                     session.expiry_str())

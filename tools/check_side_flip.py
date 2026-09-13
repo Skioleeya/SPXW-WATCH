@@ -25,10 +25,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config import loader  # noqa: E402
 from contracts.enums import OptionRight  # noqa: E402
 from contracts.tick import OptionRef, OptionTick, SpotTick  # noqa: E402
-from core.clock import SessionClock  # noqa: E402
 from features.feature_engine import FeatureEngine  # noqa: E402
 from state.tick_store import TickStore  # noqa: E402
-from tools.fixtures import FakeClock, SyntheticSurface  # noqa: E402
+from tools.fixtures import SyntheticSurface, make_session_clock  # noqa: E402
 
 BUCKETS = 40
 STRIKE_STEP = 5.0
@@ -54,15 +53,11 @@ def main() -> int:
     feat_cfg = loader.load("features")
     serial_cfg = loader.load("serialization")
 
-    tz = loader.as_str(app_cfg, "timezone", module="app")
-    open_hm = loader.as_str(app_cfg, "session_open", module="app")
-    close_hm = loader.as_str(app_cfg, "session_close", module="app")
     bucket_s = loader.as_int(
         serial_cfg, "heatmap_bucket_seconds", module="serialization"
     )
 
-    fake = FakeClock(tz, open_hm)
-    session = SessionClock(tz, open_hm, close_hm, bucket_s, clock=fake)
+    session, fake = make_session_clock(app_cfg, serial_cfg)
     surface = SyntheticSurface(SURFACE_SLOPE, SURFACE_CURVATURE, DELTA_SCALE)
     store = TickStore(state_cfg, session)
     engine = FeatureEngine(store, session, feat_cfg, serial_cfg)

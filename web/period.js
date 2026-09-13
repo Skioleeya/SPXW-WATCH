@@ -8,9 +8,11 @@
  * 四件事，都是纯粹的呈现变换，不含任何业务判断：
  *
  *   1. options()   —— 按基线桶宽筛掉凑不出整组的周期；
- *   2. aggregate() —— 把若干基线桶并成一列（ΔIV 相加）；
- *   3. clipTail()  —— 列数超上限时只保留最近的一段；
- *   4. alignSkew() —— 把 Skew 折线对齐到上面那套列网格（取组内末值）。
+ *   2. sliceZones()—— 只留所选时段（GTH / RTH / 全时段）覆盖的列；
+ *   3. aggregate() —— 把若干基线桶并成一列（ΔIV 相加）；
+ *   4. clipTail()  —— 列数超上限时只保留最近的一段；
+ *   5. alignSkew() —— 把 Skew 折线对齐到上面那套列网格（取组内末值，
+ *                     并消费 sliceZones 产出的"桶号 → 列号"映射）。
  *
  * 为什么聚合放在前端而不是后端
  * ----------------------------
@@ -229,6 +231,118 @@
   }
 
   /* ------------------------------------------------------------------ */
+  /* 时段切列                                                            */
+  /* ------------------------------------------------------------------ */
+
+  /* 恒等映射：不切列时也返回一个映射，调用方不必分两种情况处理。 */
+  function identityIndex(cols) {
+    var out = new Array(cols);
+    for (var i = 0; i < cols; i++) { out[i] = i; }
+    return out;
+  }
+
+  /*
+   * 只保留所选时段覆盖的列，其余整列**切掉**。
+   *
+   * 为什么必须切掉，而不是把那几列填 null
+   * ------------------------------------
+   * 横轴是**类别轴**：填 null 只是不画颜色，那几列照样占着宽度，屏幕上留一条
+   * 空洞。而 GTH 收盘 09:25 到 RTH 开盘 09:30 这段空档里根本没有任何行情 ——
+   * 一条空洞等于告诉人"这里本该有数据"。切掉之后 GTH 段与 RTH 段直接相邻，
+   * 与"这段时间没交易"的读法一致（KAI 2026-09-13 要求）。
+   *
+   * 为什么同时返回 index 映射
+   * -------------------------
+   * Skew 折线按**基线桶号**落列（见 alignSkew）。一旦切掉中间的列，"桶号 →
+   * 列号"就不再是"整除 + 平移"能表达的了。让 skew 自己再推一遍，就是把网格
+   * 几何抄了第二份 —— 切错一列不会有任何报错，只会让两块图的横坐标指向不同
+   * 时刻。所以映射在这里产出一次，两块图共用。
+   *
+   * 区段表来自帧里的 session.zones（后端算的），这里只按 first/last 切，
+   * **不自己推算时刻**：自己算就是把网格几何抄第二份。
+   *
+   * 返回 ``{block, index}``；``index[基线列]`` 是切完之后的列号，-1 表示已切掉。
+   * 所选时段一列都还没有（例如 GTH 时段里切到 RTH）时返回 ``null``。
+   */
+  function sliceZones(block, zones, keepIds) {
+    if (!block || !block.values || !block.labels) { return null; }
+
+    var cols = block.labels.length;
+    var keep = {};
+    var wanted = 0;
+    for (var i = 0; keepIds && i < keepIds.length; i++) {
+      keep[keepIds[i]] = true;
+      wanted += 1;
+    }
+    if (!wanted) {
+      warn("没有可用的时段列表（帧里缺 session.zones），时段切换已停用 —— " +
+        "不猜网格几何，原样显示整块矩阵");
+      return { block: block, index: identityIndex(cols) };
+    }
+
+    var order = [];
+    for (var z = 0; zones && z < zones.length; z++) {
+      if (keep[zones[z].id]) { order.push(zones[z]); }
+    }
+    if (!order.length) {
+      error("所选时段在帧的 session.zones 里一个都对不上，拒绝猜一个网格");
+      return null;
+    }
+
+    var index = new Array(cols);
+    for (var c = 0; c < cols; c++) { index[c] = -1; }
+
+    var labels = [];
+    var picked = [];
+    for (var k = 0; k < order.length; k++) {
+      var first = Math.floor(Number(order[k].first));
+      var last = Math.floor(Number(order[k].last));
+      if (!isFinite(first) || !isFinite(last)) {
+        error("区段 " + order[k].id + " 的 first/last 不是数字，该时段已跳过");
+        continue;
+      }
+      if (first < 0) { first = 0; }
+      if (last > cols - 1) { last = cols - 1; }
+      for (var c2 = first; c2 <= last; c2++) {
+        index[c2] = labels.length;
+        labels.push(block.labels[c2]);
+        picked.push(c2);
+      }
+    }
+    if (!labels.length) { return null; }
+
+    var values = [];
+    for (var r = 0; r < block.values.length; r++) {
+      var src = block.values[r];
+      var dst = new Array(labels.length);
+      for (var n = 0; n < picked.length; n++) { dst[n] = src[picked[n]]; }
+      values.push(dst);
+    }
+
+    /* 当前列：桶号平移过来。当前桶正好落在被切掉的空档里（09:25–09:30）时
+       取保留列里的最后一列 —— 它紧邻空档左侧，是"最后一个有行情的时刻"。 */
+    var here = index[Math.floor(Number(block.bucket_index))];
+    if (typeof here !== "number" || here < 0) { here = labels.length - 1; }
+
+    return {
+      block: {
+        labels: labels,
+        strikes: block.strikes,
+        rights: block.rights,
+        values: values,
+        vmax: block.vmax,
+        rows: block.rows,
+        cols: labels.length,
+        bucket_index: here,
+        bucket_seconds: block.bucket_seconds,
+        scale_policy: block.scale_policy,
+        spot: block.spot
+      },
+      index: index
+    };
+  }
+
+  /* ------------------------------------------------------------------ */
   /* Skew 折线对齐                                                       */
   /* ------------------------------------------------------------------ */
 
@@ -249,6 +363,17 @@
    * 为什么要 drop：热力图列数超上限时会从尾部截取，被截掉的列在两块图里都
    * 不该出现。前端不做二次裁剪，只把落在窗口外的点丢掉。
    *
+   * 为什么要 index：`grid.labels` 那一套列网格可能已经过了 `sliceZones` ——
+   * 空档（09:25–09:30）那几列被整段切掉，于是"桶号 → 列号"不再是"整除 +
+   * 平移"能表达的了（RTH 段每一点都会左移 10 列）。`index` 就是那份映射，
+   * 由 `sliceZones` 产出、两块图共用；自己再推一遍就是第二份网格几何，
+   * 切错一列不会有任何报错，只会让上下两块图的横坐标指向不同时刻。
+   *
+   * `index` 为 null 表示**序列里的桶号已经是切后位置**（没有切列，或调用方
+   * 已自行预映射过），此时退回 `pos = b`。这不是兜底分支，是契约的两条入口：
+   * 有映射就查表，没有就按原样 —— 两者必须给出同一结果（见
+   * `tools/check_period_aggregation.py` 的"时段映射路径 ≡ 预映射路径"）。
+   *
    * 落在窗口**之前**的点（`col < 0`）是 `clipTail` 裁掉的历史段，属于正常
    * 情况，静默丢弃 —— 30 秒粒度下每帧有 380 个，若也告警会每帧刷满日志，
    * 把真正该响的"桶口径不符"淹掉。只有桶索引非法或落在网格**右端之外**
@@ -264,6 +389,10 @@
     var cols = grid.labels.length;
     var drop = Math.floor(Number(grid.drop));
     if (!(drop > 0)) { drop = 0; }
+
+    /* 时段切列的"基线桶号 → 切后列号"映射（见 sliceZones）。为 null 表示
+       序列里的桶号已经是切后位置，不必再查表。 */
+    var index = grid.index && grid.index.length ? grid.index : null;
 
     var bucket = series.bucket;
     var out = {
@@ -281,7 +410,15 @@
     for (var i = 0; i < bucket.length; i++) {
       var b = bucket[i];
       if (typeof b !== "number" || !isFinite(b) || b < 0) { stray += 1; continue; }
-      var col = Math.floor(b / g) - drop;
+      var pos = b;
+      if (index) {
+        /* 桶号超出映射表右端：帧里的 bucket 与热力图不同源，丢弃并告警。 */
+        if (b >= index.length) { stray += 1; continue; }
+        pos = index[b];
+        /* 被时段切列丢掉的那几列（空档）：正常，静默丢弃（见上方说明）。 */
+        if (pos < 0) { continue; }
+      }
+      var col = Math.floor(pos / g) - drop;
       /* 被 clipTail 裁掉的历史段：正常，静默丢弃（见上方说明）。 */
       if (col < 0) { continue; }
       if (col >= cols) { stray += 1; continue; }
@@ -344,6 +481,7 @@
 
   global.SWATCH_PERIOD = {
     options: options,
+    sliceZones: sliceZones,
     aggregate: aggregate,
     clipTail: clipTail,
     alignSkew: alignSkew,

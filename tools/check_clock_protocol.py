@@ -30,9 +30,9 @@ from config import loader  # noqa: E402
 from contracts.enums import OptionRight  # noqa: E402
 from contracts.ports import ClockPort  # noqa: E402
 from contracts.tick import OptionRef, OptionTick, SpotTick  # noqa: E402
-from core.clock import SessionClock, WallClock  # noqa: E402
+from core.clock import WallClock  # noqa: E402
 from state.tick_store import TickStore  # noqa: E402
-from tools.fixtures import FakeClock  # noqa: E402
+from tools.fixtures import make_session_clock  # noqa: E402
 
 GREEN, RED, RESET = "\033[32m", "\033[31m", "\033[0m"
 
@@ -45,9 +45,6 @@ def main() -> int:
     state_cfg = loader.load("state")
 
     tz = loader.as_str(app_cfg, "timezone", module="app")
-    open_hm = loader.as_str(app_cfg, "session_open", module="app")
-    close_hm = loader.as_str(app_cfg, "session_close", module="app")
-    bucket_s = loader.as_int(serial_cfg, "heatmap_bucket_seconds", module="serialization")
     option_age = loader.as_float(state_cfg, "option_buffer_seconds", module="state")
     spot_age = loader.as_float(state_cfg, "spot_buffer_seconds", module="state")
 
@@ -57,8 +54,9 @@ def main() -> int:
     # 1. 三个时间源都必须满足 ClockPort
     # ---------------------------------------------------------------- #
     print("[1] 时间源的协议一致性")
-    fake = FakeClock(tz, open_hm)
-    session = SessionClock(tz, open_hm, close_hm, bucket_s, clock=fake)
+    session, fake = make_session_clock(app_cfg, serial_cfg)
+    print(f"  网格起点 {fake.grid_start().isoformat()}（{tz}）· "
+          f"{session.bucket_count()} 桶 × {session.bucket_seconds}s")
 
     for name, source in (
         ("WallClock", WallClock()),

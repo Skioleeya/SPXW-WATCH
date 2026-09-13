@@ -36,10 +36,35 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
-from core.clock import minutes_of_day
+from core.clock import SessionClock
+
+
+def make_session_clock(
+    app_cfg: dict,
+    serial_cfg: dict,
+    day: date | None = None,
+) -> tuple[SessionClock, "FakeClock"]:
+    """
+    按 ``config/app.json`` 的 ``sessions`` 建一对（会话时钟, 可推进的假时钟）。
+
+    网格起点是**产品代码算出来的**（``SessionClock.grid_start_dt``），夹具只把
+    它记成一个时刻。回归因此不会自己重算"网格从哪一刻开始" —— 那等于把网格
+    几何抄第二份，后端改了会话定义而夹具没跟上，回归会给出一个看起来很确定的
+    错误答案（比报错更糟）。
+
+    先建一个临时时钟只为拿网格起点，随即换成 ``FakeClock`` 重造：几何只依赖
+    会话定义与桶宽，与时间源无关，两次结果必然一致。
+    """
+    tz_name = str(app_cfg["timezone"])
+    sessions = list(app_cfg["sessions"])
+    bucket_s = int(serial_cfg["heatmap_bucket_seconds"])
+
+    geometry = SessionClock(tz_name, sessions, bucket_s)
+    fake = FakeClock(tz_name, geometry.grid_start_dt(day))
+    return SessionClock(tz_name, sessions, bucket_s, clock=fake), fake
 
 
 class FakeClock:
@@ -52,23 +77,22 @@ class FakeClock:
     ----------
     tz_name
         IANA 时区名，与 ``config/app.json`` 的 ``timezone`` 一致。
-    session_open
-        ``"HH:MM"``，会话开盘时刻；``now()`` 以此为基准零点。
-    day
-        基准自然日，默认今天（本地时区）。
+    grid_start
+        网格起点的**时刻**（带时区），通常由 ``make_session_clock`` 从产品时钟
+        取来。注意它不是"某个会话的开盘时刻"—— 交易日网格可能从前一天晚上
+        （GTH 20:15）开始，起点因此可能落在**前一个自然日**上。
     """
 
-    __slots__ = ("_tz", "_open_min", "_base_day", "_offset")
+    __slots__ = ("_tz", "_base", "_offset")
 
-    def __init__(
-        self,
-        tz_name: str,
-        session_open: str,
-        day: datetime | None = None,
-    ) -> None:
+    def __init__(self, tz_name: str, grid_start: datetime) -> None:
+        if grid_start.tzinfo is None:
+            raise ValueError(
+                "grid_start 必须带时区 —— 会话网格的起点是一个有意义的时刻，"
+                "裸 datetime 会在 DST 切换那天悄悄算错一小时"
+            )
         self._tz = ZoneInfo(tz_name)
-        self._open_min = minutes_of_day(session_open)
-        self._base_day = (day or datetime.now(self._tz)).date()
+        self._base = grid_start
         self._offset = 0.0
 
     # ------------------------------------------------------------------ #
@@ -76,7 +100,7 @@ class FakeClock:
     # ------------------------------------------------------------------ #
 
     def now(self) -> float:
-        return self._open_epoch() + self._offset
+        return self._base.timestamp() + self._offset
 
     # ------------------------------------------------------------------ #
     # 控制
@@ -87,34 +111,25 @@ class FakeClock:
         self._offset += float(session_seconds)
 
     def reset(self) -> None:
-        """把偏移归零（不改变基准日）。"""
+        """把偏移归零（不改变基准网格起点）。"""
         self._offset = 0.0
 
-    def set_day(self, day: datetime) -> None:
-        """换一个基准自然日，用于复现会话翻篇。"""
-        self._base_day = day.date()
+    def grid_start(self) -> datetime:
+        """当前基准网格起点。"""
+        return self._base
+
+    def set_grid_start(self, moment: datetime) -> None:
+        """换一个网格起点，用于复现会话翻篇。不改变已累积的偏移。"""
+        if moment.tzinfo is None:
+            raise ValueError("网格起点必须带时区")
+        self._base = moment
 
     @property
     def tz(self) -> ZoneInfo:
         return self._tz
 
-    def session_seconds(self) -> float:
-        """自开盘起经过的会话秒数。"""
-        return self._offset
-
     def session_datetime(self) -> datetime:
         return datetime.fromtimestamp(self.now(), self._tz)
-
-    def _open_epoch(self) -> float:
-        dt = datetime(
-            self._base_day.year,
-            self._base_day.month,
-            self._base_day.day,
-            self._open_min // 60,
-            self._open_min % 60,
-            tzinfo=self._tz,
-        )
-        return dt.timestamp()
 
 
 class SyntheticSurface:

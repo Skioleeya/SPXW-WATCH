@@ -30,6 +30,9 @@ def _make_clock() -> MagicMock:
     c.bucket_index_of_ts = lambda ts: int(ts)
     c.bucket_labels = lambda: tuple(str(i) for i in range(1000))
     c.now_ts = lambda: 100.0
+    # 本回归只关心持久化往返，用一个"没有区段边界"的网格（空元组）——
+    # 区段留白由 tools/check_session_grid.py 与 check_reconnect_gap.py 覆盖。
+    c.zone_start_indexes = lambda: ()
     return c
 
 

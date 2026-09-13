@@ -101,15 +101,38 @@ async def probe(url: str, want_frames: int) -> int:
     passed &= _check("会话块含到期日", bool(session.get("expiry")),
                      str(session.get("expiry")))
     # 不写死"= 390"：桶宽可配，写死只会在改桶宽时变成假警报。
-    # 改校验跨字段不变量 —— 桶数 × 基线桶宽 必须等于会话总长。
+    # 改校验跨字段不变量 —— 桶数 × 基线桶宽 必须等于**整个交易日网格**的长度
+    # （各会话 + 它们之间的空档），而不是某一个会话的长度。
     hm_probe = last.get("heatmap") or {}
     bucket_s = hm_probe.get("bucket_seconds")
     session_s = round((session.get("elapsed_s") or 0) +
                       (session.get("seconds_to_close") or 0))
     passed &= _check(
-        "时间桶恰好铺满会话（桶数 × 桶宽 = 会话长度）",
+        "时间桶恰好铺满交易日网格（桶数 × 桶宽 = 网格长度）",
         bool(bucket_s) and session.get("bucket_count", 0) * bucket_s == session_s,
-        f"{session.get('bucket_count')} 桶 × {bucket_s}s vs 会话 {session_s}s")
+        f"{session.get('bucket_count')} 桶 × {bucket_s}s vs 网格 {session_s}s")
+
+    zones = session.get("zones") or []
+    passed &= _check("会话块含网格区段表（前端时段切换的依据）",
+                     len(zones) >= 2, f"{len(zones)} 个区段")
+    if zones:
+        # 区段必须首尾相接铺满网格：既不留缝（那段列没人管），也不重叠
+        # （同一列被两个区段认领，切列时会被复制一份）。
+        cursor = 0
+        tiled = True
+        sessions_only = 0
+        for zone in zones:
+            if int(zone.get("first", -1)) != cursor:
+                tiled = False
+                break
+            cursor = int(zone.get("last", -1)) + 1
+            if zone.get("is_session"):
+                sessions_only += 1
+        passed &= _check("区段表首尾相接铺满网格（无缝隙、无重叠）",
+                         tiled and cursor == session.get("bucket_count"),
+                         f"覆盖到第 {cursor} 桶 / 共 {session.get('bucket_count')} 桶")
+        passed &= _check("区段表含至少一个真实会话", sessions_only > 0,
+                         f"{sessions_only} 个会话区段")
 
     health = last["health"]
     passed &= _check("健康块含连接状态", bool(health.get("connection")),

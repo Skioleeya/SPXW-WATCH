@@ -64,7 +64,7 @@ DUTY_EXEMPT_PACKAGES = {"contracts", "tools"}
 
 # 各模块配置必须存在的键。
 REQUIRED_KEYS: dict[str, tuple[str, ...]] = {
-    "app": ("symbol", "timezone", "session_open", "session_close",
+    "app": ("symbol", "timezone", "sessions",
             "option_trading_class", "option_exchange"),
     "ibkr": ("host", "port", "client_id", "generic_tick_list", "market_data_type",
              "qualify_batch_size", "rate_limit_max_requests", "rate_limit_interval_s"),

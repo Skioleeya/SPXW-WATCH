@@ -57,6 +57,11 @@ PAYLOAD_PATHS: tuple[str, ...] = (
     # app.js → 状态行
     "session.expiry", "session.elapsed_s", "session.bucket_count",
     "session.bucket_index",
+    # app.js → 时段切换（GTH / RTH / 全时段）。按钮**不写死**在后端：标签与列
+    # 区间都从这张区段表来，前端照着生成。少一个键就是少一个按钮或切错列。
+    "session.zones",
+    "session.zones.0.id", "session.zones.0.label", "session.zones.0.is_session",
+    "session.zones.0.first", "session.zones.0.last",
     "health.subscribed", "health.subscription_cap", "health.last_tick_age_s",
     "health.store_cells", "health.connection", "health.mode", "health.messages",
     # matrix_codec.js（线上数值块 = 位图 + 定标整数；解出 values 后
@@ -132,9 +137,20 @@ def _load_config_js() -> dict[str, Any]:
 
 
 def _resolve(obj: Any, path: str) -> tuple[bool, Any]:
-    """返回 (键是否存在, 值)。值可以是 None，但中间键缺失即视为不存在。"""
+    """
+    返回 (键是否存在, 值)。值可以是 None，但中间键缺失即视为不存在。
+
+    路径里出现数字段时按**数组下标**解析（``session.zones.0.id``）—— 这样
+    数组元素内部的键名也能被钉住，而不只是"这个数组在"。元素类型不是数组
+    时视为不存在。
+    """
     node = obj
     for part in path.split("."):
+        if isinstance(node, list):
+            if not part.isdigit() or int(part) >= len(node):
+                return False, None
+            node = node[int(part)]
+            continue
         if not isinstance(node, dict) or part not in node:
             return False, None
         node = node[part]

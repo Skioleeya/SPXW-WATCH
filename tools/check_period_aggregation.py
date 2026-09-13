@@ -13,19 +13,22 @@ L6 — 时间周期聚合回归。
 本项目最怕的"探针全绿但实际是坏的"。参数已由后端随帧下发
 （``heatmap.scale_policy``），但**算法本身只能靠对拍钉住**。
 
-五组对照
+七组对照
 --------
 1. ``options()``    —— 周期列表按基线桶宽过滤后的档位与分组倍数；
 2. ``bound()``      —— 与**生产代码** ``serialization.numeric.robust_bound`` 逐值比对；
 3. ``aggregate()``  —— 逐格与 Python 参考实现比对（含 null 传播、末组不满）；
 4. ``clipTail()``   —— 尾部截断后的列数、标签、``bucket_index``；
-5. 跨文件不变量     —— ``maxColumns`` 不得触及 1 分钟视图；基线桶宽整除会话长度。
+5. ``sliceZones()`` —— 时段切列：只留所选区段、空档整段切掉、映射表逐元素一致；
+6. 时段映射下的 Skew 落列 —— 与参考实现逐值一致，且等价于"预映射后走普通路径"；
+7. 跨文件不变量     —— 上限必须盖住整个交易日网格；基线桶宽整除网格长度。
 
 非空转验证（``--selftest``）
 ---------------------------
-把 ``period.js`` 复制到临时目录并**故意注入**三种缺陷（聚合系数偏移 / 色标漏掉
-下限保护 / 组数取整方向反了），要求检查器逐条报出来。三种都能抓住，才说明这组
-对照不是空转。造数与参考实现见 ``tools/period_reference.py``。
+把 ``period.js`` 复制到临时目录并**故意注入**五种缺陷（聚合系数偏移 / 色标漏掉
+下限保护 / 组数取整方向反了 / 切列忽略区段过滤 / alignSkew 忽略时段映射），要求
+检查器逐条报出来。五种都能抓住，才说明这组对照不是空转。造数与参考实现见
+``tools/period_reference.py``。
 
 用法::
 
@@ -45,6 +48,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from core.clock import minutes_of_day  # noqa: E402
 from serialization.numeric import robust_bound  # noqa: E402
 from tools import period_reference as ref  # noqa: E402
 
@@ -58,6 +62,10 @@ MUTATIONS: tuple[tuple[str, str, str], ...] = (
     ("色标漏掉下限保护", "return Math.max(picked, floor);", "return picked;"),
     ("组数取整方向反了", "var outCols = Math.ceil(cols / g);",
      "var outCols = Math.floor(cols / g);"),
+    ("切列忽略区段过滤（空档被留下）",
+     "      if (keep[zones[z].id]) { order.push(zones[z]); }",
+     "      order.push(zones[z]);"),
+    ("alignSkew 忽略时段映射", "        pos = index[b];", "        pos = b;"),
 )
 
 
@@ -173,26 +181,80 @@ def _clip_checks(result: dict, payload: dict) -> list[tuple[str, bool, str]]:
     ]
 
 
+def _slice_checks(result: dict, payload: dict) -> list[tuple[str, bool, str]]:
+    """时段切列：逐格对照 + 映射表对照。"""
+    checks = []
+    zones = payload["slice"]["zones"]
+    for case in payload["slice"]["cases"]:
+        name = case["name"]
+        got = result["slice"][name]
+        want = ref.ref_slice_zones(case["block"], zones, case["keep"])
+
+        if want is None:
+            checks.append((
+                f"sliceZones({name}) 无匹配区段时必须返回空（前端据此保留上一帧）",
+                got is None, f"js={got!r}"))
+            continue
+        if got is None:
+            checks.append((f"sliceZones({name}) 不应返回空", False, "js=null"))
+            continue
+
+        checks += [
+            (f"sliceZones({name}) 列数", got["cols"] == want["cols"],
+             f"{got['cols']} vs {want['cols']}"),
+            (f"sliceZones({name}) 标签序列", got["labels"] == want["labels"],
+             f"首={got['labels'][:1]} 尾={got['labels'][-1:]}"),
+            (f"sliceZones({name}) 数值逐格一致",
+             _close_matrix(got["values"], want["values"]),
+             f"{len(got['values'])} 行 × {got['cols']} 列"),
+            (f"sliceZones({name}) 映射表（基线列 → 切后列，-1 = 已切掉）",
+             got["index"] == want["index"], "逐元素一致"),
+            (f"sliceZones({name}) bucket_index 同步平移",
+             got["bucket_index"] == want["bucket_index"],
+             f"{got['bucket_index']} vs {want['bucket_index']}"),
+        ]
+    return checks
+
+
+def _index_checks(result: dict, payload: dict) -> list[tuple[str, bool, str]]:
+    """时段切列之后，Skew 折线的落列必须跟着同一份映射走。"""
+    case = payload["index"]
+    got = result["index"]
+    cols = len(case["labels"])
+    want = ref.ref_align_indexed(
+        case["series"], case["group"], cols, case["drop"], case["index"]
+    )
+    filled = sum(1 for v in (got["withIndex"] or []) if v is not None)
+    return [
+        ("时段映射下 Skew 落列与参考实现逐值一致",
+         got["withIndex"] == want, f"{filled} 个非空列"),
+        ("时段映射路径 ≡ 预映射路径（index 只是省一次复制，不该改变任何一格）",
+         got["withIndex"] == got["premapped"], "两条路径逐值相同"),
+        ("时段切列非空转：忽略映射（拿原始桶号直接落列）必须给出不同结果",
+         got["unsliced"] != got["withIndex"], "否则这组对照是空转的"),
+    ]
+
+
 def _invariant_checks(result: dict) -> list[tuple[str, bool, str]]:
-    """跨文件不变量：显示窗口上限与基线桶宽。"""
+    """跨文件不变量：显示窗口上限与基线桶宽，都以**整个交易日网格**为准。"""
     app_cfg = json.loads((ROOT / "config" / "app.json").read_text("utf-8"))
     serial_cfg = json.loads(
         (ROOT / "config" / "serialization.json").read_text("utf-8")
     )
-    open_min = int(app_cfg["session_open"][:2]) * 60 + int(app_cfg["session_open"][3:])
-    close_min = int(app_cfg["session_close"][:2]) * 60 + int(app_cfg["session_close"][3:])
-    session_s = (close_min - open_min) * 60
+    grid_s = _grid_minutes(app_cfg) * 60
     bucket_s = int(serial_cfg["heatmap_bucket_seconds"])
     max_columns = int(result["maxColumns"] or 0)
+    grid_buckets = -(-grid_s // bucket_s)
 
     checks = [
-        ("基线桶宽整除会话长度（桶恰好铺满会话）",
-         session_s % bucket_s == 0, f"会话 {session_s}s ÷ 桶宽 {bucket_s}s"),
-        # 这条就是 web/config.js 里 maxColumns 注释所声称的性质：
-        # 上限只对最细粒度生效，1 分钟及更粗的周期一个像素都不变。
-        ("maxColumns 不触及 1 分钟视图（≥ 会话分钟数）",
-         max_columns >= session_s // 60,
-         f"maxColumns={max_columns} vs 会话 {session_s // 60} 分钟"),
+        ("基线桶宽整除交易日网格（各会话 + 空档恰好铺满）",
+         grid_s % bucket_s == 0, f"网格 {grid_s}s ÷ 桶宽 {bucket_s}s"),
+        # 上限必须盖住**整个交易日网格**。横轴是时间轴，从尾部截掉历史段在图
+        # 上看不出来（只是左边少了几列，没有滚动条也没有提示）—— 于是 GTH
+        # 开盘那一段会静默消失，而"能在 GTH 时段完成实盘验证"恰恰要求看得见它。
+        ("maxColumns 覆盖整个交易日网格（基线粒度下永不截断）",
+         max_columns >= grid_buckets,
+         f"maxColumns={max_columns} vs 网格 {grid_buckets} 桶"),
     ]
     declared = result["declared"]
     if declared:
@@ -203,12 +265,32 @@ def _invariant_checks(result: dict) -> list[tuple[str, bool, str]]:
     return checks
 
 
+def _grid_minutes(app_cfg: dict) -> int:
+    """
+    交易日网格的总分钟数 = 各会话时长 + 它们之间的空档。
+
+    只认 ``config/app.json`` 的 ``sessions``（时段真相的唯一归属），
+    解析交给 ``core.clock.minutes_of_day`` —— 这里不重写一份时刻解析。
+    """
+    total = 0
+    prev_close: int | None = None
+    for item in app_cfg["sessions"]:
+        open_min = minutes_of_day(str(item["open"]))
+        close_min = minutes_of_day(str(item["close"]))
+        if prev_close is not None:
+            total += (open_min - prev_close) % (24 * 60)
+        total += (close_min - open_min) % (24 * 60)
+        prev_close = close_min
+    return total
+
+
 def evaluate(result: dict, payload: dict) -> list[tuple[str, bool, str]]:
-    """五组对照的全部检查项，(标签, 是否通过, 详情)。"""
+    """七组对照的全部检查项，(标签, 是否通过, 详情)。"""
     return (_option_checks(result, payload)
             + _bound_checks(result, payload)
             + _aggregate_checks(result, payload)
             + _clip_checks(result, payload)
+            + _slice_checks(result, payload) + _index_checks(result, payload)
             + _invariant_checks(result))
 
 
@@ -270,6 +352,8 @@ GROUPS = (
     ("[2] 色标量程 bound() ↔ numeric.robust_bound", "bound"),
     ("[3] 聚合 aggregate() 逐格对照", "aggregate"),
     ("[4] 显示窗口 clipTail()", "clipTail"),
+    ("[5] 时段切列 sliceZones()", "sliceZones"),
+    ("[6] 时段映射下的 Skew 落列", ("时段映射", "时段切列")),
 )
 
 
@@ -297,7 +381,7 @@ def main(argv: list[str] | None = None) -> int:
     failures = 0
     for title, prefix in GROUPS:
         failures += _report(title, [c for c in checks if c[0].startswith(prefix)])
-    failures += _report("[5] 跨文件不变量",
+    failures += _report("[7] 跨文件不变量",
                         [c for c in checks if c[0].startswith(("基线桶宽", "maxColumns",
                                                               "最细周期"))])
 

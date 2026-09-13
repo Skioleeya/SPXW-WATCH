@@ -92,14 +92,23 @@ class Pipeline:
     # ------------------------------------------------------------------ #
 
     def _build_clock(self) -> SessionClock:
+        """
+        用 ``app.sessions`` 建会话时钟。
+
+        ``sessions`` 是**唯一的会话真相**（GTH 20:15→09:25、RTH 09:30→16:00），
+        网格锚在首个会话开盘、可跨午夜。桶宽来自 L4 的配置：热力图横轴的时间
+        粒度是序列化层的形状参数，时钟只是按它铺格。
+
+        ``SessionClock`` 自己校验"会话时长 + 空档能否被桶宽整除"，铺不满就
+        抛错 —— 这里不做任何补救，配置写错了就该在启动时炸出来。
+        """
         app = self._cfg["app"]
         serial = self._cfg["serialization"]
         tz = loader.as_str(app, "timezone", module=_APP)
-        open_hm = loader.as_str(app, "session_open", module=_APP)
-        close_hm = loader.as_str(app, "session_close", module=_APP)
+        sessions = loader.as_list(app, "sessions", module=_APP)
         bucket = loader.as_int(serial, "heatmap_bucket_seconds", module="serialization")
 
-        return SessionClock(tz, open_hm, close_hm, bucket, clock=WallClock())
+        return SessionClock(tz, sessions, bucket, clock=WallClock())
 
     def _build_feed(self):
         """

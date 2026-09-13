@@ -85,6 +85,17 @@ class FrameEncoder:
 
     @staticmethod
     def _session(block: SessionBlock) -> dict[str, Any]:
+        """
+        会话块。
+
+        ``zones`` 是交易日网格的区段表（会话 + 它们之间的空档），按桶序号升序、
+        首尾相接铺满 ``bucket_count``。前端据此切列 —— **它只按 ``first`` /
+        ``last`` 切，不自己推算时刻**：让前端把网格几何算第二遍，就是第二份
+        真相，后端改会话定义时前端会静默切错列。
+
+        ``open`` / ``close`` 是**整个网格**的起止（20:15 → 16:00），不是某一个
+        会话的；单个会话的起止在 ``zones[]`` 里。
+        """
         return {
             "date": block.date,
             "expiry": block.expiry,
@@ -95,6 +106,18 @@ class FrameEncoder:
             "seconds_to_close": round(float(block.seconds_to_close), 1),
             "bucket_index": int(block.bucket_index),
             "bucket_count": int(block.bucket_count),
+            "zones": [
+                {
+                    "id": zone.id,
+                    "label": zone.label,
+                    "is_session": bool(zone.is_session),
+                    "first": int(zone.first),
+                    "last": int(zone.last),
+                    "open": zone.open,
+                    "close": zone.close,
+                }
+                for zone in block.zones
+            ],
         }
 
     @staticmethod

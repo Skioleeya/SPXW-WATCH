@@ -55,6 +55,10 @@ IV_AFTER = 0.2250            # +2.5 波动率点
 EXPECTED_SPIKE = 2.5
 
 BUCKET_S = 30
+#: 单会话定义：本回归只关心"断代留白"，不需要 GTH 与空档。
+SESSIONS: list[dict] = [
+    {"id": "rth", "label": "RTH", "open": "09:30", "close": "16:00"},
+]
 GAP_START = 9                # 断线从第 9 桶开始
 GAP_END = 17                 # 第 17 桶是断线中最后一桶
 RESUME = 18                  # 第 18 桶 = 恢复后的第一桶
@@ -84,19 +88,25 @@ class StubStore:
         return self.age
 
 
-def session_open_epoch() -> float:
+def grid_start_epoch() -> float:
+    """网格起点（本回归只用一个 RTH 会话，起点即 09:30）。
+
+    刻意自造一个**单会话**定义而不是读 ``config/app.json``：本回归要证明的是
+    "断流恢复留白"这一条，会话定义越简单越不容易把别的机制混进来。真实的多会话
+    网格（GTH + 空档 + RTH）由 ``tools/check_session_grid.py`` 覆盖。
+    """
     return datetime(2026, 9, 11, 9, 30, tzinfo=ZoneInfo(TZ)).timestamp()
 
 
 def make_clock() -> tuple[SessionClock, StubClock]:
-    source = StubClock(session_open_epoch())
-    clock = SessionClock(TZ, "09:30", "16:00", BUCKET_S, clock=source)
+    source = StubClock(grid_start_epoch())
+    clock = SessionClock(TZ, SESSIONS, BUCKET_S, clock=source)
     return clock, source
 
 
 def ts_of(bucket: int) -> float:
     """第 ``bucket`` 桶内 1 秒处的 epoch。"""
-    return session_open_epoch() + bucket * BUCKET_S + 1.0
+    return grid_start_epoch() + bucket * BUCKET_S + 1.0
 
 
 def cell(strike: float, iv: float, ts: float) -> ImpulseCell:

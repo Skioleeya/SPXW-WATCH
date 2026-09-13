@@ -1,5 +1,6 @@
 {
-  "_comment": "L0 标的与会话定义。仅本文件被 app 层读取，其他配置文件不得引用本文件。",
+  "_comment": "L0 标的与会话定义。仅本文件被 app 层读取，其他配置文件不得引用本文件。sessions 是本系统**唯一的会话真相**：热力图横轴的网格从首个会话开盘起算、可跨午夜，相邻会话之间的空档自动成为一个 gap 区段。",
+  "_sessions_comment": "按时间先后排列。id 是稳定标识（帧里 zone 与前端按钮都用它），label 是显示名，open/close 为本地时区 HH:MM。close 早于 open 表示跨午夜（GTH 20:15 → 次日 09:25）。会话时长 + 空档的总和必须能被 heatmap_bucket_seconds 整除，否则网格铺不满，启动即抛错。",
   "symbol": "SPX",
   "underlying_sec_type": "IND",
   "underlying_exchange": "CBOE",
@@ -9,6 +10,8 @@
   "option_multiplier": "100",
   "zero_dte_only": true,
   "timezone": "America/New_York",
-  "session_open": "09:30",
-  "session_close": "16:00"
+  "sessions": [
+    { "id": "gth", "label": "GTH", "open": "20:15", "close": "09:25" },
+    { "id": "rth", "label": "RTH", "open": "09:30", "close": "16:00" }
+  ]
 }

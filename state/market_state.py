@@ -19,7 +19,7 @@ from typing import Any
 
 from config import loader
 from contracts.enums import ConnectionState
-from contracts.frame import HealthBlock, SessionBlock
+from contracts.frame import HealthBlock, SessionBlock, SessionZone
 from contracts.tick import FeedStatus
 
 from state.tick_store import TickStore
@@ -67,6 +67,28 @@ class MarketState:
             seconds_to_close=float(described["seconds_to_close"]),
             bucket_index=int(described["bucket_index"]),
             bucket_count=int(described["bucket_count"]),
+            zones=self.session_zones(),
+        )
+
+    def session_zones(self) -> tuple[SessionZone, ...]:
+        """
+        网格的区段表（会话 + 它们之间的空档），升序、首尾相接。
+
+        ``SessionClock`` 是 L0，**不 import ``contracts``**，所以它给的是普通
+        dict；在这里升格成契约对象，跨层边界才算干净。前端按 ``first``/``last``
+        切列，自己不推算时刻。
+        """
+        return tuple(
+            SessionZone(
+                id=str(zone["id"]),
+                label=str(zone["label"]),
+                is_session=bool(zone["is_session"]),
+                first=int(zone["first"]),
+                last=int(zone["last"]),
+                open=str(zone["open"]),
+                close=str(zone["close"]),
+            )
+            for zone in self._clock.zone_ranges()
         )
 
     def health(self, feed_status: FeedStatus, now: float | None = None) -> HealthBlock:

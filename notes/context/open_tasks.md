@@ -4,20 +4,21 @@ Archive: notes/context/archive/open_tasks_2026-09.md
 
 ## Active
 
-- [ ] **[中] 实盘首次出图未验证** —— 模拟盘已物理删除，系统只剩实盘路径。
-  2026-09-13（周日）起服务只走到 0DTE 切片即 `ChainResolveError`（fail-closed 正确，
-  无当日到期）。应确认：`mode` 正确、48 条订阅（±12 档 × Put/Call）、
-  热力图出图（**肉眼确认纵轴高行权价在上**）、`health.rate_limit` 四要素、
-  **两块图横轴按同一周期标签对齐**（skew-period-consistency 会话新改，只做过离线验证）、
-  以及 multi-session-grid 会话新增：**GTH / RTH / 全时段三个按钮切换正常**、
-  **GTH 时段的列确实画出来了**（这是整个网格改造的目的，只做过离线验证）。
-  ✅ **由 KAI 在 GTH 时段手动验证**（2026-09-13 KAI 明确：**不要设置自动任务**）。
+- [ ] **[中] 实盘首次出图未验证** —— **部分验证完成**（2026-09-13）。
+  KAI 启动 IB Gateway，系统实际跑通：
+  - ✅ `mode=delayed`（周日正确）
+  - ✅ **48 条订阅**（±12 档 × Put/Call）
+  - ✅ SPX 现价 **7591.70**
+  - ✅ WS 帧流正常（seq 1→5，0 缺口）
+  - ✅ `health.rate_limit` 四要素（桶 45/s）
+  - ✅ 网格 **2370 桶**，3 区段（GTH/空档/RTH），铺满无缝隙
+  - ⚠️ 热力图出图、Skew 数据、按钮切换、横轴对齐 —— **需浏览器肉眼确认**
+  - ⚠️ 周日市场关闭，`Skew=None` / 热力图 0 格 = **预期行为**，不是缺陷
+  ✅ **由 KAI 在 GTH 时段手动验证前端渲染**（2026-09-13 KAI 明确：不要设置自动任务）。
 
-- [ ] **[中] 4 个需服务的检查未跑通** —— `check_web_contract` /
-  `check_page_render` / `check_ws_compression` / `ws_probe`。
-  ⚠️ 硬切后**服务无法在非交易日常驻**（无当日到期即退出）⇒ 这 4 项
-  **从此只有盘中能跑**；盘前/盘后/周末"回归全绿"永远不成立，
-  这是取舍的必然结果而非回归破坏。
+- [ ] **[中] 4 个需服务的检查 — 1/4 已跑通** —— 
+  - ✅ `ws_probe`（2026-09-13）：23/27 通过，4 项失败全部是周日市场关闭预期行为
+  - ❌ `check_web_contract` / `check_page_render` / `check_ws_compression` —— 仍需盘中复跑
   ⚠️ 2026-09-13 `multi-session-grid` 会话中，`check_web_contract` 的**三段**都已用
   **离线等价物**补验（第 1、2 段用桩模块绕过顶层 `import aiohttp`：
   DOM id 22 个 / CFG 路径 32 条全存在；第 3 段用真实流水线造帧：
@@ -34,9 +35,8 @@ Archive: notes/context/archive/open_tasks_2026-09.md
   KAI 2026-09-13 拍板：**下一个会话做**（"代办"）。本轮不动用户目录。
   ⇒ 开始前先列清单（按 mtime / 大小 / 是否含 `import`），让 KAI 一眼能拍"全迁/部分迁/只登记不动"。
 
-- [ ] **[低] 本机缺 `ib_async` 与 `aiohttp`** —— 只有纯标准库的回归能跑，
-  `check_reconnect_flow`（缺 `ib_async`）与 `check_web_contract`（缺 `aiohttp`）
-  在本环境直接 `ModuleNotFoundError`。要跑全量离线回归需先装项目依赖。
+- ~~**[低] 本机缺 `ib_async` 与 `aiohttp`**~~ —— **已解决**（2026-09-13 KAI 启动 Gateway 后安装）。
+  `check_reconnect_flow` / `check_web_contract` / `ws_probe` 现在都能跑。
 
 ## Stale / Needs Verification
 

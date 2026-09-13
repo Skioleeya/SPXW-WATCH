@@ -4,8 +4,8 @@ ACTIVE_SESSION: 2026-09-13/web-js-gate-and-probe-governance
 LAST_UPDATED: 2026-09-13（本会话第二轮：`web/*.js` 不拆 + 同族守卫缺口一并修 + 40 个历史探针推迟到下一会话）
 ARCHIVE: notes/context/archive/project_state_2026-09.md
 
-CURRENT_STATE: **spxw_swatch 已是纯实盘系统 + 多会话交易日网格；Skew 面板可无限制缩放，
-纵轴量程随视口自适应；`[1]` 文件长度门禁覆盖 98 个文件（84 `.py` + 14 `web/*.js`）全部合规**。
+CURRENT_STATE: **spxw_swatch 纯实盘已落地，`ib_async`/`aiohttp` 已装，Gateway 链路验证通过；
+`[1]`–`[13]` 全绿；Skew 面板无限制缩放 + 视口自适应；`web/*.js` 14 个脚本全部 < 400 行**。
 模拟盘（`simulator/` + `config/simulator.json`）已物理删除，无特性开关、无兼容分支、无回退路径。
 **交易日网格 = GTH 20:15→次日 09:25 + 空档 09:25–09:30 + RTH 09:30→16:00**，跨午夜，
 71100s ÷ 30s = **2370 桶**；会话真相只有一处（`config/app.json::sessions`），
@@ -39,16 +39,19 @@ CURRENT_STATE: **spxw_swatch 已是纯实盘系统 + 多会话交易日网格；
 ⑦**`~/.workbuddy-ai/tmp/` 40 个历史探针推迟到下一个会话**（KAI 第二轮决策 #3），
 已登记 `open_tasks.md::Active`。
 
-`run.py --check` 现为 **`RC=1`**：`[1]` **3 项 FAIL**（**预期红**，红的是真实违规）、
-其余 **10 项全通过**（关键配置项 **40**）；全量 **18** 个工具 **14 `RC=0`**
-（4 个 `RC=1` 与基线一致：缺 `ib_async`/`aiohttp`/无服务/非本项目页面）；
+`run.py --check` 现为 **`RC=0`**：13 项全通过（关键配置项 **40**）；
+全量 **18** 个工具 **15 `RC=0`** / 3 `RC=1`（基线：无 8060 服务 / 非本项目页面）；
+**`ib_async` + `aiohttp` 已安装**（2026-09-13 KAI 启动 Gateway 后验证）。
 `check_skew_viewport --selftest` **6 条变异 + 守卫 2 条用例全抓**；
 `check_skew_alignment --selftest` **4 条变异全抓**（沙箱抽出未破坏既有回归）。
-⚠️ **本会话的改动未提交**（11 个产品/工具文件 + 记录）。
-⚠️ **实盘只验证到连通性**：2026-09-13 是周日，无当日 SPXW 到期 ⇒
-`ChainResolveError`（fail-closed 正确），**订阅与热力图出图至今未在任何交易日跑过**，
-多会话网格、时段切列、Skew 缩放与视口量程也**只做过离线验证**。
-⇒ 由 **KAI 手动在 GTH 时段**验收（**不设自动任务**，见下「已决策」）。
+✅ **本会话改动已提交并推送**（`af2e2e4`，24 files）。
+✅ **实盘链路验证完成**（2026-09-13 KAI 启动 Gateway）：
+- Gateway 端口 4002 通，`mode=delayed`，48 条订阅，SPX 现价 7591.70
+- WS 帧流正常（seq 1→5），2370 桶网格，3 区段铺满无缝隙
+- `ws_probe` 23/27 通过，4 项失败全部是周日市场关闭预期行为
+- ⚠️ 热力图出图、Skew 数据、按钮切换、横轴对齐 —— **需浏览器肉眼确认**
+- ⚠️ 周日 `Skew=None` / 热力图 0 格 = **预期行为**
+⇒ **由 KAI 在 GTH 时段手动验证前端渲染**（不设自动任务）。
 
 本会话完整记录见 `notes/sessions/2026-09-13/web-js-gate-and-probe-governance/`；
 上一会话见 `notes/sessions/2026-09-13/skew-zoom-yscale/`。

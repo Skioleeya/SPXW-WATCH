@@ -73,6 +73,7 @@ REQUIRED_KEYS: dict[str, tuple[str, ...]] = {
     "state": ("option_buffer_seconds", "option_buffer_max_points", "prune_interval_s"),
     "features": ("impulse_windows_seconds", "glitch_min_abs_option_price",
                  "skew_target_delta", "heatmap_rows_each_side"),
+    "persistence": ("enabled", "db_path", "queue_maxsize", "write_interval_s"),
     "serialization": ("heatmap_bucket_seconds", "heatmap_color_quantile",
                       "heatmap_color_floor_vol_points", "iv_decimals",
                       "impulse_decimals"),

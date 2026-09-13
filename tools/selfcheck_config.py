@@ -9,7 +9,7 @@ L6 — 配置自检。
 [3] 配置文件可读性
 [4] 配置零耦合（不得跨文件引用）
 [5] 关键配置项存在
-[6] 订阅容量与 IBKR 100 条上限
+[6] 订阅容量与 IBKR 100 条上限；热力图显示窗口不得宽于订阅窗口
 [7] 配置键归属与接线 —— 每个键只能被它所属模块读取；且必须真的被读取
 [11] 出站限速桶容量与 IBKR 配额
 
@@ -143,6 +143,26 @@ def check_subscription_capacity(loaded: dict[str, dict]) -> int:
 
     ok(f"档位 ±{side} → {projected} 条行情（自设上限 {cap}，"
        f"IBKR 上限 {IBKR_SUBSCRIPTION_LIMIT}）")
+
+    # 显示窗口不得宽于订阅窗口：热力图的每一行都取自**已订阅**的合约
+    # （``StrikeWindow.rows()`` 只在 ``FeatureEngine._session_refs()`` 里挑），
+    # 所以 ``heatmap_rows_each_side`` 一旦大于 ``num_strikes_each_side``，
+    # 多出来的档位**永远拿不到数据**，而配置看上去像是生效的 —— 正是本项目
+    # 最怕的"配置静默失效"。两个键分属两份配置文件（要求第 5 条禁止跨文件
+    # 引用），只能由检查器读两份来核对，手法与 [11] 相同。
+    try:
+        rows_each_side = int(loaded["features"]["heatmap_rows_each_side"])
+    except (KeyError, ValueError, TypeError) as exc:
+        fail(f"无法核算热力图显示窗口: {exc}")
+        return 1
+
+    if rows_each_side > side:
+        fail(f"热力图显示窗口 ±{rows_each_side} 宽于订阅窗口 ±{side}"
+             f"（features.json::heatmap_rows_each_side > "
+             f"subscription.json::num_strikes_each_side）—— 超出的档位永远没有数据")
+        return 1
+
+    ok(f"显示窗口 ±{rows_each_side} ≤ 订阅窗口 ±{side}")
     return 0
 
 

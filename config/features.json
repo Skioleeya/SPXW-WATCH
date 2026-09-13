@@ -13,5 +13,5 @@
   "skew_target_delta": 0.25,
   "skew_delta_tolerance": 0.12,
   "skew_min_points": 3,
-  "heatmap_rows_each_side": 18
+  "heatmap_rows_each_side": 12
 }

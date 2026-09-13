@@ -10,7 +10,7 @@ L6 — 架构与配置自检（编排器）。
 [3]  配置文件可读性。                                     （selfcheck_config）
 [4]  配置零耦合：配置文件之间不得互相引用。                 （selfcheck_config）
 [5]  关键配置项存在。                                     （selfcheck_config）
-[6]  订阅容量不超 IBKR 100 条硬上限。                      （selfcheck_config）
+[6]  订阅容量不超 IBKR 100 条硬上限；显示窗口 ≤ 订阅窗口。   （selfcheck_config）
 [7]  配置键归属与接线：一个键只能属于一个模块，且必须被读取。 （selfcheck_config）
 [8]  ``__slots__`` 与实例属性赋值一致。                    （selfcheck_slots）
 [9]  单一职能：模块不得承载多个职能。                       （selfcheck_duty）

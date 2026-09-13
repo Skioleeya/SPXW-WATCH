@@ -4,7 +4,7 @@
 
 不是波动率曲面，不是持仓盈亏，不是 GEX 矩阵。只有两件事：
 
-1. **日内动能热力图** —— 纵轴 ±18 档行权价，横轴 09:30→16:00 的分钟桶，
+1. **日内动能热力图** —— 纵轴 ±12 档行权价，横轴 09:30→16:00 的分钟桶，
    颜色 = ΔIV（波动率点），即"哪个行权价在哪个时刻被重新定价"。
 2. **25Δ Skew 实时折线** —— 25-Delta Put 与 25-Delta Call 的 IV 之差，
    用于捕捉恐慌态切换。
@@ -39,6 +39,7 @@ python tools/check_subscription_qualify.py     # 回归：订阅前必须确认�
 python tools/check_tick_router.py              # 回归：L1 分流层的模型值优先与脏值拦截
 python tools/check_session_rollover.py         # 回归：跨会话不得共用桶序号
 python tools/check_clock_protocol.py           # 回归：注入下层的时间源必须满足 ClockPort
+python tools/check_persistence.py              # 回归：SQLite 旁路持久化的写入 ↔ 恢复往返
 python tools/check_web_contract.py             # 回归：前端引用 → 后端定义的对照
 python tools/check_page_render.py              # 回归：真浏览器打开，断言画出来了
 python tools/check_period_aggregation.py       # 回归：前端周期聚合 ↔ 后端定义逐值对拍
@@ -111,7 +112,7 @@ L0  core/        环形缓冲、会话时钟、日志、异常
     contracts/   ← 层间唯一通信媒介（DTO + Protocol）
 L1  acquisition/ IBKR 采集：合约、链解析、订阅管理、tick 路由
 L2  state/       分片时序存储 + 只读聚合
-L3  features/    毛刺过滤 → IV 冲量 → ΔIV 矩阵 → 25Δ Skew
+L3  features/    毛刺过滤 → IV 冲量 → ΔIV 矩阵 → 25Δ Skew（+ 旁路持久化）
 L4  serialization/ 契约对象 → JSON 文本
 L5  transport/   HTTP 静态 + WebSocket 广播（fail-closed）
 L6  app/         组装根（唯一允许 import 所有层的模块）
@@ -147,6 +148,7 @@ config/
   subscription.json ±档位、订阅总上限、重连与 Error 300 退避
   state.json        环形缓冲容量与年龄、健康阈值、本层自己的裁剪节奏
   features.json     冲量窗口、毛刺过滤五道闸门、25Δ 目标与容差
+  persistence.json  旁路 SQLite 热备：开关、库路径、队列深度、写入间隔
   serialization.json 时间桶粒度、色标量程取法、小数位
   transport.json    监听地址、WS 路径、推送频率、客户端队列深度
   pipeline.json     计算/统计循环的节奏与生命周期
@@ -180,7 +182,7 @@ IBKR 对单连接的同时行情订阅有硬上限（100 条）。这里用三�
 
 1. **容量反推。** `ChainResolver.effective_each_side()` 从配置的总上限反推
    每侧最多几档，而不是无条件信任 `num_strikes_each_side`。
-   当前：`±18 档 → 4×18+1 = 73 条`（自设上限 92，IBKR 上限 100）。
+   当前：`±12 档 → 4×12+1 = 49 条`（自设上限 92，IBKR 上限 100）。
    `guard_capacity()` 在超限时**抛异常**而不是"尽量多发几条"。
 2. **先撤后订。** 换档时先取消旧订阅再发新订阅，避免瞬时数量翻倍。
 3. **Error 300 指数退避。** 一旦被限流，暂停新增并逐步退避到上限，恢复后
@@ -267,7 +269,7 @@ Qualify contract to populate 'conId'.
 
 ### 纵轴会随现价滑动（已知特性，非缺陷）
 
-订阅窗口是"以现价为中心的 ±18 档"，所以现价走动时纵轴也跟着走：新进入窗口的
+订阅窗口是"以现价为中心的 ±12 档"，所以现价走动时纵轴也跟着走：新进入窗口的
 档位在它进入之前**确实没有数据**，那一行左侧自然是空的。这是滑动窗口的固有
 代价 —— 不可能有"当时没订阅的合约"的历史。想要一条全天固定的行权价轴，就得
 放弃动态 ATM 窗口、改用固定区间订阅，那会白白占掉订阅额度。
@@ -276,6 +278,23 @@ Qualify contract to populate 'conId'.
 
 25Δ Put IV − 25Δ Call IV，单位波动率点。两侧在 Delta 空间插值定位，容差由
 `skew_delta_tolerance` 控制；插值点不足 `skew_min_points` 时判定为未定义。
+
+### 旁路持久化：重启后接着画（`features/persistence.py`）
+
+ΔIV 矩阵与 25Δ Skew 序列**不会因为服务重启而清零** —— 原始 IV 桶由
+`AsyncPersistenceWriter` 异步写入 `data/session.db`（SQLite），启动时由组装层
+`recover()` 回灌进 `HeatmapEngine` / `SkewEngine`。
+
+三个设计点：
+
+* **旁路**：写入走独立的 `asyncio.Queue`，队列满时**丢桶而不阻塞**行情主循环
+  （丢桶数在日志里可见）。行情接收与 WS 推送的节奏完全不受磁盘 I/O 影响。
+* **存原始 IV，不存 ΔIV**：ΔIV 是差分产物，前一个桶有没有值会改变差分结果。
+  存原始值让恢复后的引擎**自己重走一遍差分**，语义与不中断时一致。
+* **默认开启**（`persistence.json::enabled`）。置 `false` 时完全不碰 SQLite，
+  行为与没有持久化时一致。
+
+`data/` 在 `.gitignore` 里，不进版本控制。回归：`tools/check_persistence.py`。
 
 ---
 
@@ -381,10 +400,10 @@ L0–L4 的回归全部离线运行，靠的是 `tools/fixtures.py` 里的两件
 |---|---|---|---|---|
 | [1] | 文件长度 | 文件 < 400 行 | 全量行数统计 | **强**（全量） |
 | [2] | 依赖方向 | L0→L1→…→L6 单向 | `LAYER_OF` 映射 + AST 扫描 import 方向 | **强** |
-| [3] | 配置可读 | 禁止硬编码 | 9 份 JSON 逐个解析 | 强 |
+| [3] | 配置可读 | 禁止硬编码 | 10 份 JSON 逐个解析 | 强 |
 | [4] | 配置零耦合 | 配置彼此独立 | 禁 `$ref`/`include` 等跨文件引用键 | 强 |
-| [5] | 关键键存在 | 禁止硬编码 | 37 个关键配置项逐一核对 | 中 |
-| [6] | 订阅容量 | 不触发 Error 300 | ±18 档 → 73 条 ≤ 自设 92 ≤ IBKR 100 | 强 |
+| [5] | 关键键存在 | 禁止硬编码 | 41 个关键配置项逐一核对 | 中 |
+| [6] | 订阅容量 | 不触发 Error 300 | ±12 档 → 49 条 ≤ 自设 92 ≤ IBKR 100；显示窗口 ≤ 订阅窗口 | 强 |
 | [7] | 配置键归属与接线 | 一个文件不得含跨模块变量 | 按 `module=` 约定对照归属；死键即失败 | **强** |
 | [8] | `__slots__` 一致性 | 单一职能的静态护栏 | AST 比对声明与赋值 | **强** |
 | [9] | 单一职能 | 单一文件单一职能 | 顶层公开类计数 + `__init__.py` 只做导出 | 中（粗粒度代理） |
@@ -434,6 +453,9 @@ L0–L4 的回归全部离线运行，靠的是 `tools/fixtures.py` 里的两件
   （默认 `4002`）上开启 API。实测：**11～14 秒就绪**，错误码仅
   `72 × Error 10090`（无 100/300/200）；`tools/ws_probe.py` 全过
   （72/92 订阅、热力图 36 档 × 25 桶、36 格有效数值、25Δ Skew 与现价均有值）。
+  ⚠️ 该次实测的档位配置为 **±18 档**（72 条 option 订阅 + 1 条现价）。2026-09-13
+  起改为 **±12 档**，按同一口径应为 48 条订阅 / 热力图 24 档 ——
+  **该数值尚未在交易日实测**（周末无法起服务，见 `notes/context/open_tasks.md`）。
   直接订阅探针另证：`generic_tick_list: "106"` 确实让 IBKR 推送
   `tickOptionComputation`，`ticker.modelGreeks` 第 5s 出现，且与 bid / ask / last
   三档 greeks **四者并存、值互不相同** ⇒ MODEL_OPTION 是独立 tick 通道，
@@ -441,9 +463,12 @@ L0–L4 的回归全部离线运行，靠的是 `tools/fixtures.py` 里的两件
 
   ⚠️ 两点必读：
 
-  1. **状态行是 `connected · delayed` 还是 `connected`，取决于账户侧有没有
-     实时数据权限** —— 这是**账户配置，不是代码**。本项目当前已开通
-     （实测期权 ticker 报 `marketDataType = 1`），**换账户后必须重新确认**。
+  1. **状态行里的 `delayed` 是配置键推导出来的，不是观测值。** `health.mode`
+     由 `ibkr.json::market_data_type=3` 经 `FeedMode.from_market_data_type()`
+     得出 —— 写 3 就**恒显示** `delayed`，与账户实际拿到什么无关（3 的语义是
+     "有实时给实时、没有才降级"，是**择优**）。要看**某一份订阅**实际是实时
+     还是延迟，得看 `ticker.marketDataType`（1 实时 / 3 延迟）。实时权限本身是
+     **账户侧配置**，换账户 / 换机器后必须重新确认。
   2. **Error 10090 的原文是 "Part of requested market data is not subscribed"
      （部分未订阅），不代表没有权限** —— 别拿它判断状态。
      另：`ib_async` 把 tickType 13（实时模型）与 83（延迟模型）合并到同一个

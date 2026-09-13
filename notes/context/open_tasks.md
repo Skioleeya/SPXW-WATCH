@@ -8,14 +8,13 @@ Archive: notes/context/archive/open_tasks_2026-09.md
   2026-09-13（周日）起服务只走到 0DTE 切片即 `ChainResolveError`（fail-closed 正确，
   无当日到期）。**下一交易日盘中**应确认：`mode` 正确、72 条订阅、热力图出图、
   `health.rate_limit` 四要素。
+  已设**一次性**定时任务（automation id `e4ad7495-4258-47bc-aec4-36617713db76`，
+  2026-09-14 09:45 ET）；若该次未成，需另设下一个交易日。
 - [ ] **[中] 4 个需服务的检查未跑通** —— `check_web_contract` /
   `check_page_render` / `check_ws_compression` / `ws_probe`。
   ⚠️ 硬切后**服务无法在非交易日常驻**（无当日到期即退出）⇒ 这 4 项
   **从此只有盘中能跑**；盘前/盘后/周末"回归全绿"永远不成立，
   这是取舍的必然结果而非回归破坏。
-- [ ] **[中] 现价延迟** —— SPX 指数无实时权限（`marketDataType=3`），窗口居中 /
-      现价标注偏约 1–3 档。出路：开通 CBOE 指数实时，或换 spot 来源
-      （`OptionTick.und_price` 恒为 `None`，不可用）。
 - [ ] **[低] 色板缺机械回归** —— `check_web_contract` 只校验 CFG **路径存在**、
       `check_page_render` 只断言"画出来了"，色值被误改**没有任何检查会红**。
 - [ ] **[低] `check_clock_protocol.py` 是否并入 `--check` 常驻** ——

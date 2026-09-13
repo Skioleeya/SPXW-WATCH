@@ -20,10 +20,9 @@ CURRENT_STATE: **spxw_swatch 已是纯实盘系统** —— 模拟盘（`simulat
 ⚠️ **实盘只验证到连通性**：2026-09-13 是周日，无当日 SPXW 到期 ⇒
 `ChainResolveError`（fail-closed 正确），**订阅与热力图出图至今未在任何
 交易日跑过**。
-✅ **已提交并推送 `7ffe882`**（24 文件，+1071/−68）—— 含冷数据键序 + 帧降序
-两轮改动；远端已核实（`git ls-remote` == 本地 HEAD）。
-⚠️ **本会话的改动尚未提交**（`web/` 3 文件 + `serialization/` 2 文件 + `config/` 1
-文件 + `tools/` 3 改 3 新 + `features/` 1 + `README.md` + `notes/`）。
+✅ **已提交并推送 `792e4a3`**（33 文件，+3967/−97）—— 含 skew 周期一致性会话
+（`web/` 3 文件 + 两个新门禁 + P0 修复）与冷数据键序统一降序；远端已核实
+（`git ls-remote` == 本地 HEAD = `792e4a3`），工作区干净。
 
 本会话完整记录见 `notes/sessions/2026-09-13/recheck-keyorder-memory/`；
 上一会话见 `notes/sessions/2026-09-13/skew-period-consistency/`（周期对齐）。

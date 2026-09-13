@@ -134,7 +134,8 @@ NOTES-PATHS:
 - **`MEMORY.md` 蒸馏完成**：7958 → 7445 字符（余量 42 → 555），移出的内容全部
   已有载体（README §6 / `memory/2026-09-11.md` / skill `spxw-live-verify`）。
 - **记录缺口已补**：`tools/check_page_render.py` 记入上一会话的 `CHANGED-PATHS`。
-- **未提交改动已提交**（含上一会话累积的 `web/` 3 文件等）。
+- **未提交改动已提交并推送 `792e4a3`**（33 文件，+3967/−97，含上一会话累积的
+  `web/` 3 文件、两个新门禁与 P0 修复）；远端已核实 `git ls-remote` == 本地 HEAD。
 
 OPEN-RISKS:
 - **真实链路渲染仍未验证**（两个会话累计改了 3 个前端文件，**没有一张真实链路

@@ -1,0 +1,77 @@
+"""探针：冷数据里行权价的键序从哪来、会不会乱。
+
+放在工程目录之外（工程内任何 .py 都会被 selfcheck 扫到 → [10] 硬编码 FAIL）。
+"""
+import json
+import sqlite3
+import sys
+import tempfile
+import types
+from pathlib import Path
+
+ROOT = Path("E:/US.market/SPXW SWATCH/spxw_swatch")
+sys.path.insert(0, str(ROOT))
+
+from contracts.enums import Quality
+from features.heatmap_engine import HeatmapEngine
+from features.persistence import AsyncPersistenceWriter
+
+
+def clock():
+    c = types.SimpleNamespace()
+    c.bucket_index_of_ts = lambda ts: int(ts)
+    c.bucket_labels = lambda: tuple(str(i) for i in range(1000))
+    return c
+
+
+def cell(strike, iv):
+    return types.SimpleNamespace(strike=strike, iv=iv, quality=Quality.OK)
+
+
+SERIAL = {"heatmap_max_buckets": 780, "heatmap_min_buckets": 2,
+          "heatmap_feed_gap_s": 300.0}
+
+
+def main():
+    e = HeatmapEngine(clock(), SERIAL)
+
+    # 第一次 observe：窗口升序（StrikeWindow.rows 保证）
+    e.observe((cell(5500.0, 0.20), cell(5505.0, 0.21), cell(5510.0, 0.22)), 10.0)
+    print("after 1st observe      :", list(e.dump_bucket(10).keys()))
+
+    # 现价回撤，把更低的 5495 拉进窗口 → 新键追加到末尾
+    e.observe((cell(5495.0, 0.19), cell(5500.0, 0.20), cell(5505.0, 0.21),
+               cell(5510.0, 0.22)), 10.0)
+    keys = list(e.dump_bucket(10).keys())
+    print("after late lower strike:", keys, "monotonic:", keys == sorted(keys))
+
+    # 写进 SQLite，再 recover，看顺序是否被继承
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Path(tmp) / "t.db"
+        w = AsyncPersistenceWriter({"enabled": True, "db_path": str(db),
+                                    "queue_maxsize": 10, "write_interval_s": 0.01})
+        w._conn = sqlite3.connect(str(db))
+        w._ensure_table()
+        w.enqueue(10, e.dump_bucket(10), False)
+        w._batch_write([w._queue.get_nowait()])
+        raw = w._conn.execute("select ivs_json from heatmap_buckets").fetchone()[0]
+        rec = w.recover()
+        w._conn.close()
+        w._conn = None
+
+    print("db json key order      :", list(json.loads(raw).keys()))
+    rec_keys = list(rec[0]["ivs"].keys())
+    print("after recover()        :", rec_keys, "monotonic:", rec_keys == sorted(rec_keys))
+
+    e2 = HeatmapEngine(clock(), SERIAL)
+    e2.load_snapshot(rec)
+    print("after load_snapshot()  :", list(e2.dump_bucket(10).keys()))
+
+    # build() 的行序是否受 _buckets 顺序影响？rows 由调用方给出
+    refs = tuple(types.SimpleNamespace(strike=s, right=None)
+                 for s in (5495.0, 5500.0, 5505.0, 5510.0))
+    m = e2.build(refs, 5502.0, 10.0)
+    print("build() strikes        :", m.strikes if m else None)
+
+
+main()

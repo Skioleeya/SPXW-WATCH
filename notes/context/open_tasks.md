@@ -6,8 +6,8 @@ Archive: notes/context/archive/open_tasks_2026-09.md
 
 - [ ] **[中] 实盘首次出图未验证** —— 模拟盘已物理删除，系统只剩实盘路径。
   2026-09-13（周日）起服务只走到 0DTE 切片即 `ChainResolveError`（fail-closed 正确，
-  无当日到期）。**下一交易日盘中**应确认：`mode` 正确、72 条订阅、热力图出图、
-  `health.rate_limit` 四要素。
+  无当日到期）。**下一交易日盘中**应确认：`mode` 正确、48 条订阅（±12 档 × Put/Call）、
+  热力图出图（**肉眼确认纵轴高行权价在上**）、`health.rate_limit` 四要素。
   已设**一次性**定时任务（automation id `e4ad7495-4258-47bc-aec4-36617713db76`，
   2026-09-14 09:45 ET）；若该次未成，需另设下一个交易日。
 - [ ] **[中] 4 个需服务的检查未跑通** —— `check_web_contract` /
@@ -20,6 +20,13 @@ Archive: notes/context/archive/open_tasks_2026-09.md
 - [ ] **[低] `check_clock_protocol.py` 是否并入 `--check` 常驻** ——
       目前靠"有人记得跑"而不是自动拦截。
 - [ ] **[低] 联通与限速无常驻回归** —— 全靠手工 `run.py` + `tools/ws_probe.py`。
+- [ ] **[低] 冷数据键序是否也统一为降序** —— 现状：冷数据 `dump_bucket()` **升序**
+  （`check_persistence` 键序用例守着），帧 `strikes` **降序**（2026-09-13
+  frame-strike-order-descending）。两者是不同层（内部恢复产物 vs 对外契约），
+  各自有文档与回归，但读代码的人可能串味。若要统一：
+  `sorted(..., reverse=True)` + `check_persistence` 断言取反。**待 KAI 定。**
+- [ ] **[低] 本机缺 `ib_async`** —— 只有纯标准库的回归能跑，`check_reconnect_flow`
+  在本环境直接 `ModuleNotFoundError`。要跑全量离线回归需先装项目依赖。
 
 ## Stale / Needs Verification
 

@@ -102,7 +102,9 @@ class HeatmapMatrix:
     """
     2D 日内动能矩阵。
 
-    * 纵轴 ``strikes``：以现价为中心的窗口，升序。
+    * 纵轴 ``strikes``：以现价为中心的窗口，**降序**（行权价高的在前）。
+      行序由 ``HeatmapEngine.build()`` 的产出点保证，不依赖上游窗口的顺序；
+      与屏幕自上而下的方向一致（前端 ``yAxis.inverse``）。
     * 横轴 ``bucket_labels``：会话时间桶，从开盘到收盘。
     * ``values[i][j]``：第 i 个行权价、第 j 个时间桶的 ΔIV（波动率点）。
 

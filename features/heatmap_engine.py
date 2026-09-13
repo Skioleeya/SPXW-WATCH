@@ -138,7 +138,19 @@ class HeatmapEngine:
         spot: float,
         now: float,
     ) -> HeatmapMatrix | None:
-        """构造当前时刻的矩阵。行数或列数不足时返回 ``None``。"""
+        """
+        构造当前时刻的矩阵。行数或列数不足时返回 ``None``。
+
+        产出行的顺序是**降序**（行权价高的在前）。``strikes`` / ``rights`` /
+        ``values`` 由同一个循环产出，所以顺序只在这里定一次，三者必然对齐。
+
+        为什么在这里显式排序，而不是沿用 ``rows`` 的顺序
+        -------------------------------------------------
+        ``StrikeWindow.rows()`` 恰好返回升序是它的实现细节，不是本模块可以
+        依赖的契约 —— 依赖它，就等于把帧的行序建立在一个跨模块的巧合上。
+        帧的顺序是**对外契约**（前端纵轴按它渲染），所以必须由产出点保证。
+        降序的含义：与屏幕自上而下一致（见 ``web/heatmap.js`` 的 ``inverse``）。
+        """
         if not rows:
             return None
 
@@ -152,7 +164,7 @@ class HeatmapEngine:
         rights: list[OptionRight] = []
         values: list[tuple[float | None, ...]] = []
 
-        for ref in rows:
+        for ref in sorted(rows, key=lambda r: r.strike, reverse=True):
             bucket = self._buckets.get(float(ref.strike))
             row = self._row_values(bucket, current) if bucket else None
             if row is None:
@@ -241,14 +253,26 @@ class HeatmapEngine:
 
     def dump_bucket(self, bucket_index: int) -> dict[float, float]:
         """
-        提取某一桶的原始 IV 字典 ``{strike: iv}``。
+        提取某一桶的原始 IV 字典 ``{strike: iv}``，**键按行权价升序**。
 
         只返回该桶有值的档位；空桶返回空字典。供 ``AsyncPersistenceWriter``
         序列化写入 SQLite。
+
+        为什么要在这里排序
+        ------------------
+        ``_buckets`` 的键序是**首次出现顺序**，不是排序结果：现价先上移、再
+        回落到会话初低点之下时，更低的档位会被追加到字典末尾（实测 ±12 档下
+        一次 7700→7820→7600 的往返即可复现）。JSON 对象的键序会被原样写进
+        ``ivs_json``，而 ``recover()`` / ``load_snapshot()`` 都不重排 —— 乱序
+        会落盘并被继承下去。直接读 ``session.db`` 的人（或脚本）若默认"键序即
+        升序"，就会静默错配行号。
+
+        排一次序，把这条不变量收回到快照的产出点，让落盘产物与内部字典的
+        历史无关。由 ``tools/check_persistence.py`` 的键序用例守住。
         """
         out: dict[float, float] = {}
-        for strike, bucket in self._buckets.items():
-            iv = bucket.get(bucket_index)
+        for strike in sorted(self._buckets):
+            iv = self._buckets[strike].get(bucket_index)
             if iv is not None:
                 out[float(strike)] = float(iv)
         return out

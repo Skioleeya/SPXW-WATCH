@@ -114,10 +114,10 @@ def _cell(row: int, col: int) -> float | None:
 
 
 def block(cols: int = COLS) -> dict[str, Any]:
-    """造一个与后端帧同形状的基线矩阵。"""
+    """造一个与后端帧同形状的基线矩阵（``strikes`` 降序，与真实帧一致）。"""
     return {
         "labels": [_label(c) for c in range(cols)],
-        "strikes": [6400 + 5 * r for r in range(ROWS)],
+        "strikes": [6400 + 5 * r for r in range(ROWS - 1, -1, -1)],
         "rights": ["P" if r % 2 else "C" for r in range(ROWS)],
         "values": [[_cell(r, c) for c in range(cols)] for r in range(ROWS)],
         "vmax": 3.25,

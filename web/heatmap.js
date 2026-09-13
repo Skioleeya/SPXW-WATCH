@@ -1,6 +1,6 @@
 /* 日内 IV 冲量热力图
  * ------------------------------------------------------------------
- * 纵轴 = 行权价（升序，下方为低行权价）
+ * 纵轴 = 行权价（降序：帧 strikes 从高到低，屏幕自上而下同序）
  * 横轴 = 会话时间桶
  * 颜色 = ΔIV（波动率点），暖色上行 / 冷色下行
  *
@@ -144,6 +144,11 @@
       yAxis: {
         type: "category",
         data: yLabels,
+        /* 帧 strikes 是降序（高的在前），而 ECharts category 轴默认把索引 0
+           画在最下方 —— 不反转就会把最高行权价画到屏幕最下面，与帧顺序相反。
+           inverse 让「数组索引」与「屏幕位置」同向：索引 0 在最上方。
+           这里只做方向对齐，不改变任何数据。 */
+        inverse: true,
         axisLine: { lineStyle: { color: CFG.theme.border } },
         axisTick: { show: false },
         axisLabel: {

@@ -1,0 +1,91 @@
+"""铸帧：用项目自己的 HeatmapSerializer 造若干形状各异的帧，供前端探针消费。
+
+探针一律放工程外（工程内任何 .py 都会被 iter_py_files() 扫到 → [10] 硬编码 FAIL）。
+"""
+import json
+import sys
+from pathlib import Path
+
+ROOT = Path("E:/US.market/SPXW SWATCH/spxw_swatch")
+sys.path.insert(0, str(ROOT))
+
+from contracts.enums import OptionRight
+from contracts.feature import HeatmapMatrix
+from serialization.heatmap_matrix import HeatmapSerializer
+
+SITE = Path(__file__).parent / "site"
+
+
+def cfg():
+    return json.loads((ROOT / "config" / "serialization.json").read_text("utf-8"))
+
+
+def labels(n):
+    out = []
+    for i in range(n):
+        s = 9 * 3600 + 30 * 60 + i * 30
+        out.append(f"{s // 3600:02d}:{(s % 3600) // 60:02d}:{s % 60:02d}")
+    return tuple(out)
+
+
+def values(rows, cols, spot, strikes):
+    """造一个像样的 ΔIV 场：中间几行有值，前几列留空（模拟冷启动）。"""
+    grid = []
+    for r, strike in enumerate(strikes):
+        row = []
+        for c in range(cols):
+            if c < 4:
+                row.append(None)
+                continue
+            wave = 0.9 * ((r % 5) - 2) / 2.0
+            pulse = 1.6 if (c - 4) % 17 == 0 else 0.0
+            drift = -0.8 if abs(strike - spot) > 40 else 0.35
+            row.append(round(wave + pulse * drift, 3))
+        grid.append(tuple(row))
+    return tuple(grid)
+
+
+def matrix(strikes, spot, cols=60):
+    strikes = tuple(float(s) for s in strikes)
+    rights = tuple(
+        OptionRight.PUT if s < spot else OptionRight.CALL for s in strikes
+    )
+    return HeatmapMatrix(
+        strikes=strikes,
+        rights=rights,
+        bucket_labels=labels(cols),
+        values=values(len(strikes), cols, spot, strikes),
+        bucket_index=cols - 1,
+        spot=float(spot),
+    )
+
+
+def main():
+    ser = HeatmapSerializer(cfg())
+    spot = 7697.0
+
+    asc = [7640 + 5 * i for i in range(24)]           # 升序 24 档
+    late = asc[:] + [7635, 7630]                      # 更低的档晚到 → 追加末尾
+    desc = list(reversed(asc))                        # 完全降序
+
+    frames = [
+        ("A_ascending_24", asc, spot),
+        ("B_late_low_append", late, spot),
+        ("C_descending_24", desc, spot),
+    ]
+
+    out = []
+    for name, strikes, sp in frames:
+        block = ser.encode(matrix(strikes, sp))
+        out.append({"name": name, "block": block, "spot": sp})
+
+    payload = "window.PROBE_FRAMES = " + json.dumps(out, ensure_ascii=False) + ";\n"
+    (SITE / "frames.js").write_text(payload, encoding="utf-8")
+
+    for name, strikes, _ in frames:
+        print(f"{name}: 档数={len(strikes)} 升序={strikes == sorted(strikes)} "
+              f"首={strikes[0]} 末={strikes[-1]}")
+    print("已写", SITE / "frames.js", (SITE / "frames.js").stat().st_size, "bytes")
+
+
+main()

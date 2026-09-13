@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>行权价顺序探针</title>
+<link rel="stylesheet" href="style.css">
+<style>
+  body { background:#11151a; color:#e6edf3; font-family:system-ui,sans-serif; margin:0; padding:14px 18px; }
+  h1 { font-size:15px; font-weight:500; margin:0 0 4px; }
+  p.note { font-size:12px; color:#8b98a5; margin:0 0 12px; }
+  .row { display:flex; gap:14px; align-items:flex-start; margin-bottom:10px; }
+  .meta { font-size:11px; color:#8b98a5; width:270px; flex:none; line-height:1.65; }
+  .meta b { color:#e6edf3; font-weight:500; }
+  .chart { width:640px; height:300px; flex:none; }
+  pre#result { font-size:11px; color:#8b98a5; white-space:pre-wrap; }
+</style>
+</head>
+<body>
+<h1>前端行权价顺序探针 —— 用项目自己的编码器铸帧，喂真实的 web/*.js</h1>
+<p class="note">帧里的 strikes 顺序 = 后端给的顺序。这里读回 ECharts 纵轴 data 与像素坐标，看前端有没有排序/反转。</p>
+<div id="panels"></div>
+<pre id="result"></pre>
+
+<script src="vendor/echarts.min.js"></script>
+<script src="config.js"></script>
+<script src="matrix_codec.js"></script>
+<script src="heatmap.js"></script>
+<script src="frames.js"></script>
+<script>
+(function () {
+  var out = [];
+  var host = document.getElementById("panels");
+
+  PROBE_FRAMES.forEach(function (f, i) {
+    var row = document.createElement("div");
+    row.className = "row";
+    var meta = document.createElement("div");
+    meta.className = "meta";
+    meta.id = "meta-" + i;
+    var chart = document.createElement("div");
+    chart.className = "chart";
+    chart.id = "panel-" + i;
+    row.appendChild(meta);
+    row.appendChild(chart);
+    host.appendChild(row);
+
+    var declared = f.block.strikes.slice();
+    var block = SWATCH_MATRIX.decode(JSON.parse(JSON.stringify(f.block)));
+    var panel = new HeatmapPanel(chart);
+    panel.update(block, f.spot);
+
+    var opt = panel._chart.getOption();
+    var ydata = (opt.yAxis[0].data || []).map(Number);
+    var n = ydata.length;
+    var pxBottom = panel._chart.convertToPixel({ yAxisIndex: 0 }, 0);
+    var pxTop = panel._chart.convertToPixel({ yAxisIndex: 0 }, n - 1);
+    var spotLine = (opt.series[0].markLine.data || [])[0] || {};
+
+    var same = ydata.length === declared.length &&
+      ydata.every(function (v, k) { return v === declared[k]; });
+
+    var rec = {
+      frame: f.name,
+      declared_strikes: declared,
+      yAxis_data: ydata,
+      identical_to_frame: same,
+      declared_monotonic_asc: declared.every(function (v, k) {
+        return k === 0 || declared[k - 1] < v;
+      }),
+      yAxis_monotonic_asc: ydata.every(function (v, k) {
+        return k === 0 || ydata[k - 1] < v;
+      }),
+      rows: n,
+      cols: (opt.xAxis[0].data || []).length,
+      px_index0: pxBottom,
+      px_index_last: pxTop,
+      index0_is_bottom: pxBottom > pxTop,
+      screen_top_strike: pxBottom > pxTop ? ydata[n - 1] : ydata[0],
+      screen_bottom_strike: pxBottom > pxTop ? ydata[0] : ydata[n - 1],
+      spot_line_index: spotLine.yAxis,
+      filled: block.filled
+    };
+    out.push(rec);
+
+    meta.innerHTML =
+      "<b>" + f.name + "</b><br>" +
+      "帧 strikes 顺序：<br>" +
+      declared.slice(0, 4).join(", ") + " … " + declared.slice(-2).join(", ") + "<br>" +
+      "纵轴 data 与帧一致：<b>" + same + "</b><br>" +
+      "帧升序：" + rec.declared_monotonic_asc + " · 纵轴升序：" + rec.yAxis_monotonic_asc + "<br>" +
+      "屏幕最上方 = " + rec.screen_top_strike + "<br>" +
+      "屏幕最下方 = " + rec.screen_bottom_strike + "<br>" +
+      "格数 " + block.filled + " · " + n + " 档 × " + rec.cols + " 桶";
+  });
+
+  document.getElementById("result").textContent =
+    "PROBE_RESULT " + JSON.stringify(out);
+  window.PROBE_DONE = true;
+})();
+</script>
+</body>
+</html>

@@ -7,9 +7,11 @@
 3. 同一桶多次写入：``INSERT OR REPLACE`` 幂等，最终值正确。
 4. 队列满时丢桶：``dropped_count`` 递增，不抛异常。
 5. ``load_snapshot`` 后 ``build()`` 的 ΔIV 与直接计算一致。
+6. 冷数据的键序恒为**升序**，与 ``_buckets`` 的首次出现顺序无关。
 """
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -150,11 +152,64 @@ def _case_disabled_no_op() -> None:
         assert writer.recover() == []
 
 
+def _case_key_order_ascending() -> None:
+    """冷数据的键序恒为升序，与 ``_buckets`` 的首次出现顺序无关。
+
+    非空转要点：这里刻意把 ``_buckets`` 造成"低档位晚到"的形状（现价上移后
+    回落到会话初低点之下，见 ``dump_bucket`` docstring）。若 ``dump_bucket``
+    不排序，本用例的三条断言都会 FAIL。
+    """
+    clock = _make_clock()
+    serial = _make_serial_cfg()
+    engine = HeatmapEngine(clock, serial)
+
+    # 首次出现顺序：5500 起升序，随后追加更低的 5490 / 5485
+    engine._buckets = {
+        5500.0: {10: 0.15},
+        5505.0: {10: 0.16},
+        5510.0: {10: 0.17},
+        5490.0: {10: 0.14},
+        5485.0: {10: 0.13},
+    }
+    expected = [5485.0, 5490.0, 5500.0, 5505.0, 5510.0]
+    dumped = list(engine.dump_bucket(10))
+    assert dumped == expected, f"dump_bucket 未升序: {dumped}"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Path(tmp) / "test.db"
+        writer = AsyncPersistenceWriter(_make_persist_cfg(db))
+        import sqlite3
+        writer._conn = sqlite3.connect(str(db), timeout=5.0)
+        writer._ensure_table()
+        writer.enqueue(10, engine.dump_bucket(10), False)
+        writer._batch_write([writer._queue.get_nowait()])
+
+        raw = json.loads(
+            writer._conn.execute(
+                "select ivs_json from heatmap_buckets"
+            ).fetchone()[0]
+        )
+        on_disk = [float(k) for k in raw]
+        assert on_disk == sorted(on_disk), f"落盘键序非升序: {on_disk}"
+
+        recovered = writer.recover()
+        writer._conn.close()
+        writer._conn = None
+
+    keys = list(recovered[0]["ivs"])
+    assert keys == expected, f"recover 后键序变了: {keys}"
+
+    engine2 = HeatmapEngine(clock, serial)
+    engine2.load_snapshot(recovered)
+    assert list(engine2.dump_bucket(10)) == expected, "load_snapshot 后键序变了"
+
+
 _CASES = [
     _case_roundtrip,
     _case_idempotent_overwrite,
     _case_queue_drop,
     _case_disabled_no_op,
+    _case_key_order_ascending,
 ]
 
 

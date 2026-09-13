@@ -177,6 +177,13 @@ def main() -> int:
         hm = bundle.heatmap
         print(f"  热力图: {hm.rows()} 行 × {hm.cols()} 列, 有值格 {hm.filled_cells()}")
         passed &= check("矩阵有值", hm.filled_cells() > 0, f"{hm.filled_cells()} 格")
+        # 行序是对外契约：前端纵轴按它渲染。降序 = 与屏幕自上而下同向。
+        # 摘掉 build() 里的 sorted(..., reverse=True) 这条必须变红。
+        passed &= check(
+            "矩阵 strikes 降序（与屏幕自上而下同向）",
+            list(hm.strikes) == sorted(hm.strikes, reverse=True),
+            f"{hm.strikes[0]} → {hm.strikes[-1]}",
+        )
 
     if bundle.skew is not None:
         sk = bundle.skew

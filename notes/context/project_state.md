@@ -12,7 +12,8 @@ CURRENT_STATE: **spxw_swatch 已是纯实盘系统 + 多会话交易日网格**�
 （`config/app.json::sessions`），区段表随帧下发到 `session.zones`。
 `run.py --check` **11/11**；13 个本地回归全 `rc=0`；4 个 `--selftest` 变异全抓。
 ✅ **已提交并推送**（2026-09-13，KAI 指令）—— 含多会话网格全套 + 本会话的 4 处缺陷
-修复与记录；远端已核实（`git ls-remote` == 本地 HEAD）。提交号见 `notes/context/handoff.md`。
+修复与记录；`4b9a0b0..2b5c313`，远端已核实（`git ls-remote` == 本地 HEAD）。
+提交与推送读数见 `notes/sessions/2026-09-13/multi-session-grid/handoff.md::[commit]`。
 ⚠️ **实盘只验证到连通性**：2026-09-13 是周日，无当日 SPXW 到期 ⇒
 `ChainResolveError`（fail-closed 正确），**订阅与热力图出图至今未在任何
 交易日跑过**，多会话网格与时段切列也**只做过离线验证**。

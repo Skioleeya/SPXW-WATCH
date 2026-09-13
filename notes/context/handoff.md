@@ -13,7 +13,7 @@
   终态：`run.py --check` 11/11、13 个本地回归全 `rc=0`、4 个 `--selftest` 变异全抓、
   `node --check web/*.js` 7/7；`check_web_contract` 三段用离线等价物补齐（61/61
   载荷路径，含新增 `session.zones`）。`README.md` 口径同步。
-  **已按 KAI 指令提交并推送**（含 4 处修复 + 记录）。
+  **已按 KAI 指令提交并推送**：`4b9a0b0..2b5c313`（含 4 处修复 + 记录），远端已核实。
   ⚠️ **真实链路渲染仍未验证**（周日 fail-closed）—— 由 **KAI 手动在 GTH 时段**验收，
   **不设自动任务**（KAI 明确；此前记的"定时任务不见了"是他有意为之，不是缺陷）。
 - Previous: 2026-09-13/recheck-keyorder-memory（notes/sessions/2026-09-13/recheck-keyorder-memory/handoff.md）

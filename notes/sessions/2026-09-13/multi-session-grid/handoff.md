@@ -86,7 +86,7 @@ VALIDATION-SUMMARY:
   （`list` 空、`view` not found）。**2026-09-13 KAI 明确：这是他有意为之 ——
   不要设自动任务，由他手动在 GTH 时段验证。** 故本轮**不再重建**，并已删除本会话
   创建的那个（`automation delete cdf2faac-…` → `success:true`；`list` → `[]`）。
-- 提交并推送 → 见 `[commit]` 段
+- 提交并推送 → `4b9a0b0..2b5c313`，远端 == 本地 HEAD（详见 `[commit]` 段）
 
 COMMAND-EVIDENCE:
 
@@ -209,8 +209,9 @@ automation list                            → automations: []
 ```
 git rev-parse --short HEAD                → 4b9a0b0（提交前）
 git ls-remote origin                      → refs/heads/main = 4b9a0b0（远端 = 本地，快进）
-git add -A && git commit                  → <见下方最终读数>
-git push origin main                      → 见下方最终读数
+git add -A && git commit                  → 2b5c313（37 files changed, +2273/−402）RC=0
+git push origin main                      → 4b9a0b0..2b5c313  main -> main，RC=0
+git ls-remote origin                      → refs/heads/main = 2b5c313（远端 == 本地 HEAD）
 ```
 
 NO-PATCH-BANDAGE: 退出码取反改在**表达式本身**（`return 1 if failures else 0`），

@@ -1,21 +1,30 @@
 # Handoff Index
-- Latest session: 2026-09-13/multi-session-grid
-- Current session handoff: notes/sessions/2026-09-13/multi-session-grid/handoff.md
+- Latest session: 2026-09-13/web-js-gate-and-probe-governance
+- Current session handoff: notes/sessions/2026-09-13/web-js-gate-and-probe-governance/handoff.md
 - Archive: notes/context/archive/handoff_2026-09.md
-- Status: **接手一段未提交、无记录的在建改动并收口**。发现 `4b9a0b0` 之后工作区里
-  还有一整套**多会话交易日网格**（GTH 20:15→09:25 + 空档 + RTH 09:30→16:00，
-  2370 桶 × 30s，跨午夜；30 个文件 +1265/−304），**无任何提交或会话记录承载它**。
-  逐项复验后修掉 4 处缺陷 —— 1 处生产（`web/period.js::alignSkew` 忽略
-  `grid.index`，切列后两块图横轴错位 10 列）、3 处门禁（`check_session_grid`
-  退出码取反 ⇒ **有失败时返回 0**；`check_period_aggregation` 的 [5][6] 两组
-  对照写好了却**没接进 `evaluate()`**、从未执行过却照样报"全部通过"；
-  `skew_reference` 的 `_config()` NameError 让整条回归崩溃）。
-  终态：`run.py --check` 11/11、13 个本地回归全 `rc=0`、4 个 `--selftest` 变异全抓、
-  `node --check web/*.js` 7/7；`check_web_contract` 三段用离线等价物补齐（61/61
-  载荷路径，含新增 `session.zones`）。`README.md` 口径同步。
-  **已按 KAI 指令提交并推送**：`4b9a0b0..2b5c313`（含 4 处修复 + 记录），远端已核实。
-  ⚠️ **真实链路渲染仍未验证**（周日 fail-closed）—— 由 **KAI 手动在 GTH 时段**验收，
-  **不设自动任务**（KAI 明确；此前记的"定时任务不见了"是他有意为之，不是缺陷）。
+- Status: **`web/*.js` 纳入 `[1]` 文件长度门禁 + Skew 三项修复落成常驻回归 + 探针落点治理**：
+  ①新增 `iter_web_scripts()`（按目录枚举），`[1]` 从"82 个 `.py`"变为 **90 个文件**，
+  纳入即报出 3 项**真实违规**（`skew.js` 536 / `app.js` 524 / `period.js` 490），
+  **本轮不动 `web/` 代码**（KAI 拍板"纳入 + 先出拆分方案"，方案见本会话
+  `project_state.md`）；②新建 `tools/check_skew_viewport.py`（394 行，`[G1]`–`[G4]`
+  共 21 项判据 + 6 条变异），把上一轮只在一次性探针里的三项修复固化成常驻回归；
+  ③删除死代码 `SkewPanel.prototype.stats()`（`skew.js` 540 → 536）；
+  ④临时探针落点定为 **`<项目根>/tmp/`**，在 `.gitignore` + `NON_SOURCE_DIRS` 两处登记。
+  ⑤**自查中抓到一个真缺陷并修掉**：`check_skew_viewport.py` 的"判据集合不完整"守卫
+  期望集合由 `GROUPS` **自推** ⇒ 删掉一组后该组失败被**静默吞掉、`RC` 仍 0**
+  （实测删 `[G4]` ⇒ 3 条失败被吞）；抽出 `tools/group_guard.py`（期望前缀 = 独立常量
+  + 三条都查 + `guard_cases` 自证）。同族缺口：`check_period_aggregation` /
+  `check_skew_alignment` **同结构但无守卫**，只登记未修。
+  终态：`run.py --check` **`RC=1`**（`[1]` 3 项 FAIL = 真实违规，**预期红**；
+  其余 10 项全通过、关键配置项 **40**）；全量 **18** 个工具 **14 `RC=0`** / 4 `RC=1`
+  （与基线一致：缺 `ib_async`/`aiohttp`/无 8060/非本项目页面）；
+  `check_skew_viewport --selftest` **6 条变异 + 守卫 2 条用例全抓**；
+  `check_skew_alignment --selftest` 4 条变异全抓（沙箱抽出未破坏既有回归）。
+  ⚠️ **本会话改动未提交**；真实链路渲染仍未验证（周日 fail-closed），
+  由 KAI 手动在 GTH 时段验收。
+  ⚠️ **待 KAI 拍板**：`web/*.js` 拆分方案（文件划分 / 迁移清单 /
+  检查器 4 处写死的 web 文件清单如何收敛到 `index.html` 单一真源）。
+- Previous: 2026-09-13/skew-zoom-yscale（notes/sessions/2026-09-13/skew-zoom-yscale/handoff.md）
 - Previous: 2026-09-13/recheck-keyorder-memory（notes/sessions/2026-09-13/recheck-keyorder-memory/handoff.md）
 - Previous: 2026-09-13/skew-period-consistency（notes/sessions/2026-09-13/skew-period-consistency/handoff.md）
 - Previous: 2026-09-13/frame-strike-order-descending（notes/sessions/2026-09-13/frame-strike-order-descending/handoff.md）

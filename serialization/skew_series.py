@@ -31,29 +31,14 @@ _CFG = "serialization"
 class SkewSerializer:
     """偏度序列与平值读数编码器。"""
 
-    __slots__ = ("_iv_decimals", "_price_decimals", "_scale_window_s", "_clock")
+    __slots__ = ("_iv_decimals", "_price_decimals", "_clock")
 
     def __init__(self, serial_cfg: dict, clock) -> None:
         self._iv_decimals = loader.as_int(serial_cfg, "iv_decimals", module=_CFG)
         self._price_decimals = loader.as_int(
             serial_cfg, "price_decimals", module=_CFG
         )
-        self._scale_window_s = loader.as_float(
-            serial_cfg, "skew_scale_window_seconds", module=_CFG
-        )
         self._clock = clock
-
-    @property
-    def scale_policy(self) -> dict:
-        """
-        折线纵轴的量程策略。
-
-        只下发**窗口长度**，不下发极值本身：前端会把 skew 按用户选的周期聚合，
-        聚合后的点数随周期变（30 秒 → 780 点，15 分 → 26 点），极值必须在前端
-        按"窗口内还剩哪些点"重算。后端算一份固定极值，一换周期就与曲线对不上。
-        窗口按**时间**定义而不是点数，这样粗细两种周期看到的是同一段行情。
-        """
-        return {"window_s": round(float(self._scale_window_s), 1)}
 
     # ------------------------------------------------------------------ #
     # 折线序列

@@ -3,37 +3,19 @@ L6 — 时间周期聚合回归。
 ========================
 唯一职责：证明前端那份周期聚合（``web/period.js``）算出来的东西与后端的定义
 一致 —— 尤其是那份**镜像**实现 ``bound()``（对应 ``serialization/numeric.py``
-的 ``robust_bound``）没有漂移。
+的 ``robust_bound``）没有漂移。七组对照见本文件末 ``GROUPS`` 常量。
 
-为什么需要它
-------------
-周期切换把聚合放在前端，代价是色标量程必须在前端按同一规则重算，于是同一个
-算法有了 Python 与 JS 两份实现。两份实现最危险的地方在于**它们不会同时出错**：
-后端改一次分位规则、前端照旧，图上不会报任何错，只是颜色悄悄不对了 —— 这正是
-本项目最怕的"探针全绿但实际是坏的"。参数已由后端随帧下发
-（``heatmap.scale_policy``），但**算法本身只能靠对拍钉住**。
+为什么需要它：周期切换把聚合放在前端，色标量程必须在前端按同一规则重算，于是
+同一个算法有了 Python 与 JS 两份实现。后端改一次分位规则、前端照旧，图上不会
+报错、只是颜色悄悄不对了 —— 这正是本项目最怕的"探针全绿但实际是坏的"。
+参数已由后端随帧下发（``heatmap.scale_policy``），**算法本身只能靠对拍钉住**。
 
-七组对照
---------
-1. ``options()``    —— 周期列表按基线桶宽过滤后的档位与分组倍数；
-2. ``bound()``      —— 与**生产代码** ``serialization.numeric.robust_bound`` 逐值比对；
-3. ``aggregate()``  —— 逐格与 Python 参考实现比对（含 null 传播、末组不满）；
-4. ``clipTail()``   —— 尾部截断后的列数、标签、``bucket_index``；
-5. ``sliceZones()`` —— 时段切列：只留所选区段、空档整段切掉、映射表逐元素一致；
-6. 时段映射下的 Skew 落列 —— 与参考实现逐值一致，且等价于"预映射后走普通路径"；
-7. 跨文件不变量     —— 上限必须盖住整个交易日网格；基线桶宽整除网格长度。
-
-非空转验证（``--selftest``）
----------------------------
-把 ``period.js`` 复制到临时目录并**故意注入**五种缺陷（聚合系数偏移 / 色标漏掉
-下限保护 / 组数取整方向反了 / 切列忽略区段过滤 / alignSkew 忽略时段映射），要求
-检查器逐条报出来。五种都能抓住，才说明这组对照不是空转。造数与参考实现见
-``tools/period_reference.py``。
+非空转验证（``--selftest``）：把 ``period.js`` 复制到临时目录并**故意注入**五种
+缺陷，要求检查器逐条报出来。造数与参考实现见 ``tools/period_reference.py``。
 
 用法::
 
-    python tools/check_period_aggregation.py
-    python tools/check_period_aggregation.py --selftest
+    python tools/check_period_aggregation.py [--selftest]
 """
 
 from __future__ import annotations
@@ -51,12 +33,13 @@ sys.path.insert(0, str(ROOT))
 from core.clock import minutes_of_day  # noqa: E402
 from serialization.numeric import robust_bound  # noqa: E402
 from tools import period_reference as ref  # noqa: E402
+from tools.group_guard import guard_cases, guard_problems  # noqa: E402
 
 GREEN, RED, RESET = "\033[32m", "\033[31m", "\033[0m"
 
 TOLERANCE = 1e-9
 
-#: 变异表：(名称, 原文, 替换)。--selftest 用它证明检查器不是空转。
+#: 变异表：(名称, 原文, 替换) —— ``--selftest`` 用它证明检查器不是空转。
 MUTATIONS: tuple[tuple[str, str, str], ...] = (
     ("聚合系数偏移", "sum += v;", "sum += v + 0.001;"),
     ("色标漏掉下限保护", "return Math.max(picked, floor);", "return picked;"),
@@ -267,10 +250,8 @@ def _invariant_checks(result: dict) -> list[tuple[str, bool, str]]:
 
 def _grid_minutes(app_cfg: dict) -> int:
     """
-    交易日网格的总分钟数 = 各会话时长 + 它们之间的空档。
-
-    只认 ``config/app.json`` 的 ``sessions``（时段真相的唯一归属），
-    解析交给 ``core.clock.minutes_of_day`` —— 这里不重写一份时刻解析。
+    交易日网格的总分钟数 = 各会话时长 + 它们之间的空档。只认 ``app.json::sessions``，
+    时刻解析交给 ``core.clock.minutes_of_day``（这里不重写一份）。
     """
     total = 0
     prev_close: int | None = None
@@ -347,13 +328,19 @@ def _selftest(config_path: Path, payload: dict) -> int:
 # 入口
 # --------------------------------------------------------------------------- #
 
+#: 期望前缀（独立常量，不能由 GROUPS 推出 —— 否则删组时期望集合跟着变小、
+#: 守卫失明，那一组的失败被静默吞掉仍 RC=0）。详见 ``tools/group_guard.py``。
+EXPECTED_PREFIXES = ("options", "bound", "aggregate", "clipTail", "sliceZones",
+                     "时段映射", "时段切列", "基线桶宽", "maxColumns", "最细周期")
+
 GROUPS = (
-    ("[1] 可用周期过滤 options()", "options"),
-    ("[2] 色标量程 bound() ↔ numeric.robust_bound", "bound"),
-    ("[3] 聚合 aggregate() 逐格对照", "aggregate"),
-    ("[4] 显示窗口 clipTail()", "clipTail"),
-    ("[5] 时段切列 sliceZones()", "sliceZones"),
+    ("[1] 可用周期过滤 options()", ("options",)),
+    ("[2] 色标量程 bound() ↔ numeric.robust_bound", ("bound",)),
+    ("[3] 聚合 aggregate() 逐格对照", ("aggregate",)),
+    ("[4] 显示窗口 clipTail()", ("clipTail",)),
+    ("[5] 时段切列 sliceZones()", ("sliceZones",)),
     ("[6] 时段映射下的 Skew 落列", ("时段映射", "时段切列")),
+    ("[7] 跨文件不变量", ("基线桶宽", "maxColumns", "最细周期")),
 )
 
 
@@ -378,14 +365,26 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     checks = evaluate(result, payload)
+
+    # 完整性守卫：空集合 / 漏组 / 无人认领的判据都算失败，不是通过。
+    problems = guard_problems(checks, GROUPS, EXPECTED_PREFIXES)
+    if problems:
+        print(f"{RED}判据集合不完整{RESET}  {'；'.join(problems)}"
+              + "  —— 见 tools/group_guard.py")
+        return 1
+
     failures = 0
-    for title, prefix in GROUPS:
-        failures += _report(title, [c for c in checks if c[0].startswith(prefix)])
-    failures += _report("[7] 跨文件不变量",
-                        [c for c in checks if c[0].startswith(("基线桶宽", "maxColumns",
-                                                              "最细周期"))])
+    for title, prefixes in GROUPS:
+        failures += _report(title, [c for c in checks if c[0].startswith(prefixes)])
 
     if args.selftest:
+        print("\n[非空转自检] 守卫：削掉一组必须被报出来（否则该组的失败会被静默吞掉）")
+        for name, probs in guard_cases(checks, GROUPS, EXPECTED_PREFIXES):
+            if probs:
+                print(f"  {GREEN}[ok]{RESET} {name} → 已抓住：{probs[0]}")
+            else:
+                print(f"  {RED}[FAIL]{RESET} {name} → **未被抓住**：守卫是空转的")
+                failures += 1
         failures += _selftest(config_path, payload)
 
     print()

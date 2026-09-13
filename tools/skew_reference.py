@@ -1,9 +1,14 @@
 """
-L6 — Skew 周期对齐回归的对照夹具。
-==================================
-唯一职责：为 ``tools/check_skew_alignment.py`` 提供三样东西 —— 确定性的合成帧
+L6 — Skew 前端回归的对照夹具。
+==============================
+唯一职责：为 Skew 相关的前端回归（``check_skew_alignment`` 对齐 /
+``check_skew_viewport`` 视口·图例·刻度）提供三样东西 —— 确定性的合成帧
 （**走生产编码器**，与真实线上帧同形状）、独立的 Python 参考实现、以及取回 JS
-结果的 node 驱动。
+结果的 node 沙箱与驱动。
+
+两个回归共用一个夹具而不是各造一份：合成帧一旦走生产编码器、又刻意塞进尖峰与
+空洞，第二份就会漂移 —— 于是"同一个前端在两组回归下表现不同"这种最难查的假象
+就有了土壤。沙箱（``SANDBOX_JS``）同理只此一份，各回归只提供自己的**驱动体**。
 
 为什么需要这个回归
 ------------------
@@ -59,14 +64,19 @@ ROWS = 24
 #: 不变量单独核对。
 CLIP_COLUMNS = 400
 
-#: 尖峰所在基线桶。刻意放得很早：这样它会**退出** ``skew.scale_policy.window_s``
-#: 定义的量程窗口，量程窗口开着与关掉才会有可观测差异（否则该判据是空转）。
+#: 尖峰所在基线桶。刻意放得很早：这样"视口移到尖峰之外"这一档才有意义 ——
+#: 把可见列挪到尖峰后面，量程必须把尖峰排除掉（否则这条判据是空转的）。
 SPIKE_AT = 100
 SPIKE_VALUE = 9.0
 
-#: node 侧驱动：按 ``app.js::render()`` 的真实顺序求值
-#: ``decodeFrame → aggregate → clipTail → alignSkew → SkewPanel.update``。
-NODE_DRIVER = r"""
+#: node 侧沙箱：装好 window / atob / ECharts 垫片，按 ``app.js::render()`` 的真实
+#: 顺序求值 ``web`` 侧脚本，并把各回归共用的公共量摆好 —— ``F``（已解码的帧）、
+#: ``P``（period.js）、``CFG``（config.js）、``out``（结果容器）。
+#:
+#: 各回归的**驱动体**拼在它后面：``ALIGN_BODY`` 属本文件（对齐回归），
+#: ``tools/check_skew_viewport.py`` 自带 ``VIEWPORT_BODY``。垫片只此一份 ——
+#: 两个回归各抄一套的话，ECharts 替身接口一旦变化就会"改一处漏一处"。
+SANDBOX_JS = r"""
 const fs = require("fs");
 const vm = require("vm");
 const webDir = process.argv[1];
@@ -75,8 +85,18 @@ const framePath = process.argv[2];
 const sandbox = {
   console: console,
   atob: atob,
+  /* ECharts 的替身。面板构造函数里挂了缩放监听（datazoom / 双击复位），
+     update() 还会 getOption() 回读缩放窗口 —— 替身必须提供同一套接口，
+     否则回归会因"替身接口不全"而红，与它要验的逻辑毫无关系。
+     注意这里只提供接口、不实现行为：落列、量程、图例结构都能从 setOption
+     收到的 option 上读出来，不需要真渲染；像素级证据由浏览器侧单独取。 */
   echarts: { init: function () {
-    return { setOption: function () {}, resize: function () {}, clear: function () {} };
+    return {
+      setOption: function () {}, resize: function () {}, clear: function () {},
+      on: function () {},
+      getOption: function () { return { dataZoom: [{}] }; },
+      getZr: function () { return { on: function () {} }; }
+    };
   } },
   addEventListener: function () {},
   document: { getElementById: function () { return {}; } }
@@ -102,13 +122,17 @@ const out = {
   decoded: !!F.heatmap.values,
   periods: {}, window: null
 };
+"""
 
+#: 对齐回归的驱动体：``decodeFrame → aggregate → clipTail → alignSkew →
+#: SkewPanel.update``，逐周期吐出落列结果，外加三档视口下的纵轴量程。
+ALIGN_BODY = r"""
 for (const opt of P.options(out.base)) {
   const group = opt.group;
   const view = P.clipTail(P.aggregate(F.heatmap, group), MAX_COLS);
   const drop = view.clipped || 0;
   const a = P.alignSkew(F.skew.series, group, { labels: view.labels, drop: drop });
-  const info = new S.SkewPanel({}).update(a, F.skew.scale_policy);
+  const info = new S.SkewPanel({}).update(a);
   out.periods[String(opt.seconds)] = {
     group: group,
     cols: view.labels.length,
@@ -124,18 +148,31 @@ for (const opt of P.options(out.base)) {
   };
 }
 
-/* 量程窗口：用**不裁剪**的全序列网格，否则尖峰会被 clipTail 裁掉、判据空转 */
+/* 纵轴量程：只认**当前视口**内的极值（见 web/skew.js::axisRange）。
+   三档视口 —— 全宽 / 移开尖峰 / 只框住尖峰 —— 量程必须跟着走。
+   用**不裁剪**的全序列网格，否则尖峰会被 clipTail 裁掉、判据空转。 */
 const full = P.aggregate(F.heatmap, 1);
 const aFull = P.alignSkew(F.skew.series, 1, { labels: full.labels, drop: 0 });
+const panel = new S.SkewPanel({});
+const spikeCol = aFull.skew.indexOf(9);
+const fullRange = panel.update(aFull).range;
+panel.setViewport({ start: spikeCol + 20, end: spikeCol + 120, tail: false });
+const awayRange = panel.update(aFull).range;
+panel.setViewport({ start: spikeCol - 5, end: spikeCol + 5, tail: false });
+const onRange = panel.update(aFull).range;
 out.window = {
   cols: aFull.label.length,
-  spikeCol: aFull.skew.indexOf(9),
-  on: new S.SkewPanel({}).update(aFull, { window_s: 3600 }).range,
-  off: new S.SkewPanel({}).update(aFull, { window_s: 0 }).range
+  spikeCol: spikeCol,
+  full: fullRange,
+  away: awayRange,
+  on: onRange
 };
 
 process.stdout.write(JSON.stringify(out));
 """
+
+#: 对齐回归实际执行的脚本 = 沙箱 + 驱动体。
+NODE_DRIVER = SANDBOX_JS + ALIGN_BODY
 
 
 # --------------------------------------------------------------------------- #
@@ -212,7 +249,6 @@ def build() -> tuple[dict, dict]:
         "skew": {
             "series": skew_ser.encode_series(points),
             "latest": skew_ser.encode_latest(points[-1]),
-            "scale_policy": skew_ser.scale_policy,
         },
     }
     source = {
@@ -270,17 +306,22 @@ def run_node(frame: dict) -> dict:
     return run_node_in(frame, ROOT / "web", CLIP_COLUMNS)
 
 
-def run_node_in(frame: dict, web_dir: Path, max_columns: int = CLIP_COLUMNS) -> dict:
+def run_node_in(frame: dict, web_dir: Path, max_columns: int = CLIP_COLUMNS,
+                driver: str = NODE_DRIVER) -> dict:
     """
-    同上，但前端目录与列数上限可指定 —— ``--selftest`` 用前者加载被注入缺陷的
-    副本，免得为了跑一次变异去改动工程里的真实文件；后者让"截断"这条路径在
-    夹具里可控（真实的 maxColumns 大到永不生效，见 CLIP_COLUMNS 的说明）。
+    同上，但前端目录、列数上限与**驱动体**都可指定 —— ``--selftest`` 用前者加载
+    被注入缺陷的副本，免得为了跑一次变异去改动工程里的真实文件；后者让"截断"这条
+    路径在夹具里可控（真实的 maxColumns 大到永不生效，见 CLIP_COLUMNS 的说明）。
+
+    ``driver`` 必须是 ``SANDBOX_JS`` 加一段驱动体（见本模块顶部说明）—— 沙箱把
+    ``S`` / ``P`` / ``CFG`` / ``F`` / ``out`` 摆好，驱动体只管填 ``out`` 并
+    ``process.stdout.write``。
     """
     with tempfile.TemporaryDirectory(prefix="swatch-skew-") as tmp:
         frame_file = Path(tmp) / "frame.json"
         frame_file.write_text(json.dumps(frame), encoding="utf-8")
         proc = subprocess.run(
-            ["node", "-e", NODE_DRIVER, str(web_dir), str(frame_file),
+            ["node", "-e", driver, str(web_dir), str(frame_file),
              str(int(max_columns))],
             capture_output=True, text=True, encoding="utf-8", timeout=120,
         )

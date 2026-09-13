@@ -88,7 +88,14 @@ window.SWATCH_CONFIG = {
     showCall25: true,
     zeroLine: true,
     /* 纵轴留白比例 */
-    padRatio: 0.18
+    padRatio: 0.18,
+    /* 纵轴**刻度标签**的小数位（左右两个纵轴共用）。这**不是数据精度** ——
+       数据精度是 decimals.skew / decimals.iv（提示框与顶栏读数用）。刻度只需
+       够分辨量级，位数给多了反而糊成一团。 */
+    axisDecimals: 1,
+    /* 横轴时间标签的目标数量。按**当前可见列数**算间隔，所以滚轮放大之后
+       标签会自动变密（与 heatmap.xLabelCount 同一规则）。 */
+    xLabelCount: 14
   },
 
   /* 小数位（仅显示用） */

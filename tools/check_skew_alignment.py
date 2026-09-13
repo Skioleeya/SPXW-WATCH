@@ -28,7 +28,8 @@ L6 — Skew 周期对齐回归。
   不碰 bucket 字段，因此与 ``alignSkew`` 的内部算法无关）；
 * **[C4]** 末值语义（与独立参考实现逐值对拍），且 group>1 时至少有一列首值≠末值，
   否则这条判据本身是空转；
-* **[C6]** 量程窗口生效（窗口开着时早盘尖峰必须被排除，关掉时必须被算进去）。
+* **[C6]** 量程**跟着视口走**：全宽时早盘尖峰必须算进量程，把可见列移到尖峰
+  之外后必须被排除，只框住尖峰时必须覆盖它 —— 三档全对才算生效。
 
 非空转验证（``--selftest``）
 ---------------------------
@@ -53,6 +54,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from tools import skew_reference as ref  # noqa: E402
+from tools.group_guard import guard_cases, guard_problems  # noqa: E402
 
 GREEN, RED, RESET = "\033[32m", "\033[31m", "\033[0m"
 
@@ -70,9 +72,9 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
      "      var col = Math.floor(pos / g) - drop;",
      "      var col = Math.floor(pos / g);",
      "[C2]"),
-    ("量程窗口失效（退回全序列极值）", "skew.js",
-     "      if (windowS > 0 && latest !== null) {",
-     "      if (false) {",
+    ("量程不吃视口（退回全序列极值）", "skew.js",
+     "    for (var k = from; k <= to; k++) {",
+     "    for (var k = 0; k < values.length; k++) {",
      "[C6]"),
 )
 
@@ -171,18 +173,22 @@ def evaluate(result: dict, source: dict, frame: dict) -> list[tuple[str, bool, s
                        int(got["panelCols"]) == cols,
                        f"{got['points']}/{got['panelCols']}"))
 
-    # [C6] 量程窗口
+    # [C6] 纵轴量程：只认**当前视口**内的极值（见 web/skew.js::axisRange）
     win = result["window"]
+    full_hi = float(win["full"][1])
+    away_hi = float(win["away"][1])
     on_hi = float(win["on"][1])
-    off_hi = float(win["off"][1])
-    checks.append(("[C6] 不裁剪序列里能找到尖峰（否则该判据空转）",
+    checks.append(("[C6] 序列里能找到尖峰（否则该判据空转）",
                    int(win["spikeCol"]) >= 0, f"第 {win['spikeCol']} 列"))
-    checks.append((f"[C6] 窗口开着时尖峰 {spike} 被排除在量程外",
-                   on_hi < spike / 2, f"上界 {on_hi:.3f}"))
-    checks.append(("[C6] 窗口关掉时尖峰被算进量程（等于旧的全序列极值）",
-                   off_hi > spike * 0.8, f"上界 {off_hi:.3f}"))
-    checks.append((f"[C6] 窗口开/关量程差异显著（{off_hi / on_hi:.1f}×）",
-                   off_hi > on_hi * 2, f"{on_hi:.3f} → {off_hi:.3f}"))
+    checks.append((f"[C6] 全宽时尖峰 {spike} 在可见列内，必须算进量程",
+                   full_hi > spike * 0.8, f"上界 {full_hi:.3f}"))
+    checks.append((f"[C6] 视口移到尖峰之外时，尖峰必须被排除在量程外",
+                   away_hi < spike / 2, f"上界 {away_hi:.3f}"))
+    checks.append((f"[C6] 视口只框住尖峰时，量程必须覆盖尖峰",
+                   on_hi > spike * 0.8, f"上界 {on_hi:.3f}"))
+    checks.append((f"[C6] 视口移开后量程显著收窄（{full_hi / away_hi:.1f}×，"
+                   f"证明量程确实跟着视口走）",
+                   away_hi < full_hi / 2, f"{full_hi:.3f} → {away_hi:.3f}"))
     return checks
 
 
@@ -248,11 +254,15 @@ def _selftest(frame: dict, source: dict) -> int:
 # 入口
 # --------------------------------------------------------------------------- #
 
+#: 期望前缀（独立常量，不能由 GROUPS 推出 —— 否则删组时期望集合跟着变小、
+#: 守卫失明，那一组的失败被静默吞掉仍 RC=0）。详见 ``tools/group_guard.py``。
+EXPECTED_PREFIXES = ("[C0]", "[C1]", "[C2]", "[C3]", "[C4]", "[C5]", "[C6]", "[C7]")
+
 GROUPS = (
     ("[C0/C1] 解码与聚合", ("[C0]", "[C1]")),
     ("[C2/C3] 时间轴一致性", ("[C2]", "[C3]")),
     ("[C4/C5/C7] 末值语义与列数", ("[C4]", "[C5]", "[C7]")),
-    ("[C6] 量程窗口", ("[C6]",)),
+    ("[C6] 纵轴量程（随视口）", ("[C6]",)),
 )
 
 
@@ -274,12 +284,27 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     checks = evaluate(result, source, frame)
+
+    # 完整性守卫：空集合 / 漏组 / 无人认领的判据都算失败，不是通过。
+    problems = guard_problems(checks, GROUPS, EXPECTED_PREFIXES)
+    if problems:
+        print(f"{RED}判据集合不完整{RESET}  " + "；".join(problems)
+              + "  —— 见 tools/group_guard.py")
+        return 1
+
     failures = 0
     for title, prefixes in GROUPS:
         failures += _report(title, [c for c in checks
                                     if c[0].startswith(prefixes)])
 
     if args.selftest:
+        print("\n[非空转自检] 守卫：削掉一组必须被报出来（否则该组的失败会被静默吞掉）")
+        for name, probs in guard_cases(checks, GROUPS, EXPECTED_PREFIXES):
+            if probs:
+                print(f"  {GREEN}[ok]{RESET} {name} → 已抓住：{probs[0]}")
+            else:
+                print(f"  {RED}[FAIL]{RESET} {name} → **未被抓住**：守卫是空转的")
+                failures += 1
         failures += _selftest(frame, source)
 
     print()

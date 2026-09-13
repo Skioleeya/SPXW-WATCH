@@ -5,10 +5,18 @@ L6 — 结构自检。
 
 检查项
 ------
-[1] 文件长度：每个 ``.py`` 必须少于 400 行。
+[1] 文件长度：每个 ``.py`` 与 ``web/*.js`` 必须少于 400 行。
 [2] 依赖方向：第 N 层的模块只能 import 第 0…N 层的包，禁止反向依赖。
 
 对应项目硬性要求第 1 条（文件 < 400 行）与第 4 条（L0→L1→…→L6 单向）。
+
+[1] 为什么把 ``web/*.js`` 也算进来
+--------------------------------
+长度约束是**可读性**约束，与语言无关。此前 ``[1]`` 只扫 ``.py``（``web`` 在
+``NON_SOURCE_DIRS`` 里），于是 ``--check`` 报"82 个文件全部合规"对
+``app.js`` / ``skew.js`` / ``period.js`` **没有任何覆盖** —— 那不是合规，是
+门禁缺口。2026-09-13 KAI 定：纳入。纳入后必然暴露既有违规（三个文件均 > 400
+行），拆分是独立的一步，**门禁先诚实**。
 """
 
 from __future__ import annotations
@@ -22,6 +30,7 @@ from tools.selfcheck_core import (
     MAX_LINES,
     ROOT,
     iter_py_files,
+    iter_web_scripts,
     ok,
     fail,
     parse_file,
@@ -31,7 +40,9 @@ from tools.selfcheck_core import (
 
 def check_file_sizes() -> int:
     print(f"\n[1] 文件长度（上限 {MAX_LINES} 行）")
-    files = iter_py_files()
+    py_files = iter_py_files()
+    js_files = iter_web_scripts()
+    files = py_files + js_files
     failures = 0
 
     for path in files:
@@ -45,7 +56,8 @@ def check_file_sizes() -> int:
             ((len(p.read_text(encoding="utf-8").splitlines()), rel_of(p)) for p in files),
             default=(0, "-"),
         )
-        ok(f"{len(files)} 个文件全部合规，最长 {longest[1]} = {longest[0]} 行")
+        ok(f"{len(py_files)} 个 Python + {len(js_files)} 个前端脚本全部合规，"
+           f"最长 {longest[1]} = {longest[0]} 行")
     return failures
 
 

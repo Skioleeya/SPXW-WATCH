@@ -29,9 +29,10 @@ Archive: notes/context/archive/open_tasks_2026-09.md
   （纯静态对照）也无法在无 aiohttp 的环境运行。是否把 import 挪进函数内
   **待 KAI 定** —— 改动小，但属"重构现有工具"，未获指令不擅自动。
 
-- [ ] **[低] `skew_scale_window_seconds = 3600.0` 待盘中校准** ——
-  它的作用是"让早盘尖峰随时间退出量程窗口"。太短则量程频繁跳、曲线呼吸；
-  太长则退化成旧的全序列极值。当前值是经验值，**未经真实盘中数据校准**。
+- [ ] **[低] `~/.workbuddy-ai/tmp/` 下约 40 个历史探针未迁移** ——
+  新约定落点已是 `<项目根>/tmp/`，但历史文件仍在用户级目录（被所有项目共用）。
+  KAI 2026-09-13 拍板：**下一个会话做**（"代办"）。本轮不动用户目录。
+  ⇒ 开始前先列清单（按 mtime / 大小 / 是否含 `import`），让 KAI 一眼能拍"全迁/部分迁/只登记不动"。
 
 - [ ] **[低] 色板缺机械回归** —— `check_web_contract` 只校验 CFG **路径存在**、
       `check_page_render` 只断言"画出来了"，色值被误改**没有任何检查会红**。
@@ -79,6 +80,20 @@ Archive: notes/context/archive/open_tasks_2026-09.md
 - **冷数据键序也统一为降序**（2026-09-13 复核时 KAI 选定）—— 与帧 `strikes` 同向。
   `dump_bucket()` 改 `sorted(..., reverse=True)`，回归
   `check_persistence.py::_case_key_order_descending`。
+- **`web/*.js` 纳入 `[1]`，且 KAI 第二轮拍板"不拆文件"**（2026-09-13）—— 接受
+  `--check` 长期 `RC=1`（红的是真实违规）。`iter_web_scripts()` 按目录枚举实现；
+  长度约束与语言无关；`.js` 只进 `[1]`，不进 AST 类检查（`[2][9][10]`）。
+  原"拆分方案"段已挪进 `project_state.md::原拆分方案（已否决）` 作为决策档案。
+  ⇒ **不要**把 `--check RC=1` 当回归恶化、不要"修绿"。新改动不能引入第 4 项 FAIL。
+- **同族守卫缺口已修**（2026-09-13）—— `check_period_aggregation.py` 与
+  `check_skew_alignment.py` 已接入 `tools/group_guard.py`，`--selftest` 各自抓全
+  守卫 2 条用例 + 全部变异。`group_guard.py::prefixes` 契约 = `tuple[str, ...]`
+  （不要传 `str`）。
+- **`~/.workbuddy-ai/tmp/` 40 个历史探针推迟到下一个会话**（2026-09-13 KAI 拍板）—— 动
+  用户目录需明令。已登记 `Active` 段，待下一会话开清单。
+- **临时探针落点 = `<项目根>/tmp/`**（2026-09-13 KAI 拍板）—— 不再写用户级
+  `~/.workbuddy-ai/tmp/`（那个被所有项目共用、已串味）。配套：**必须在
+  `.gitignore` 与 `NON_SOURCE_DIRS` 两处登记**；探针用完即弃，判据要落成常驻回归。
 - **`check_web_contract.py` 的 `import aiohttp` 不内移**（2026-09-13 复核时 KAI
   未选）—— 保持顶层 import 原样，静态两段仍靠桩模块离线补跑。
 - **`notes/` 与 `.workbuddy-ai/memory/` 的分工**（2026-09-13）：

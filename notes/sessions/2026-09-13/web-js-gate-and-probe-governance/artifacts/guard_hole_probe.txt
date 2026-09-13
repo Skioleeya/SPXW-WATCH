@@ -1,0 +1,86 @@
+# artifacts — 守卫缺口探针（一次性，用完即弃）
+
+来源：`tmp/_probe_guard_hole.py`（2026-09-13，落点按 KAI 定的 `<项目根>/tmp/`）。
+留档理由：它是**一个真缺陷的可复现证据** —— `tools/check_skew_viewport.py` 的
+"判据集合不完整"守卫对**缺组**失明，删掉一组后该组的失败被静默吞掉、退出码仍为 0。
+
+## 探针源码
+
+```python
+"""复核：删掉一组后，该组的失败还会不会被静默吞掉（守卫是否已封口）。"""
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from tools import check_skew_viewport as V            # noqa: E402
+from tools import skew_reference as ref               # noqa: E402
+from tools.group_guard import guard_problems          # noqa: E402
+
+frame, source = ref.build()
+checks = V.evaluate(ref.run_node_in(frame, ROOT / "web", driver=V.DRIVER), source)
+print(f"基线判据 {len(checks)} 条，失败 {sum(1 for c in checks if not c[1])} 条")
+
+bad = [(c[0], False, c[2]) if c[0].startswith("[G4]") else c for c in checks]
+print(f"把 3 条 [G4] 判据做坏 → 失败 {sum(1 for c in bad if not c[1])} 条")
+
+for name, groups in (("原样 GROUPS", V.GROUPS),
+                     ("删掉 [G4] 组", tuple(g for g in V.GROUPS if g[1] != ("[G4]",))),
+                     ("清空 GROUPS", ())):
+    problems = guard_problems(bad, groups, V.EXPECTED_PREFIXES)
+    reported = sum(1 for _, ps in groups for c in bad
+                   if c[0].startswith(ps) and not c[1])
+    verdict = "拦截" if problems else "放行"
+    print(f"{name:14s} 守卫={verdict:2s}  报告出的失败数={reported}  "
+          f"{'✓ 封口' if problems else '✗ 仍在静默通过'}")
+```
+
+## 修复前（旧守卫：期望前缀由 `GROUPS` 自推）
+
+```
+基线判据 21 条，失败 0 条
+把 3 条 [G4] 判据做坏 → 失败 3 条
+原样 GROUPS      守卫=放行  报告出的失败数=3  ⇒ 正常
+删掉 [G4] 组      守卫=放行  报告出的失败数=0  ⇒ 漏洞：失败被静默吞掉
+```
+
+旧守卫的代码是：
+
+```python
+known = [p for _, prefixes in GROUPS for p in prefixes]      # ← 期望集合自推
+missing = [p for p in known if not any(c[0].startswith(p) for c in checks)]
+if not checks or missing:
+    ... 判据集合不完整 ...
+```
+
+删掉 `[G4]` 组 ⇒ `known` 里也没有 `[G4]` ⇒ `missing` 为空 ⇒ 守卫放行；
+而 `_report()` 按 `GROUPS` 过滤，`[G4]` 的 3 条判据**连报告都进不去** ⇒
+`failures` 计数为 0 ⇒ `RC=0`。**报告照样打印"全部通过"。**
+
+另单独验证：把 `GROUPS` 整个清空，旧守卫同样放行（`RC=0`）。
+
+## 修复后（`tools/group_guard.py`：期望前缀 = 独立常量）
+
+```
+基线判据 21 条，失败 0 条
+把 3 条 [G4] 判据做坏 → 失败 3 条
+原样 GROUPS      守卫=放行  报告出的失败数=3  ✓ 正确（组表完整，失败被报出）
+删掉 [G4] 组      守卫=拦截  报告出的失败数=0  ✓ 封口
+清空 GROUPS      守卫=拦截  报告出的失败数=0  ✓ 封口
+```
+
+并已把守卫自身的非空转验证接进 `--selftest`：
+
+```
+[非空转自检] 守卫：削掉一组必须被报出来（否则该组的失败会被静默吞掉）
+  [ok] 清空分组表 → 已抓住：分组表前缀 [] ≠ 期望 ['[G1]', '[G2]', '[G3]', '[G4]']
+  [ok] 去掉最后一组 [G4] → 已抓住：分组表前缀 ['[G1]', '[G2]', '[G3]'] ≠ 期望 [...]
+```
+
+## 教训（与项目既有的"报绿但是假的"同族）
+
+这是同一族缺陷的**第五例**：不是断言写错，是**判据根本没进计数**。
+前四例见 `notes/context/project_state.md` 的「记录教训」；
+本次的新形态是 —— **守卫的期望集合从被守卫的对象自己推出来**，
+于是"删掉要守卫的东西"同时也删掉了守卫本身。
+⇒ 判据集合的期望值必须来自**独立常量**，且"分组表是否恰好覆盖它"要单独查。

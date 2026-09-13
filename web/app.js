@@ -44,6 +44,14 @@
   var heatmapPanel = new global.HeatmapPanel(el("heatmap"));
   var skewPanel = new global.SkewPanel(el("skew"));
 
+  /* Skew 的 meta 行要跟着缩放立刻收窄，而缩放不经过 `update()` —— 面板在视口
+     变化后回调 `writeSkewMeta`（声明在下面，函数声明会提升）。 */
+  skewPanel.setViewportHook(writeSkewMeta);
+
+  /* 最近一帧的 `skew.latest`。缩放回调发生在两帧之间，那时帧对象早已出栈，
+     所以把"当前值"这一段缓存下来供 `writeSkewMeta` 复用。 */
+  var lastSkewLatest = null;
+
   var state = {
     frames: 0,
     lastFrame: null,
@@ -416,13 +424,31 @@
     );
     if (!aligned) { return; }
 
-    var info = skewPanel.update(aligned, block.scale_policy);
-    if (info && block.latest) {
-      setText("skew-meta", info.points + "/" + info.cols + " 点 · 当前 " +
-        signed(block.latest.skew, CFG.decimals.skew) + " · ATM " +
-        num(block.latest.atm, CFG.decimals.iv) + " · " + currentViewLabel() +
-        " · " + currentPeriodLabel());
-    }
+    /* 缩放回调发生在两帧之间，那时 `block` 早已出栈 —— 缓存"当前值"供它复用。 */
+    lastSkewLatest = block.latest || null;
+    writeSkewMeta(skewPanel.update(aligned));
+  }
+
+  /*
+   * 写 Skew 的 meta 行。放在这里而不是面板里，是因为它要拼接"当前值 / 时段 /
+   * 周期"这些面板之外的状态。
+   *
+   * `info.points` / `info.cols` 都按**当前可见列**算（面板口径），所以缩放后
+   * 这两个数跟着收窄；`info.view.cols` 是**总列数**（"缩放 a–b/N 列"的分母）。
+   *
+   * 两条路径都调它：每帧的 `renderSkew`，以及缩放时面板的回调 —— 缩放不经过
+   * `update()`，少了回调读数就会停在上一帧的全量数字。
+   */
+  function writeSkewMeta(info) {
+    if (!info || !lastSkewLatest) { return; }
+    /* 没缩放时不写"缩放 1–N/N"这一段，免得标题里常驻一个没有信息量的读数。 */
+    var zoom = info.view
+      ? " · 缩放 " + info.view.from + "–" + info.view.to + "/" + info.view.cols + " 列"
+      : "";
+    setText("skew-meta", info.points + "/" + info.cols + " 点 · 当前 " +
+      signed(lastSkewLatest.skew, CFG.decimals.skew) + " · ATM " +
+      num(lastSkewLatest.atm, CFG.decimals.iv) + " · " + currentViewLabel() +
+      " · " + currentPeriodLabel() + zoom);
   }
 
   function render(frame) {

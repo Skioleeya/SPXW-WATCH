@@ -27,6 +27,7 @@ if str(ROOT) not in sys.path:  # 支持 `python tools/selfcheck.py` 直接运行
 MAX_LINES = 400
 CONFIG_DIR = ROOT / "config"
 CONFIG_SUFFIX = ".json"
+WEB_DIR = ROOT / "web"
 
 # 层号越小越底层。同一层之间允许互相 import。
 LAYER_OF: dict[str, int] = {
@@ -55,7 +56,11 @@ NON_SOURCE_DIRS: dict[str, str] = {
              "内含探针归档，不是产品代码",
     ".workbuddy-ai": "工作记忆，随会话变动，不是产品代码",
     "logs": "运行日志输出目录",
-    "web": "前端静态资源（JS/CSS/HTML），不含 Python",
+    "tmp": "临时探针落点（2026-09-13 KAI 定：一次性脚本一律写在 <项目根>/tmp/）；"
+           "里面是随手写的取样脚本与产物，不是产品代码。"
+           "⚠️ 本条与 .gitignore 的 `tmp/` 是一对，缺一条就会让探针被 [1][2][9][10] 误报",
+    "web": "前端静态资源（JS/CSS/HTML），不含 Python —— 故不进任何 AST 类检查。"
+           "但**长度与语言无关**：其中的 .js 由 iter_web_scripts() 单独送进 [1] 长度门禁",
 }
 
 # 契约层与测试目录豁免"单一职能"的类数量约束：
@@ -76,7 +81,7 @@ REQUIRED_KEYS: dict[str, tuple[str, ...]] = {
     "persistence": ("enabled", "db_path", "queue_maxsize", "write_interval_s"),
     "serialization": ("heatmap_bucket_seconds", "heatmap_color_quantile",
                       "heatmap_color_floor_vol_points", "iv_decimals",
-                      "impulse_decimals", "skew_scale_window_seconds"),
+                      "impulse_decimals"),
     "transport": ("host", "http_port", "ws_path", "push_interval_ms",
                   "client_queue_size"),
     "logging": ("level", "format"),
@@ -133,6 +138,21 @@ def iter_py_files() -> list[Path]:
 
 def rel_of(path: Path) -> str:
     return path.relative_to(ROOT).as_posix()
+
+
+def iter_web_scripts() -> list[Path]:
+    """``web/`` 下的前端脚本（``*.js``），按路径排序。
+
+    为什么单独开一支而不是并进 ``iter_py_files()``：``.js`` 进不了 AST 类检查
+    （[2] 分层、[9] 单一职能、[10] 硬编码都是按 Python 语法树扫的），但**文件
+    长度与语言无关** —— 一个 540 行的 IIFE 同样读不动。所以只把 [1] 这一项
+    扩到前端，其余检查维持只认 ``.py``。
+
+    按**目录枚举**而不是写死名单：2026-09-13 的教训是名单漏一个就等于漏一个
+    盲区（``check_web_syntax`` 之前只覆盖 4 个文件，``skew.js`` 整文件语法错误
+    却全绿）。新增前端文件必须自动纳入。
+    """
+    return sorted(WEB_DIR.glob("*.js"))
 
 
 def parse_file(path: Path) -> ast.Module:

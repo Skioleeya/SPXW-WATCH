@@ -6,9 +6,12 @@
 2. 断代标记 ``break`` 被保留。
 3. 同一桶多次写入：``INSERT OR REPLACE`` 幂等，最终值正确。
 4. 队列满时丢桶：``dropped_count`` 递增，不抛异常。
-5. ``load_snapshot`` 后 ``build()`` 的 ΔIV 与直接计算一致。
+5. ``load_snapshot`` 后引擎状态与落盘内容一致（行数、断代数、断代桶）。
 6. 冷数据的键序恒为**降序**，与 ``_buckets`` 的首次出现顺序无关，且与对外帧
    的 ``strikes`` 同向（高行权价在前）。
+
+注：本文件**不**覆盖 ``build()`` 的 ΔIV（``_row_values`` 的前向填充与留白由
+``tools/check_reconnect_gap.py`` 覆盖），此前 docstring 声称覆盖，与代码不符。
 """
 from __future__ import annotations
 
@@ -21,8 +24,9 @@ from unittest.mock import MagicMock
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
-from features.heatmap_engine import HeatmapEngine
-from features.persistence import AsyncPersistenceWriter
+from config import loader  # noqa: E402
+from features.heatmap_engine import HeatmapEngine  # noqa: E402
+from features.persistence import AsyncPersistenceWriter  # noqa: E402
 
 
 def _make_clock() -> MagicMock:
@@ -37,11 +41,21 @@ def _make_clock() -> MagicMock:
 
 
 def _make_serial_cfg() -> dict:
-    return {
-        "heatmap_max_buckets": 780,
-        "heatmap_min_buckets": 2,
-        "heatmap_feed_gap_s": 300.0,
-    }
+    """串行化配置：**直接用真配置，不要在这里手写键表**。
+
+    ``HeatmapEngine.__init__`` 每加一个必读键（如 ``6828e3a`` 新增的
+    ``heatmap_max_ffill_buckets``），手写夹具就会漏，而 ``config.loader`` 按
+    「缺键即抛错」fail-fast ⇒ 整条回归变红。2026-09-14 实测：本文件正是这样
+    自 ``6828e3a`` 起红了（``3/5 通过``）而无人察觉 —— 手写的测试夹具是
+    **第二份真相**，必然漂移。真配置是唯一真相，与
+    ``tools/check_reconnect_gap.py`` 同一手法。
+
+    本回归不碰 ``_prune``（只在 ``ingest`` 里用 ``_max_buckets``）与 ``build()``
+    （只在里面用 ``_min_buckets``），所以网格大小取真值即可，无需覆盖。
+
+    返回**浅拷贝** —— ``loader.load`` 带缓存，直接改会污染其它检查。
+    """
+    return dict(loader.load("serialization"))
 
 
 def _make_persist_cfg(db_path: Path) -> dict:

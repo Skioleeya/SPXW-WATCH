@@ -90,17 +90,36 @@
 ## 6. 回归与检查器纪律
 
 ### 6.1 基线验证命令
+
+> ⚠️ **必须用项目自带的 `venv/Scripts/python.exe`，不要用裸 `python`。** 裸解释器没有
+> `ib_async` / `aiohttp` ⇒ `check_reconnect_flow`、`check_web_contract` 在 **import 阶段**就崩，
+> 且 `run.py --check` 的 `[13]` 会**误报**"端口开放但 WS 握手失败，跳过动态检查"。
+> 同一份代码、同一时刻实测：裸 `python` = **15 RC=0 / 5 RC=1**；`venv` = **17 RC=0 / 3 RC=1**。
+> **看到红先确认解释器，再怀疑代码。**
+
 ```
-python run.py --check                    # RC=0（13 组；2026-09-14 实跑）
-python tools/smoke_test.py               # RC=0
-python tools/check_*.py                  # 20 个；19 RC=0 / 1 RC=1（2026-09-14 实跑）
-                                         #   RC=1 = check_ws_compression：需服务在跑，
-                                         #   实测压缩比 71.5% < 80% 阈值（既有失败）
-python tools/check_skew_viewport.py      # RC=0（21 项 + 7 变异）
-python tools/check_skew_colors.py        # RC=0（6 项 + 3 变异）三条 IV 曲线配色
-python tools/check_skew_alignment.py     # RC=0
-python tools/check_web_syntax.py         # RC=0（13 个 JS 文件）
+<VENV>/python.exe run.py --check                  # RC=0（13 组；2026-09-14 10:3x 实跑）
+<VENV>/python.exe tools/smoke_test.py             # RC=0
+<VENV>/python.exe tools/check_*.py                # 20 个；18 RC=0 / 2 RC=1（2026-09-14 10:3x 实跑）
+                                                  #   红 = check_page_render / check_ws_compression
+<VENV>/python.exe tools/check_persistence.py      # RC=0（5/5）
+<VENV>/python.exe tools/check_skew_viewport.py    # RC=0（21 项 + 7 变异）
+<VENV>/python.exe tools/check_skew_colors.py      # RC=0（6 项 + 3 变异）三条 IV 曲线配色
+<VENV>/python.exe tools/check_skew_alignment.py   # RC=0
+<VENV>/python.exe tools/check_web_syntax.py       # RC=0（13 个 JS 文件）
+<VENV>/python.exe tools/ws_probe.py               # RC=0（需服务在跑）
 ```
+
+**两个已知红，都不是"随手就能改绿"的：**
+- `check_ws_compression` —— 压缩比 71.8% < 80% 阈值（需服务在跑）。是阈值与实测的取舍问题。
+- `check_page_render` —— 两件事叠加，**其中一件结构性不可能通过**：
+  1. 断言「有且仅有一个周期处于选中态」（`tools/check_page_render.py:218`）把页面上**所有**
+     `<button>` 收成一个列表，而页面有**两组**独立按钮（会话 `全时段/GTH/RTH` + 周期
+     `30秒/1分/…`），各有一个 `on` ⇒ `len(chosen) == 1` **恒不成立**（实测选中 `全时段、1分`）。
+  2. 虚拟时间窗口极窄：`--budget 14000` 太小（0 个 canvas）→ `20000` 面板全出图但报
+     「数据陈旧 19s」→ `120000` 报「数据中断 55s」。旧记的「`--budget 60000` 即恢复」
+     **已失效** —— 窗口会随首帧体积移动（当帧 161 KB）。⇒ 要修它，先改断言语义、再换掉
+     虚拟时间方案，不是调个数就完事。
 
 **node 沙箱的脚本清单只有一个来源**：`tools/skew_reference.py::WEB_SCRIPTS`。
 `web/` 拆文件时忘了补它，会让回归在**驱动阶段**就崩（`P.alignSkew is not a function`）
@@ -122,6 +141,17 @@ period_aggregation）同时红。加/删 `web/*.js` 后先看这里。
   `skew_option.js`，viewport 回归的 4 条变异全部失效（检查器**主动报出来**了，
   没有静默通过 —— 这是好设计，别把它改回去）。
 - 判断"修复真的被守住"的唯一标准：**摘掉修复要能报 FAIL**。跑 `--selftest`。
+
+### 6.5 测试夹具不得手写键表
+- 回归里给引擎造配置时，**从真配置派生**：`dict(loader.load("serialization"))`
+  （取浅拷贝 —— `loader.load` 带缓存，直接改会污染其它检查），与
+  `tools/check_reconnect_gap.py` 同一手法。**不要手写整份键表。**
+- 理由：`HeatmapEngine.__init__` 每加一个必读键，手写夹具就漏，而加载器按
+  "缺键即抛错" fail-fast ⇒ **整条回归变红**。手写的测试夹具是**第二份真相**，必然漂移。
+- 2026-09-14 实例：`tools/check_persistence.py` 手写 3 个键，`6828e3a` 新增
+  `heatmap_max_ffill_buckets` 后它**自那天起就是红的**（`3/5 通过`）而无人察觉 ——
+  因为没人按目录清点跑过全部 20 条。已改为派生（`5/5`）。
+- 排查手法：`git log -S '<新键>' -- tools/` 若只有产品代码命中、测试夹具没命中，就是漏了。
 
 ## 7. 环境
 

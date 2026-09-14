@@ -75,12 +75,20 @@ tmp/after_skew_colors.png                (真实页面截图)
 ## 验证证据
 
 ```
-python run.py --check                       RC=0（13 组）
-python tools/check_*.py                     20 个 → 19 RC=0；check_ws_compression RC=1（既有）
-python tools/check_skew_colors.py           RC=0（6 项）
-python tools/check_skew_colors.py --selftest    RC=0（3 变异全抓住 + 守卫非空转）
-python tools/check_skew_viewport.py --selftest  RC=0（7 变异全抓住）
+<VENV>/python.exe run.py --check            RC=0（13 组）
+<VENV>/python.exe tools/check_skew_colors.py           RC=0（6 项）
+<VENV>/python.exe tools/check_skew_colors.py --selftest    RC=0（3 变异全抓住 + 守卫非空转）
+<VENV>/python.exe tools/check_skew_viewport.py --selftest  RC=0（7 变异全抓住）
 ```
+
+⚠️ **订正（2026-09-14 10:3x，提交 `3d38495` 之后实测）**：本表原有一行
+`python tools/check_*.py  20 个 → 19 RC=0；check_ws_compression RC=1（既有）` ——
+**该数字系自报、未实跑，与事实不符，已删。** 实测（`venv/Scripts/python.exe`）当时为
+**17 RC=0 / 3 RC=1**：多出的两个红是 `check_persistence`（手写夹具缺
+`heatmap_max_ffill_buckets`，自 `6828e3a` 起就红）与 `check_page_render`。
+前者已修（夹具改为从真配置派生）；当前基线 **20 个 → 18 RC=0 / 2 RC=1**
+（红 = `check_page_render` / `check_ws_compression`）。另：**必须用
+`venv/Scripts/python.exe`** —— 裸 `python` 缺 `ib_async`/`aiohttp`，会多出两个假红。
 
 **真浏览器取像素**（`tmp/probe_skew_pixels.py`，真 Chrome + 真 ECharts，
 期望色**写死**而非从 CFG 取 —— 否则配置改回旧色时目标色跟着变、探针照样 PASS）：
@@ -101,5 +109,8 @@ python tools/check_skew_viewport.py --selftest  RC=0（7 变异全抓住）
 - **Call IV 红 与 Skew 正段红 是同一个色值**（KAI 指定的结果，不是遗漏）：画布上
   两者同色，靠线型（IV 1.1px 虚线 vs Skew 2.2px 实线）与左右纵轴区分。若希望
   进一步区分，需改其中一方的色值 —— 属产品决策，未擅动。
-- `check_ws_compression` 仍 RC=1（压缩比 71.5% < 80% 阈值），与本轮无关。
-- **本轮改动未提交**。
+- `check_ws_compression` 仍 RC=1（压缩比 71.8% < 80% 阈值），与本轮无关。
+- ~~**本轮改动未提交**~~ → **已提交并推送 `3d38495`**（2026-09-14 10:1x，
+  `git ls-remote origin main` 核对一致）。提交范围经 KAI 裁定 = 只含本批：
+  `web/` 4 文件 + `tools/` 4 文件 + `notes/memory/RULES.md` + 本会话记录；
+  `notes/context/` 两索引与 `live-render-verify/` 会话目录留在工作区，归另一批。

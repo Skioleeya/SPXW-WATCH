@@ -192,7 +192,57 @@ def check_subscription_capacity(loaded: dict[str, dict]) -> int:
 
     ok(f"窗口容差 {tolerance} 档 ≥ 重建触发 {trigger} 档"
        f"（现价在容差带内往返不掉档）")
-    return 0
+    # 以上每条不变量命中即 return 1（提前退）；走到这里说明前几条全过，
+    # 故直接返回子检查的计数，不引入本函数从未使用的 failures 变量。
+    return _check_model_greeks_prerequisite(loaded)
+
+
+def _check_model_greeks_prerequisite(loaded: dict[str, dict]) -> int:
+    """
+    ``use_model_greeks`` 必须是 true —— 它是热力图正确性的**前置条件**。
+
+    为什么这是硬约束而不仅是"偏好"
+    ------------------------------
+    热力图每一行（一个行权价）只保留**一条**序列，键**不带方向**
+    （``HeatmapEngine`` 的 ``_buckets[strike][bucket]``）。而现价在动，
+    现价穿越某个行权价时，该行的取边就按 ``StrikeWindow.otm_right()``
+    从 Call 翻成 Put（或反之）。这条合并序列**只在两侧 IV 相等时才连续**。
+
+    实测（2026-09-14，见 ``notes/memory/TROUBLESHOOTING.md §10``）：
+      ``use_model_greeks=true`` → Put/Call **差 0.000**（IBKR 的 model IV
+      一个行权价只给一个值）；
+      关掉后走 last 口径 → 两侧差 **5.5~6.3 个波动率点**，而色标只有 ±0.5。
+
+    也就是说：把这里误改成 false，程序**照常启动、照常出图、不报任何错**，
+    只是在每次现价穿越行权价时打出一根**随现价漂移的竖直假亮条** —— 典型
+    的"静默错值"，正是本项目最怕的一类。此前这条依赖**只写在代码注释里**
+    （``features/heatmap_engine.py`` / ``strike_window.py``），没有任何门禁守。
+
+    为什么放在 [6]
+    --------------
+    它和本节的窗口/容量不变量同族：都是"单个配置值单独看都合法，但组合起来
+    违反一个跨模块不变量"。放这里不新增编号，也就不牵动 ``selfcheck.py``
+    的清单与 RULES/SKILL 的映射。
+    """
+    ibkr = loaded.get("ibkr")
+    if ibkr is None:
+        return 0  # 可读性 [3] 已报错，不重复报
+
+    value = ibkr.get("use_model_greeks")
+    if value is True:
+        ok("use_model_greeks=true（热力图合并序列的前置条件成立）")
+        return 0
+
+    if value is False:
+        fail("config/ibkr.json::use_model_greeks=false：热力图每档只留一条不带方向"
+             "的 IV 序列，现价穿越行权价时取边 Put↔Call 翻转；只有 model 口径两侧"
+             "同值（实测差 0.000）才无跳变。关闭后走 last 口径两侧差 5.5~6.3 个"
+             "波动率点（色标仅 ±0.5）⇒ 每次穿越打出一根随现价漂移的竖直假亮条，"
+             "且不报任何错。见 notes/memory/TROUBLESHOOTING.md §10")
+        return 1
+
+    fail(f"config/ibkr.json::use_model_greeks={value!r} 不是布尔值")
+    return 1
 
 
 def check_config_ownership() -> int:

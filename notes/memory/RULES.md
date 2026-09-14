@@ -177,6 +177,14 @@ period_aggregation）同时红。加/删 `web/*.js` 后先看这里。
   对称的，第 4 根的行权价会随**订阅**半径漂移（12 档 → 6455；20 档 → 6415，落到显示
   窗口之外 ⇒ 假红）。用 `tools.fixtures.display_window_strike()`，它锚在现价上并按
   显示半径设界。
+- **`use_model_greeks` 必须为 `true`**（2026-09-14 加入，`selfcheck_config.py [6]` 尾部
+  `_check_model_greeks_prerequisite`）：这是**跨模块耦合**——`config/ibkr.json` 的一个
+  开关 ⇔ 热力图合并序列的正确性。热力图每档只留一条**不带方向**的 IV 序列，现价穿越
+  行权价时取边 Put↔Call 翻转，只有 model 口径两侧同值（实测差 0.000）才无跳变；关闭后
+  走 last 口径两侧差 5.5~6.3 个波动率点（色标仅 ±0.5）⇒ 每次穿越打出一根随现价漂移的
+  竖直假亮条，**且不报任何错**。它此前只写在 `heatmap_engine.py` / `strike_window.py`
+  的注释里（无门禁）。变异验证：置 `false` → `[FAIL]` + `RC=1`；置字符串 `"true"`
+  → `[FAIL]`（类型错也要响）。逐档实测表见 `TROUBLESHOOTING.md §10`。
 
 ## 7. 环境
 

@@ -137,12 +137,15 @@ class RecordingSink:
 # 断言
 # --------------------------------------------------------------------------- #
 
-PASSED = True
+FAILURES = 0
 
 
 def check(label: str, condition: bool, detail: str = "") -> None:
-    global PASSED
-    PASSED &= bool(condition)
+    """记一笔并打印。``FAILURES`` 是**失败计数** —— 与 ``run_*_checks()`` 的
+    契约一致（返回失败数，供 ``selfcheck`` 累加），不是布尔。"""
+    global FAILURES
+    if not condition:
+        FAILURES += 1
     print(f"  {GREEN if condition else RED}[{'ok' if condition else 'FAIL'}]{RESET} "
           f"{label}" + (f"  {detail}" if detail else ""))
 
@@ -161,7 +164,14 @@ def build(use_model: bool):
     return router, sink
 
 
-def main() -> int:
+def run_tick_router_checks() -> int:
+    """供 ``run.py --check``（``[14]``）调用的入口。返回**失败数**。
+
+    ``--check`` 的约定：``run_*_checks() -> int`` 返回失败条数，由编排器累加。
+    这里不用布尔，因为自检汇总的分母是"多少项不通过"。
+    """
+    global FAILURES
+    FAILURES = 0
     print("=" * 72)
     print("TickRouter 回归（L1 采集层唯一被离线执行的一次）")
     print("=" * 72)
@@ -169,7 +179,7 @@ def main() -> int:
     # ------------------------------------------------------------------ #
     # 1. MODEL_OPTION（tick 13）正常路径
     # ------------------------------------------------------------------ #
-    print("\n[1] MODEL_OPTION（tick 13）正常路径")
+    print("\n1.  MODEL_OPTION（tick 13）正常路径")
     router, sink = build(use_model=True)
     t = option_ticker()
     t.modelGreeks = FakeComputation(implied_vol=0.145, delta=0.52,
@@ -196,7 +206,7 @@ def main() -> int:
     # ------------------------------------------------------------------ #
     # 2. 核心约束：要求模型值时必须拒绝降级来源
     # ------------------------------------------------------------------ #
-    print("\n[2] 核心约束：use_model_greeks=true 时拒绝回退")
+    print("\n2.  核心约束：use_model_greeks=true 时拒绝回退")
     router, sink = build(use_model=True)
     t = option_ticker()
     t.lastGreeks = FakeComputation(implied_vol=0.145, delta=0.52)   # 只有非模型值
@@ -225,7 +235,7 @@ def main() -> int:
     # ------------------------------------------------------------------ #
     # 3. 显式关闭模型值时才允许降级
     # ------------------------------------------------------------------ #
-    print("\n[3] use_model_greeks=false 时才允许降级")
+    print("\n3.  use_model_greeks=false 时才允许降级")
     router, sink = build(use_model=False)
     t = option_ticker()
     t.lastGreeks = FakeComputation(implied_vol=0.145, delta=0.48)
@@ -239,7 +249,7 @@ def main() -> int:
     # ------------------------------------------------------------------ #
     # 4. IV 越界与脏值一律拒绝
     # ------------------------------------------------------------------ #
-    print("\n[4] IV 越界与脏值一律拒绝")
+    print("\n4.  IV 越界与脏值一律拒绝")
     max_iv = loader.as_float(loader.load("ibkr"), "max_iv", module="ibkr")
     cases = [
         ("IV 超过 max_iv", FakeComputation(implied_vol=max_iv + 0.5)),
@@ -270,7 +280,7 @@ def main() -> int:
     # ------------------------------------------------------------------ #
     # 5. 标的 tick 分流
     # ------------------------------------------------------------------ #
-    print("\n[5] 标的 tick 分流")
+    print("\n5.  标的 tick 分流")
     router, sink = build(use_model=True)
     spot = FakeTicker(FakeContract(con_id=SPOT_CON_ID, sec_type="IND"), mark=6500.5)
     router.handle_tickers([spot])
@@ -290,7 +300,7 @@ def main() -> int:
     # ------------------------------------------------------------------ #
     # 6. 坏数据不能打断整批
     # ------------------------------------------------------------------ #
-    print("\n[6] 单条坏数据不得打断整批")
+    print("\n6.  单条坏数据不得打断整批")
     router, sink = build(use_model=True)
     good_a = option_ticker(strike=6495.0, con_id=201)
     good_a.modelGreeks = FakeComputation(implied_vol=0.14)
@@ -305,7 +315,7 @@ def main() -> int:
     # ------------------------------------------------------------------ #
     # 7. 非期权非标的的 ticker 应被安静忽略
     # ------------------------------------------------------------------ #
-    print("\n[7] 无关 ticker 安静忽略")
+    print("\n7.  无关 ticker 安静忽略")
     router, sink = build(use_model=True)
     junk = FakeTicker(FakeContract(con_id=555, sec_type="STK"))  # 没有 strike/right
     routed = router.handle_tickers([junk])
@@ -315,10 +325,15 @@ def main() -> int:
 
     print()
     print("=" * 72)
-    print(f"{GREEN}结果: 全部通过{RESET}" if PASSED
-          else f"{RED}结果: 存在失败项{RESET}")
+    print(f"{GREEN}结果: 全部通过{RESET}" if not FAILURES
+          else f"{RED}结果: {FAILURES} 项不通过{RESET}")
     print("=" * 72)
-    return 0 if PASSED else 1
+    return FAILURES
+
+
+def main() -> int:
+    """手动单跑：``python tools/check_tick_router.py``。返回进程退出码。"""
+    return 1 if run_tick_router_checks() else 0
 
 
 if __name__ == "__main__":

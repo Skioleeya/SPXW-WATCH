@@ -20,6 +20,9 @@ L6 — 架构与配置自检（编排器）。
      且 ``prune()`` 真实裁剪（不是抛异常后被吞掉）。         （check_clock_protocol）
 [13] 联通与数据通道：若 8060 有服务则连 WS 抓帧校验结构；
      无服务时跳过（非交易日预期）。                         （selfcheck_connectivity）
+[14] TickRouter 语义：采集层是**唯一从未被离线执行过**的一层，本项用忠实模拟的
+     ib_async 结构把它跑起来，断言"要求模型值时必须拒绝降级"等核心约束。
+                                                            （check_tick_router）
 
 检查项 [1]–[7] 直接对应项目五条硬性要求；[8] 是踩坑之后加的静态护栏，
 [9][10] 把原本只写在 README 里的第 2、3 条变成了可执行检查；
@@ -58,6 +61,7 @@ from tools.selfcheck_duty import check_single_duty  # noqa: E402
 from tools.selfcheck_hardcode import check_hardcode  # noqa: E402
 from tools.selfcheck_slots import check_slots  # noqa: E402
 from tools.check_clock_protocol import run_clock_checks  # noqa: E402
+from tools.check_tick_router import run_tick_router_checks  # noqa: E402
 from tools.selfcheck_connectivity import check_connectivity  # noqa: E402
 from tools.selfcheck_structure import check_file_sizes, check_layering  # noqa: E402
 
@@ -86,6 +90,9 @@ def run_selfcheck() -> int:
 
     print("\n[12] 时钟协议与裁剪路径")
     failures += run_clock_checks()
+
+    print("\n[14] TickRouter 语义（采集层）")
+    failures += run_tick_router_checks()
 
     failures += check_connectivity()
 

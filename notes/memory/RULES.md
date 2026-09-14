@@ -99,7 +99,7 @@
 > `venv` = **17 RC=0 / 3 RC=1**。**看到红先确认解释器，再怀疑代码。**
 
 ```
-<VENV>/python.exe run.py --check                  # RC=0（13 组；2026-09-14 11:1x 实跑，需服务在跑）
+<VENV>/python.exe run.py --check                  # RC=0（14 组；2026-09-14 13:1x 实跑，需服务在跑）
 <VENV>/python.exe tools/smoke_test.py             # RC=0
 <VENV>/python.exe tools/check_*.py                # 21 个；19 RC=0 / 2 RC=1（2026-09-14 11:1x 实跑）
                                                   #   红 = check_page_render / check_web_contract
@@ -116,7 +116,18 @@
 <VENV>/python.exe tools/ws_probe.py               # RC=0（需服务在跑）
 ```
 
+**[14] TickRouter 语义（2026-09-14 接入，此前是"孤岛回归"）**
+`tools/check_tick_router.py` 原本谁也不调（`grep -rn check_tick_router tools/ run.py` 只命中它
+自己的 docstring），已被 `selfcheck.py` 作为第 14 组接入。它守的是**采集层唯一被离线执行的
+机会**：`acquisition/` 在模拟模式下被延迟 import 绕开，缺陷只在实盘暴露。用忠实模拟的
+`ib_async` 结构断言 7 组语义（拒绝降级、IV 越界、标的分流、坏数据不打断整批等，共 27 条）。
+- **子标题用 `1. ` … `7. `，不得用 `[1]` … `[7]`** —— 会与顶层 `--check` 编号撞车，
+  让 `grep '^\[1\]'` 同时命中两处。
+- 改造时把全局 `PASSED`（布尔）换成 `FAILURES`（计数），并在入口 `FAILURES = 0` 重置
+  —— 已验证**重复调用幂等**（连跑三次返回 `0 0 0`）；不重置会跨次累积。
+
 **两个已知红，都不是"随手就能改绿"的：**
+
 - `check_ws_compression` —— **状态依赖，不是稳定红**：2026-09-14 10:3x 实测
   「压缩比 71.8% < 80% 阈值」，同日 11:1x 复跑却是 RC=0，两次之间只发生过 IBKR 断线
   （未动该门禁、也未动被测代码）。⇒ 红/绿随行情状态漂移，机制**未验证**。

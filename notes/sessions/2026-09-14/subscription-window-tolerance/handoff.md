@@ -176,10 +176,15 @@ check_window_tolerance → RC=1（[1] 红 + [2] 三条路径分别 52 / 76 / 257
 - ~~**±20 需要重启 `run.py` 才生效。** 当前常驻进程仍是 `±12`（`run.py --check [13]` 报
   `订阅数 48/92`；按 20 应为 81）。未强杀 KAI 的常驻进程。~~
   **已解决**（见「订正」）：服务已重启，流水线报 `订阅 80/92` ⇒ ±20 生效。
-- **`tools/selfcheck_config.py::check_subscription_capacity` 的 `projected = 4 * side + 1`
-  仍未订正。** 它是既有代码（非本轮引入），口径与实测不符（±20 实为 80 条期权）；
-  `+1` 想算的是现货那条，但它既没算 3 个月 ES 期货、又与 `订阅 N/cap` 的口径不同。
-  改它会**把上限从 ±22 放宽到 ±23**，属门禁行为变更 ⇒ 留给 KAI 定，本轮只记录。
+- ~~**`tools/selfcheck_config.py::check_subscription_capacity` 的 `projected = 4 * side + 1`
+  仍未订正。** 它是既有代码（非本轮引入），口径与实测不符（±20 实为 80 条期权）……~~
+  **作废 —— 该结论本身是错的**（2026-09-14 12:4x 实证）。`4 × side + 1` 是**容量口径**
+  （含现货那 1 条行情行，用于对 IBKR 100 条 / 自设 92 条上限核算），与
+  `ChainResolver.projected_subscriptions()`（`acquisition/chain_resolver.py:74`）**一致**；
+  日志里的 `订阅 N/92` 是**计数口径** `SubscriptionManager.count`（`subscription_manager.py:103`）
+  = `4 × side`，现货不进 manager。**两者都对、各有用途，没有任何东西需要改**。
+  我用仓库代码实测：`effective_each_side()=20`、`projected_subscriptions()=81`、计数口径 `80`。
+  见 `notes/memory/TROUBLESHOOTING.md §11`。
 - **容差 8 档 = 40 点只是"够用"，不是"够到趋势日"。** 单边趋势超过 40 点时，滚出的档位
   仍会在显示窗口内留下空洞 —— 这是 KAI 选项 B（`WindowFollower` 改为"走过路径的显示
   窗口并集"，容差 ~105 点）要解决的问题，本轮未做。
@@ -216,9 +221,14 @@ check_window_tolerance → RC=1（[1] 红 + [2] 三条路径分别 52 / 76 / 257
 **已改**：`tools/smoke_test.py::_status()`（→ `4 * each_side`）、`README.md`（→ `4×20 = 80 条`）、
 本目录 `handoff.md` / `project_state.md`。
 
-**未改（留给 KAI）**：`tools/selfcheck_config.py::check_subscription_capacity` 的
-`projected = 4 * side + 1`。见 OPEN-RISKS。
+**未改**：`tools/selfcheck_config.py::check_subscription_capacity` 的
+`projected = 4 * side + 1` —— **实证后确认它是对的**（容量口径，与
+`ChainResolver.projected_subscriptions()` 一致），**不需要改**。见上文 OPEN-RISKS 的作废条目。
 
 **教训**：我为了消掉"手写夹具"这个第二份真相，写了一个**没经过实测核对**的派生公式 ——
-换来的还是第二份真相。夹具改派生时必须拿实盘读数对一次（本次若在改前 `grep` 一次
-`订阅 N/92` 就能立刻发现）。
+换来的还是第二份真相。更糟的是我随后**用错的口径去"订正"对的代码**：把"容量口径 81"与
+"计数口径 80"当成同一个量，于是把 `selfcheck_config` 判成缺陷、写进 OPEN-RISKS 与
+`MEMORY.md`，还差点去改一个本来就正确的门禁。**判据**：核对配置是否生效看计数口径
+（`订阅 N/cap`），核对会不会撞上限看容量口径（`projected_subscriptions`）；谈"订阅数"
+必须先说哪个口径。夹具改派生时必须拿实盘读数对一次（本次若在改前 `grep` 一次
+`订阅 N/92` 就能立刻发现），**且发现数字对不上时先怀疑自己认错了量，再怀疑代码**。

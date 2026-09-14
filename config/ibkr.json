@@ -20,5 +20,6 @@
   "max_iv": 3.0,
   "min_iv": 0.01,
   "max_underlying_age_s": 10.0,
+  "_model_greeks_comment": "⚠️ 本键是热力图的**前置条件**，不是性能偏好，改它前先读 features/heatmap_engine.py 的模块注释。true 时 tick_router 只接受 modelGreeks.impliedVol，而 IBKR 的 model IV **一个行权价只给一个波动率 —— Put 与 Call 同值**。热力图每个行权价只留一条时间序列（键不带方向），现价穿越某档时该行取边会从 Put 翻成 Call；只有两侧同值，翻转才不引入跳变。2026-09-14 实测（SPXW 0DTE，4 档 × 双向，conId 与买卖价均不同）：model 口径两侧差 0.000、报价口径差 ~0.16、最新成交口径差 5.5~6.3 波动率点（而热力图色标量程只有 ±0.5）⇒ 关掉本键，等于每次现价穿越行权价都往图上打一个假的 ΔIV 跳变。",
   "use_model_greeks": true
 }

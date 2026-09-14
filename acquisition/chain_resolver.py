@@ -63,6 +63,12 @@ class ChainResolver:
 
             总订阅数 = 4 × side + 1
 
+        ⚠️ 这是**容量口径**（含现货那 1 条），用于对上限核算。日志里的
+        ``订阅 N/92`` 是**计数口径** ``SubscriptionManager.count`` = ``4 × side``
+        —— 现货由 ``subscribe_spot`` 单独管、不进 manager，所以那里**永远不会**
+        出现 ``4 × side + 1``。两个口径别混（2026-09-14 踩过），
+        见 ``notes/memory/TROUBLESHOOTING.md`` §11。
+
         这里反解出安全上限再与配置值取小，保证**结构上不可能**超限，而不是
         等报错后再补救。
         """

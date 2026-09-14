@@ -98,10 +98,65 @@
 ⇒ 优先怀疑代理规则/节点，其次才是 IBKR 侧。
 
 **处置顺序**：① 代理给 IBKR 直连（或临时关 TUN）→ ② 重启 IB Gateway（强制重新登录 +
-重连全部农场）→ ③ 再拉 `run.py`，验证 `订阅 81/92`（±20 生效的判据）。
+重连全部农场）→ ③ 再拉 `run.py`，验证 `订阅 80/92`（±20 生效的判据）。
 
 **不要做**：放宽 `spot_ready_timeout_s`、改 `_await_spot`、反复重启 `run.py`。
 前两者是对外部条件打补丁，会让"拿冻结指数顶上"重新变成可能（速查卡 H/I）。
 
 **复盘注意**：`logs/spxw_swatch.log` **不含应用层告警**（`FeedService._note()` 不写 logging，
 见项目 `MEMORY.md` 速查卡 R）。查"有没有告警"要看页面状态区，别只看日志。
+
+## 10. 热力图"一行一条序列"依赖 `use_model_greeks = true`（已验证的假设）
+
+**背景**：`HeatmapEngine._buckets` 的键**只认行权价、不带方向**（见 `features/heatmap_engine.py`
+模块 docstring）。所以现价穿越某档时，该行取边从 Put 翻成 Call，而序列保持连续 ——
+**成立的前提是两侧 IV 相等**。这个前提以前只在注释里被"估算"过（"翻转时都在平值附近
+所以差不多"），不足以承重。2026-09-14 用只读探针实测了它。
+
+**实测**（SPXW 0DTE，4 档 × 双向；conId 与买卖价均不同 ⇒ 确认没读错合约）：
+
+| 行权价 | modelIV(P / C) | bidIV(P / C) | lastIV(P / C) |
+|---|---|---|---|
+| 7625 | 14.06 / 14.06 | 14.03 / 14.03 | 15.71 / 10.21 |
+| 7640 | 13.29 / 13.29 | 13.10 / 13.26 | 16.37 / 10.80 |
+
+两侧差：**model 口径 0.000** / 报价口径 ~0.16 / 最新成交口径 **5.5～6.3 波动率点**。
+
+**结论与判据**：`use_model_greeks = true` 时 `tick_router` 只接受 `modelGreeks.impliedVol`，
+IBKR 的 model IV **一个行权价只给一个波动率 ⇒ Put == Call 精确成立**，翻转零跳变。
+关掉该开关后 `tick_router` 按 model → last → bid → ask 降级，两侧就不再同值，
+而热力图色标量程只有 **±0.5**（最新成交口径的 5.5～6.3 足以打满）⇒ **每次现价穿越
+行权价都会在图上打出一个假的 ΔIV 跳变**。
+
+⇒ `config/ibkr.json::use_model_greeks` 是热力图正确性的**前提条件，不是可调的性能选项**。
+改它之前先读 `features/heatmap_engine.py` 与 `features/strike_window.py::otm_right()`
+的 docstring。
+
+**探针**：`tmp/probe_put_call_gap.py`（独立 `client_id`、只读、只 qualify 不订阅全链）。
+**常驻回归**：目前**没有** —— `tools/check_tick_router.py` 已分别跑 `use_model_greeks`
+的 true / false 两条分支（`[2]` / `[3]`），但**没有断言"两侧同值"这个跨模块耦合**。
+待 KAI 定是否补。
+
+## 11. 两个"订阅数"口径别混（2026-09-14 踩过）
+
+同一天里我两次把这两个量当成一个，写错了文档又"订正"回来：
+
+| 口径 | 表达式 | 当前值 | 出处 | 含现货？ |
+|---|---|---|---|---|
+| **容量口径** `projected_subscriptions()` | `4 × side + 1` | **81** | `acquisition/chain_resolver.py:74` | 含（现货也是 1 条行情行） |
+| **计数口径** `SubscriptionManager.count` | `4 × side` | **80** | `acquisition/subscription_manager.py:103` | 不含 |
+
+- 日志打印的是**计数口径**：`app/pipeline.py:318` 打 `订阅 {status.subscribed}/{cap}`，
+  而 `FeedStatus.subscribed = manager.count`（`feed_service.py:117`）。
+  ⇒ 日志里只会看到 `订阅 80/92`，**永远不会出现 81**。
+- `tools/selfcheck_config.py::check_subscription_capacity` 的 `projected = 4*side + 1`
+  用的是**容量口径**，与 `ChainResolver.projected_subscriptions()` 一致，
+  **是对的、不需要改**（我曾误记为"口径不符、待改"，作废）。
+- `tools/smoke_test.py::_status()` 的 `4 * each_side` 模拟的是 `FeedStatus.subscribed`，
+  用**计数口径**，也是对的。
+- 历史读数 `订阅 74/74`（09-11 05:32）**不是反例**：那是窗口**还含中心档**时的旧语义
+  `4 × 18 + 2 = 74`；中心档去掉之后依次是 `72`(±18) / `48`(±12) / `80`(±20)，
+  全部是 4 的整数倍（`grep -o "订阅 [0-9]*/[0-9]*" logs/spxw_swatch.log | sort | uniq -c`）。
+
+**判据**：谈"订阅数"时必须先说是哪个口径。要核对配置是否生效看**计数口径**，
+要核对会不会撞 IBKR 100 条上限看**容量口径**。

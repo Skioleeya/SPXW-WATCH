@@ -374,14 +374,20 @@ def main() -> int:
 def _status(each_side: int, cap: int) -> FeedStatus:
     """采集层健康快照。
 
-    订阅条数**从配置推出来，不手写**：这个夹具喂的正是
-    ``现价 1 条 + each_side 档 × 2 方向 × 2 权利 = 4 × each_side + 1`` 条行情。
-    原先写死 74 —— 它跟 4×12+1 = 49、4×20+1 = 81 都对不上，是一份凭空多出来的
-    真相；订阅半径一改，这个数字就开始撒谎。
+    订阅条数**从配置推出来，不手写**：窗口是
+    ``ChainResolver.window()`` 的 ``below[-side:] + above[:side]``，即
+    ``each_side 档 × 2 方向``，**不含中心档**；再乘 Put/Call 两个权利 ⇒
+    ``4 × each_side`` 条。现货是**另一条**订阅（``subscribe_spot``），
+    不进 ``SubscriptionManager.count``，故**不加 1**。
+
+    实盘核对（``logs/spxw_swatch.log`` 的 ``订阅 N/92``）：±12 → 48、±18 → 72、
+    ±20 → 80，全是 4 的整数倍。原先写死 74 是凭空多出来的真相；我随后改成的
+    ``4 × each_side + 1``（49 / 81）**同样错**——那个 +1 把现货算进了
+    manager 的计数里。
     """
     return FeedStatus(
         mode=FeedMode.LIVE, connection=ConnectionState.CONNECTED,
-        subscribed=4 * each_side + 1, subscription_cap=cap,
+        subscribed=4 * each_side, subscription_cap=cap,
     )
 
 

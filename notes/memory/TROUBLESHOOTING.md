@@ -69,3 +69,39 @@
 ## 8. 限速桶读数
 
 - **不上前端**（KAI 决策，`web/` 不动）
+
+## 9. IBKR 美国农场掉线 ⇒ Error 10197 / `SpotUnavailableError`
+
+**现象**：`run.py` 启动即 fail-closed ——
+`Error 10197 No market data during competing live session` 打在 reqId 4（SPX 指数）
++ 6/7/8（ES 期货），随后 `core.errors.SpotUnavailableError: 20s 内未收到标的现价`。
+常驻进程则表现为**现价冻结**（2026-09-14 10:46:06 起 `7601.06` 恒定 58 分钟），
+但仍照常推帧、日志里毫无异样。
+
+**判据（三条一起看，缺一条都可能误判）**：
+
+1. **`qualify` 成功而行情被拒** ⇒ 不是合约问题，是行情会话/农场。
+   （合约详情走另一套服务，农场挂了它照样通。）
+2. **`Error 1102` 的"已连接农场"清单里缺 `usfarm.nj` / `usfuture` / `usopt`** ⇒ 美国农场掉线。
+   正常应为 `usfarm.nj; hfarm; usfuture; usopt; secdefhk`（`apachmds` 常掉，**不影响美股**，
+   不要拿它当判据）。2026-09-14 盘中从 09:28 的完整清单掉到 11:25 的 `hfarm; secdefhk`。
+3. **独立 `client_id` 探针复现** ⇒ 账户/网络级，与 `run.py` 代码无关。
+
+**探针**：`tmp/probe_ibkr_spot.py` —— 独立 `client_id=99`、只读、不订期权，
+打印 `managedAccounts` / 各合约 `marketDataType` / 全部错误码与农场事件。
+**这是把"代码问题"与"外部条件"分开的最快手段；不要用反复重启 `run.py` 来试**
+（两次同样的失败只是噪声，不是信息）。
+
+**本机特有因素（2026-09-14）**：默认路由整个走 **`Meta Tunnel`**（Clash.Meta / mihomo TUN，
+`198.18.0.0/30`，网关 `198.18.0.1`）；`ibgateway.exe` 的三个出站 ESTABLISHED 全部指向
+`198.18.0.255:4001/4000`（fake-IP）。**香港农场活、美国农场死**的选择性
+⇒ 优先怀疑代理规则/节点，其次才是 IBKR 侧。
+
+**处置顺序**：① 代理给 IBKR 直连（或临时关 TUN）→ ② 重启 IB Gateway（强制重新登录 +
+重连全部农场）→ ③ 再拉 `run.py`，验证 `订阅 81/92`（±20 生效的判据）。
+
+**不要做**：放宽 `spot_ready_timeout_s`、改 `_await_spot`、反复重启 `run.py`。
+前两者是对外部条件打补丁，会让"拿冻结指数顶上"重新变成可能（速查卡 H/I）。
+
+**复盘注意**：`logs/spxw_swatch.log` **不含应用层告警**（`FeedService._note()` 不写 logging，
+见项目 `MEMORY.md` 速查卡 R）。查"有没有告警"要看页面状态区，别只看日志。

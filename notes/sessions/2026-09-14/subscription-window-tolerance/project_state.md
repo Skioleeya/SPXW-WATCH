@@ -68,8 +68,11 @@ KAI 驳回 —— 拿观测去拟合阈值就是吹绿。`check_ws_compression` 
 
 ### 硬编码的测试夹具就是第二份真相
 
-`smoke_test::_status()` 里 `subscribed=74` 与 4×12+1=49、4×20+1=81 都对不上 ——
-它从来没有来源，只是没人核对。已改为 `4 × each_side + 1`。
+`smoke_test::_status()` 里 `subscribed=74` 与任何真实取值都对不上 ——
+它从来没有来源，只是没人核对。已改为从配置派生。
+⚠️ **当时写的 `4 × each_side + 1` 也是错的**：正确口径是 `4 × each_side`
+（窗口 `below[-side:] + above[:side]` 不含中心档；现货单独订阅、不计入 `count`）。
+实测 `订阅 N/92`：±12 → 48、±18 → 72、±20 → 80，全是 4 的整数倍。见 `handoff.md`「订正」。
 与 `check_persistence` 手写配置夹具（`RULES.md §6.5`）是同一类问题。
 
 ### `cancel_stale_before_add` 与 `_prune()` 的组合才是空洞成因

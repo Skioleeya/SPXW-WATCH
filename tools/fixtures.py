@@ -201,3 +201,37 @@ class SyntheticSurface:
             round(centre + offset * step, 2)
             for offset in range(-each_side, each_side + 1)
         )
+
+
+def display_window_strike(
+    spot: float,
+    step: float,
+    offset_strikes: int,
+    display_each_side: int,
+) -> float:
+    """取一根**必定落在热力图矩阵里**的现价下方行权价，供回归当观察靶。
+
+    为什么不能用 ``strike_grid(...)[3]``
+    ------------------------------------
+    ``strike_grid`` 生成的是 ``-each_side … +each_side`` 的**对称**阶梯，所以
+    ``grid[3]`` 的行权价 = ``现价 − (each_side − 3) × 步长`` —— 它会随**订阅**半径
+    （``subscription.json::num_strikes_each_side``）一起漂移。2026-09-14 把订阅
+    半径从 12 放宽到 20 时，两个回归的靶档分别从 6455 漂到 6415，落到显示窗口
+    （``features.json::heatmap_rows_each_side``）之外，于是"观察行已建立"变成
+    一条假红 —— 看起来像产品坏了，实际是夹具的锚点错了。
+
+    靶档必须锚在**现价**上，并按**显示**半径设界（热力图纵轴只铺显示窗口那几档，
+    与订阅半径无关）。偏移越界就直接抛错：那说明回归本身失效了，而不是产品代码
+    出错 —— 此时静默地返回一根窗口外的行权价，会让回归变成一条永远报红的噪声。
+    """
+    if offset_strikes >= 0:
+        raise ValueError(
+            "观察靶必须在现价下方（偏移取负）—— 热力图对现价下方的行取 Put 一侧"
+        )
+    if abs(offset_strikes) > display_each_side:
+        raise ValueError(
+            f"靶档偏移 {offset_strikes} 档超出显示窗口半径 {display_each_side}"
+            f"（features.json::heatmap_rows_each_side）—— 该行不会出现在矩阵里，"
+            f"本回归将给出假红"
+        )
+    return float(spot + offset_strikes * step)

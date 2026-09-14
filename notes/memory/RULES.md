@@ -99,11 +99,16 @@
 > `venv` = **17 RC=0 / 3 RC=1**。**看到红先确认解释器，再怀疑代码。**
 
 ```
-<VENV>/python.exe run.py --check                  # RC=0（13 组；2026-09-14 10:3x 实跑）
+<VENV>/python.exe run.py --check                  # RC=0（13 组；2026-09-14 11:1x 实跑，需服务在跑）
 <VENV>/python.exe tools/smoke_test.py             # RC=0
-<VENV>/python.exe tools/check_*.py                # 20 个；18 RC=0 / 2 RC=1（2026-09-14 10:3x 实跑）
-                                                  #   红 = check_page_render / check_ws_compression
+<VENV>/python.exe tools/check_*.py                # 21 个；19 RC=0 / 2 RC=1（2026-09-14 11:1x 实跑）
+                                                  #   红 = check_page_render / check_web_contract
+                                                  #   ⚠️ 第二个红会随服务/行情状态换身份：10:3x 是
+                                                  #   check_ws_compression，11:1x 是 check_web_contract
+                                                  #   —— 都是"需服务在跑"那一类，别把当时的红名
+                                                  #   当永久事实。
 <VENV>/python.exe tools/check_persistence.py      # RC=0（5/5）
+<VENV>/python.exe tools/check_window_tolerance.py # RC=0（8 项，含 T−1 / T 边界对照）
 <VENV>/python.exe tools/check_skew_viewport.py    # RC=0（21 项 + 7 变异）
 <VENV>/python.exe tools/check_skew_colors.py      # RC=0（6 项 + 3 变异）三条 IV 曲线配色
 <VENV>/python.exe tools/check_skew_alignment.py   # RC=0
@@ -112,7 +117,10 @@
 ```
 
 **两个已知红，都不是"随手就能改绿"的：**
-- `check_ws_compression` —— 压缩比 71.8% < 80% 阈值（需服务在跑）。是阈值与实测的取舍问题。
+- `check_ws_compression` —— **状态依赖，不是稳定红**：2026-09-14 10:3x 实测
+  「压缩比 71.8% < 80% 阈值」，同日 11:1x 复跑却是 RC=0，两次之间只发生过 IBKR 断线
+  （未动该门禁、也未动被测代码）。⇒ 红/绿随行情状态漂移，机制**未验证**。
+  这也说明"绝对阈值"型的门禁不适合当基线锚点，见 §6.6。
 - `check_page_render` —— 两件事叠加，**其中一件结构性不可能通过**：
   1. 断言「有且仅有一个周期处于选中态」（`tools/check_page_render.py:218`）把页面上**所有**
      `<button>` 收成一个列表，而页面有**两组**独立按钮（会话 `全时段/GTH/RTH` + 周期
@@ -151,8 +159,24 @@ period_aggregation）同时红。加/删 `web/*.js` 后先看这里。
   "缺键即抛错" fail-fast ⇒ **整条回归变红**。手写的测试夹具是**第二份真相**，必然漂移。
 - 2026-09-14 实例：`tools/check_persistence.py` 手写 3 个键，`6828e3a` 新增
   `heatmap_max_ffill_buckets` 后它**自那天起就是红的**（`3/5 通过`）而无人察觉 ——
-  因为没人按目录清点跑过全部 20 条。已改为派生（`5/5`）。
+  因为没人按目录清点跑过全部 `tools/check_*.py`。已改为派生（`5/5`）。
 - 排查手法：`git log -S '<新键>' -- tools/` 若只有产品代码命中、测试夹具没命中，就是漏了。
+
+### 6.6 配置算术不变量：静态门禁 + 行为回归成对
+- 只在配置里算数（`run.py --check [6]`）证明不了行为；只跑行为回归又慢又重。**成对**：
+  静态那条永远跑、钉住下限；行为那条逐点重放机制，并**自带对照**把边界钉死
+  （`tools/check_window_tolerance.py` 用容差 `T−1` / `T` 两条对照证明 `S − R ≥ T` 是紧的，
+  而不是一个人为选的数字）。
+- 不变量优先**推导**，不要拿观测拟合。`S − R ≥ T` 是从"两次重建之间中心最多滞后
+  `T` 档"推出来的；拟合出来的绝对阈值会随观测漂移（`check_ws_compression` 就是例子）。
+- 窗口那对不变量（2026-09-14）：
+  - `heatmap_rows_each_side ≤ num_strikes_each_side`（显示 ≤ 订阅，超出的档永远没数据）
+  - `num_strikes_each_side − heatmap_rows_each_side ≥ recenter_trigger_strikes`（容差下限，
+    否则现价一走就退订显示档 ⇒ 行权价轴上的时间空洞）
+- **测试夹具的靶档不得用 `strike_grid(...)[3]`**：那个阶梯是 `-each_side … +each_side`
+  对称的，第 4 根的行权价会随**订阅**半径漂移（12 档 → 6455；20 档 → 6415，落到显示
+  窗口之外 ⇒ 假红）。用 `tools.fixtures.display_window_strike()`，它锚在现价上并按
+  显示半径设界。
 
 ## 7. 环境
 

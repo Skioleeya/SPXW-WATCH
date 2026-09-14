@@ -31,7 +31,11 @@ from features.feature_engine import FeatureEngine  # noqa: E402
 from serialization.payload_builder import PayloadBuilder  # noqa: E402
 from state.market_state import MarketState  # noqa: E402
 from state.tick_store import TickStore  # noqa: E402
-from tools.fixtures import SyntheticSurface, make_session_clock  # noqa: E402
+from tools.fixtures import (  # noqa: E402
+    SyntheticSurface,
+    display_window_strike,
+    make_session_clock,
+)
 
 OK = "  [ok] "
 FAIL = "  [FAIL] "
@@ -44,6 +48,11 @@ SURFACE_SLOPE = -1.1
 SURFACE_CURVATURE = 1.8
 DELTA_SCALE = 0.6
 STRIKE_STEP = 5.0
+
+#: GLITCH 回归的靶档相对现价的偏移（档数；负 = 现价下方 ⇒ 热力图取 Put 一侧）。
+#: 必须锚在现价上 —— 用 ``grid[3]`` 会随订阅半径漂移，见
+#: ``tools.fixtures.display_window_strike``。
+TARGET_OFFSET_STRIKES = -3
 
 
 def check(label: str, condition: bool, detail: str = "") -> bool:
@@ -100,6 +109,8 @@ def main() -> int:
 
     expiry = session.expiry_str()
     each_side = loader.as_int(sub_cfg, "num_strikes_each_side", module="subscription")
+    rows_each_side = loader.as_int(feat_cfg, "heatmap_rows_each_side", module="features")
+    cap = loader.as_int(sub_cfg, "max_total_subscriptions", module="subscription")
     step = STRIKE_STEP
     base_spot = BASE_SPOT
     base_atm_iv = BASE_ATM_IV
@@ -280,7 +291,10 @@ def main() -> int:
     flat_spot = base_spot
     flat_atm = base_atm_iv
     grid = surface.strike_grid(flat_spot, step, each_side)
-    target_strike = grid[3]          # 现价下方，热力图会取它的 Put 一侧
+    # 靶档锚在现价上、按显示半径设界 —— 不能用 grid[3]（随订阅半径漂移）。
+    target_strike = display_window_strike(
+        flat_spot, step, TARGET_OFFSET_STRIKES, rows_each_side
+    )
     spike_multiplier = 10.0
 
     glitch_bundles = []
@@ -334,7 +348,7 @@ def main() -> int:
     # ------------------------------------------------------------------ #
     # 组装载荷
     # ------------------------------------------------------------------ #
-    frame = builder.build(bundle, _status())
+    frame = builder.build(bundle, _status(each_side, cap))
     payload = builder.latest_payload()
     passed &= check("载荷已生成", payload is not None)
 
@@ -357,10 +371,17 @@ def main() -> int:
     return 0 if passed else 1
 
 
-def _status() -> FeedStatus:
+def _status(each_side: int, cap: int) -> FeedStatus:
+    """采集层健康快照。
+
+    订阅条数**从配置推出来，不手写**：这个夹具喂的正是
+    ``现价 1 条 + each_side 档 × 2 方向 × 2 权利 = 4 × each_side + 1`` 条行情。
+    原先写死 74 —— 它跟 4×12+1 = 49、4×20+1 = 81 都对不上，是一份凭空多出来的
+    真相；订阅半径一改，这个数字就开始撒谎。
+    """
     return FeedStatus(
         mode=FeedMode.LIVE, connection=ConnectionState.CONNECTED,
-        subscribed=74, subscription_cap=92,
+        subscribed=4 * each_side + 1, subscription_cap=cap,
     )
 
 

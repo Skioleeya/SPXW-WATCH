@@ -1,6 +1,7 @@
 {
   "_comment": "L1 采集层 — 动态 ATM 窗口与订阅限额。IBKR 硬上限 100 条，留出余量防 Error 300。",
-  "num_strikes_each_side": 12,
+  "_window_comment": "num_strikes_each_side 是【订阅】窗口半径；显示窗口半径是另一个键 heatmap_rows_each_side（在 features 模块的配置里，当前 12）。两者必须留出余量：订阅窗口比显示窗口宽出来的那几档，就是现价往返时的容差。若两者相等，现价一移出显示窗口就立刻退订那些档（cancel_stale_before_add），那段时间收不到任何 tick，等现价回来时 HeatmapEngine 会把保留的桶照发 —— 于是该行中间留下一条时间空洞（KAI 2026-09-14 指出）。容差下限 = recenter_trigger_strikes（当前 3 档）：两次重建之间中心最多滞后 3 档，故显示窗口可探出订阅窗口 3 档。当前 20 − 12 = 8 档，余量 5 档。上限由 4 × side + 1 ≤ max_total_subscriptions 且 ≤ IBKR 100 条决定 ⇒ side ≤ 22。不变量「显示 ≤ 订阅」与「容差 ≥ 重建触发」由 tools/selfcheck_config.py 的 [6] 守住，行为侧由 tools/check_window_tolerance.py 守住。",
+  "num_strikes_each_side": 20,
   "max_total_subscriptions": 92,
   "min_request_interval_s": 0.05,
   "reconcile_interval_s": 5.0,

@@ -38,6 +38,7 @@ python run.py --check
 python tools/smoke_test.py                     # L0–L4 离线冒烟测试
 python tools/check_side_flip.py                # 回归：取边翻转不得劈断热力图行历史
 python tools/check_subscription_qualify.py     # 回归：订阅前必须确认合约
+python tools/check_window_tolerance.py         # 回归：现价往返不得退订显示窗口内的档位（订阅/显示容差）
 python tools/check_tick_router.py              # 回归：L1 分流层的模型值优先与脏值拦截
 python tools/check_session_rollover.py         # 回归：跨会话不得共用桶序号
 python tools/check_session_grid.py             # 回归：多会话网格铺满交易日、空档留白
@@ -196,7 +197,7 @@ IBKR 对单连接的同时行情订阅有硬上限（100 条）。这里用三�
 
 1. **容量反推。** `ChainResolver.effective_each_side()` 从配置的总上限反推
    每侧最多几档，而不是无条件信任 `num_strikes_each_side`。
-   当前：`±12 档 → 4×12+1 = 49 条`（自设上限 92，IBKR 上限 100）。
+   当前：`±20 档 → 4×20+1 = 81 条`（自设上限 92，IBKR 上限 100）。
    `guard_capacity()` 在超限时**抛异常**而不是"尽量多发几条"。
 2. **先撤后订。** 换档时先取消旧订阅再发新订阅，避免瞬时数量翻倍。
 3. **Error 300 指数退避。** 一旦被限流，暂停新增并逐步退避到上限，恢复后
@@ -209,6 +210,31 @@ IV 与 Greeks **全部来自券商推送**：`reqMktData(contract, "106", ...)` 
 
 > 本地不做任何高频 BSM 重算。25Δ 定位用的是 `DeltaLocator` —— 在**券商给的
 > delta** 上做线性插值，不是重新算 delta。
+
+### 订阅窗口必须比显示窗口宽（容差）
+
+热力图的纵轴行取自**显示窗口**（`features.json::heatmap_rows_each_side`），行情订阅
+取自**订阅窗口**（`subscription.json::num_strikes_each_side`）。两个独立的半径，必须
+留出余量：
+
+```
+容差（档） = num_strikes_each_side − heatmap_rows_each_side ≥ recenter_trigger_strikes
+```
+
+余量不足会出**时间空洞**。现价一移动，`WindowFollower` 就按触发步长重建窗口，
+`cancel_stale_before_add` 让滚出窗口的档位**立刻退订**；那几档在现价往返期间收不到
+任何 tick，而 `HeatmapEngine._prune()` **只按时间裁剪、从不按行权价裁剪** —— 该行
+不会被删掉，只在中间空一截。现价回来之后空洞留在原地，看起来像数据源丢包。
+**前端忠实渲染，错在订阅窗口没留容差。**
+
+下限的推导：两次重建之间中心最多滞后 `T` 档（`T = recenter_trigger_strikes`），故现价
+可探出已订阅窗口 `T` 档；要求「显示窗口最低一档不低于订阅窗口最低一档」即得
+`S − R ≥ T`。2026-09-14 之前的配置两个半径都是 12（容差 0 档），这条空洞必然出现；
+现在 `20 − 12 = 8 ≥ 3`，余量 5 档。
+
+守这条的是一对：静态的 `run.py --check [6]`（配置算术），行为侧的
+`tools/check_window_tolerance.py`（逐点重放窗口跟随，并用容差 `T−1` / `T` 两条对照
+把边界钉死 —— 判据是推出来的，不是拿观测拟合的）。
 
 ### 订阅前必须先确认合约（qualify）
 

@@ -163,6 +163,35 @@ def check_subscription_capacity(loaded: dict[str, dict]) -> int:
         return 1
 
     ok(f"显示窗口 ±{rows_each_side} ≤ 订阅窗口 ±{side}")
+
+    # 光"显示 ≤ 订阅"还不够：两者相等（或只差一两档）时，现价一移动，滑动窗口
+    # 就把尾部的档位退订（``cancel_stale_before_add``），那几档在往返期间收不到
+    # tick；而 ``HeatmapEngine._prune()`` 只按时间裁剪、从不按行权价裁剪，于是
+    # 该行不会被删掉，只在中间空一截 —— 图上就是"行权价轴上的一条时间空洞"。
+    #
+    # 需要多少容差？推导：重建触发是"中心行权价偏移 ≥ T 档"。两次重建之间，
+    # 中心最多滞后 T 档，故现价可探出**已订阅窗口** T 档。此时显示窗口最低一档
+    # = 现价 − (T + R − 1) × 步长，订阅窗口最低一档 = 中心 − (S − 1) × 步长；
+    # 要求前者不低于后者即得 S − R ≥ T。
+    #
+    # 这条判据是**推出来的，不是拿观测拟合的**：tools/check_window_tolerance.py
+    # 用容差 = T−1 与 T 两条对照跑出洞/不出洞，把边界钉死。
+    try:
+        trigger = float(sub["recenter_trigger_strikes"])
+    except (KeyError, ValueError, TypeError) as exc:
+        fail(f"无法核算窗口重建触发步长: {exc}")
+        return 1
+
+    tolerance = side - rows_each_side
+    if tolerance < trigger:
+        fail(f"窗口容差只有 {tolerance} 档（订阅 ±{side} − 显示 ±{rows_each_side}），"
+             f"小于窗口重建触发 {trigger} 档 —— 现价一走就会退订显示窗口里的档位，"
+             f"热力图会在行权价轴上留下时间空洞（见 "
+             f"tools/check_window_tolerance.py）")
+        return 1
+
+    ok(f"窗口容差 {tolerance} 档 ≥ 重建触发 {trigger} 档"
+       f"（现价在容差带内往返不掉档）")
     return 0
 
 

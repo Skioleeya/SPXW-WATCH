@@ -38,7 +38,12 @@ from contracts.tick import OptionRef, OptionTick, QuoteTick, SpotTick  # noqa: E
 from core.clock import SessionClock  # noqa: E402
 from features.feature_engine import FeatureEngine  # noqa: E402
 from state.tick_store import TickStore  # noqa: E402
-from tools.fixtures import FakeClock, SyntheticSurface, make_session_clock  # noqa: E402
+from tools.fixtures import (  # noqa: E402
+    FakeClock,
+    SyntheticSurface,
+    display_window_strike,
+    make_session_clock,
+)
 
 GREEN, RED, RESET = "\033[32m", "\033[31m", "\033[0m"
 
@@ -49,6 +54,11 @@ SURFACE_SLOPE = -1.1
 SURFACE_CURVATURE = 1.8
 DELTA_SCALE = 0.6
 STRIKE_STEP = 5.0
+
+#: 观察档相对现价的偏移（档数；负 = 现价下方，热力图会取它的 Put 一侧）。
+#: 必须锚在现价上 —— 用 ``grid[3]`` 会随订阅半径漂移，见
+#: ``tools.fixtures.display_window_strike``。
+WATCHED_OFFSET_STRIKES = -3
 
 
 def _check(label: str, condition: bool, detail: str = "") -> bool:
@@ -81,6 +91,7 @@ def main() -> int:
 
     tz = loader.as_str(app_cfg, "timezone", module="app")
     each_side = loader.as_int(sub_cfg, "num_strikes_each_side", module="subscription")
+    rows_each_side = loader.as_int(feat_cfg, "heatmap_rows_each_side", module="features")
     bucket_s = int(serial_cfg["heatmap_bucket_seconds"])
 
     session, fake = make_session_clock(app_cfg, serial_cfg)
@@ -94,8 +105,10 @@ def main() -> int:
     spot = BASE_SPOT
     atm_iv = BASE_ATM_IV
     grid = surface.strike_grid(spot, STRIKE_STEP, each_side)
-    # 取现价下方第 3 档：热力图会取它的 Put 一侧，与取边规则无关地稳定存在。
-    watched = float(grid[3])
+    # 观察档锚在现价上、按显示半径设界（热力图只铺 ±heatmap_rows_each_side 档）。
+    watched = display_window_strike(
+        spot, STRIKE_STEP, WATCHED_OFFSET_STRIKES, rows_each_side
+    )
 
     def feed(expiry: str, iv_bias: float, ts: float) -> None:
         """喂一整轮网格：现价 + 每档 Put/Call。"""

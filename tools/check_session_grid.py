@@ -38,7 +38,8 @@ from config import loader  # noqa: E402
 from contracts.enums import OptionRight, Quality  # noqa: E402
 from contracts.feature import ImpulseCell  # noqa: E402
 from contracts.tick import OptionRef  # noqa: E402
-from core.clock import SessionClock, minutes_of_day  # noqa: E402
+from core.clock import SessionClock  # noqa: E402
+from core.session_grid import minutes_of_day  # noqa: E402
 from features.heatmap_engine import HeatmapEngine  # noqa: E402
 
 GREEN, RED, RESET = "\033[32m", "\033[31m", "\033[0m"

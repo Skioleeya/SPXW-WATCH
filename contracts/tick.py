@@ -1,7 +1,9 @@
 """
 L0 — Tick 与合约的数据传输对象。
 =================================
-本模块是 L1（采集）与 L2（状态）之间**唯一**的通信契约。
+本模块是 L1（采集）与 L2（状态）之间的通信契约，并集中承载本工程的 DTO
+词汇表。其中 ``FutureTick`` 属于 **L1 内部**的中间量，不进 ``TickSink``
+（理由见其自身文档）；其余类型都是跨层契约。
 
 为什么单独放一层
 ----------------
@@ -150,6 +152,30 @@ class SpotTick:
     price: float
     ts: float
     tick_type: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class FutureTick:
+    """
+    一条指数期货报价（按到期月）。
+
+    为什么它**不在** ``TickSink`` 协议里
+    ------------------------------------
+    ``TickSink`` 是 L1 → L2 的出口；而期货价是 **L1 内部**的中间量 —— 它唯一的
+    用途是在 GTH 时段合成现货基准（``acquisition.spot_synthesis``），状态层与
+    下游完全不需要知道它。把它塞进 ``TickSink`` 会强迫 ``TickStore`` 实现一个
+    自己永远用不上的方法，还会让 L2 无端认识"期货"这个与它无关的概念。
+
+    因此本类型只由 ``acquisition.tick_router`` 产出、由 ``acquisition.spot_source``
+    消费，走**显式注入**的 ``future_sink``，而不是主 sink 链。
+
+    ``expiry`` 必须来自 IBKR（``ContractDetails.realExpirationDate``），
+    不得由代码推算 —— B2b 的 ``T`` 直接依赖它。
+    """
+
+    expiry: str  # "YYYYMMDD"
+    price: float
+    ts: float
 
 
 # --------------------------------------------------------------------------- #

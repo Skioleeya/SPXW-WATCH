@@ -26,9 +26,10 @@ import time
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-#: 一个区段在网格里的占位（桶序号区间）由分钟偏移换算而来，因此每个区段边界
-#: 都必须落在分钟上。这两条是算术事实，不是可调参数。
-_MINUTES_PER_DAY = 24 * 60
+from core.session_grid import build_zones, fmt_hm
+
+#: 时间桶换算常量。区段边界必须落在分钟上，这是算术事实，不是可调参数。
+#: 网格的**铺设**（时刻解析、区段表）已按职能拆到 ``core.session_grid``。
 _SECONDS_PER_DAY = 24 * 3600
 
 
@@ -40,108 +41,6 @@ def now_ts() -> float:
 def monotonic() -> float:
     """单调时钟，用于测量间隔（不受系统时间调整影响）。"""
     return time.monotonic()
-
-
-def parse_hm(value: str) -> tuple[int, int]:
-    """把 ``"09:30"`` 解析成 ``(9, 30)``。"""
-    if not isinstance(value, str) or ":" not in value:
-        raise ValueError(f"时间格式应为 'HH:MM'，收到 {value!r}")
-    hh, mm = value.split(":", 1)
-    hour, minute = int(hh), int(mm)
-    if not (0 <= hour <= 23 and 0 <= minute <= 59):
-        raise ValueError(f"时间越界: {value!r}")
-    return hour, minute
-
-
-def minutes_of_day(value: str) -> int:
-    hour, minute = parse_hm(value)
-    return hour * 60 + minute
-
-
-def fmt_hm(total_minutes: int) -> str:
-    total_minutes = int(total_minutes) % _MINUTES_PER_DAY
-    return f"{total_minutes // 60:02d}:{total_minutes % 60:02d}"
-
-
-def _span_minutes(start: int, end: int) -> int:
-    """``start`` 时刻到 ``end`` 时刻的分钟数，跨午夜时绕回来。"""
-    return (end - start) % _MINUTES_PER_DAY
-
-
-def _make_zone(
-    zone_id: str,
-    label: str,
-    is_session: bool,
-    offset_min: int,
-    span_min: int,
-    start_min: int,
-    bucket_seconds: int,
-) -> dict:
-    """把"网格起点后第 offset_min 分钟起、长 span_min 分钟"落成一个区段。"""
-    begin_s = offset_min * 60
-    end_s = (offset_min + span_min) * 60
-    if begin_s % bucket_seconds or end_s % bucket_seconds:
-        raise ValueError(
-            f"区段 {zone_id!r} 的边界 {fmt_hm((start_min + offset_min) % _MINUTES_PER_DAY)} "
-            f"没有落在时间桶边界上（桶宽 {bucket_seconds}s）—— 网格会错位，"
-            f"前端按区段切列就会切错"
-        )
-    return {
-        "id": zone_id,
-        "label": label,
-        "is_session": bool(is_session),
-        "first": begin_s // bucket_seconds,
-        "last": end_s // bucket_seconds - 1,
-        "open": fmt_hm((start_min + offset_min) % _MINUTES_PER_DAY),
-        "close": fmt_hm((start_min + offset_min + span_min) % _MINUTES_PER_DAY),
-    }
-
-
-def _build_zones(
-    sessions: list[dict], bucket_seconds: int
-) -> tuple[int, list[dict], int]:
-    """
-    把会话定义展开成"会话 / 空档"交替的区段表。
-
-    Returns ``(start_min, zones, total_min)``：网格起点时刻（当日分钟数）、
-    区段表（首尾相接铺满网格）、网格总长（分钟）。
-    """
-    if not sessions:
-        raise ValueError("sessions 不能为空 —— 网格没有起点")
-
-    parsed: list[tuple[str, str, int, int]] = []
-    for item in sessions:
-        parsed.append((
-            str(item["id"]),
-            str(item["label"]),
-            minutes_of_day(str(item["open"])),
-            minutes_of_day(str(item["close"])),
-        ))
-
-    start_min = parsed[0][2]
-    zones: list[dict] = []
-    cursor = 0
-
-    for index, (zone_id, label, open_min, close_min) in enumerate(parsed):
-        if index > 0:
-            gap = _span_minutes(parsed[index - 1][3], open_min)
-            if gap > 0:
-                zones.append(_make_zone(
-                    "gap", "空档", False, cursor, gap, start_min, bucket_seconds
-                ))
-                cursor += gap
-        span = _span_minutes(open_min, close_min)
-        if span <= 0:
-            raise ValueError(
-                f"会话 {zone_id!r} 的时长必须为正："
-                f"open={fmt_hm(open_min)} close={fmt_hm(close_min)}"
-            )
-        zones.append(_make_zone(
-            zone_id, label, True, cursor, span, start_min, bucket_seconds
-        ))
-        cursor += span
-
-    return start_min, zones, cursor
 
 
 class WallClock:
@@ -182,7 +81,7 @@ class SessionClock:
         self._bucket_s = int(bucket_seconds)
         self._clock = clock if clock is not None else WallClock()
 
-        start_min, zones, total_min = _build_zones(sessions, self._bucket_s)
+        start_min, zones, total_min = build_zones(sessions, self._bucket_s)
         self._start_min = start_min
         self._zones = zones
         self._grid_len_s = total_min * 60
@@ -349,6 +248,22 @@ class SessionClock:
         一类假信号。所以它们和断代桶一样要留白。
         """
         return self._zone_starts
+
+    def current_zone_id(self) -> str:
+        """当前时间落在哪个区段（会话或空档）的 ``id``。
+
+        区段表首尾相接铺满整个网格，所以任何时刻都能落进一段；网格之外
+        （周末等）``bucket_index()`` 会钳到边界桶，返回的就是边界那一段的 id。
+
+        找不到时返回空串 —— 调用方据此走 fail-closed，而不是猜一个区段。
+        本方法是"按区段选数据来源"这类决策的唯一落点：把区段判定留在 L0，
+        上层就不必自己拿桶序号去比区间（那样等于把网格几何抄了第二份）。
+        """
+        index = self.bucket_index()
+        for zone in self._zones:
+            if int(zone["first"]) <= index <= int(zone["last"]):
+                return str(zone["id"])
+        return ""
 
     # ------------------------------------------------------------------ #
     # 时间桶（热力图横轴）

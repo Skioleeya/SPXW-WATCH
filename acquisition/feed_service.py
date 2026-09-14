@@ -29,6 +29,8 @@ from acquisition.contract_factory import ContractFactory
 from acquisition.feed_errors import FeedErrorHandler
 from acquisition.feed_reconcile import WindowFollower
 from acquisition.ibkr_gateway import IbkrGateway
+from acquisition.spot_source import SpotSourceSelector
+from acquisition.spot_synthesis import SpotSynthesis
 from acquisition.spot_tap import SpotTap
 from acquisition.subscription_manager import SubscriptionManager
 from acquisition.tick_router import TickRouter
@@ -36,33 +38,45 @@ from acquisition.tick_router import TickRouter
 _APP = "app"
 _IBKR = "ibkr"
 _SUB = "subscription"
+_SPOT = "spot"
 
 
 class IbkrFeed:
     """``FeedPort`` 的实盘实现。"""
 
     __slots__ = (
-        "_app_cfg", "_ibkr_cfg", "_sub_cfg", "_clock",
+        "_app_cfg", "_ibkr_cfg", "_sub_cfg", "_spot_cfg", "_clock",
         "_sink", "_tap", "_gateway", "_factory", "_resolver",
-        "_manager", "_router", "_slice", "_window", "_centre",
+        "_manager", "_router", "_selector", "_synthesis",
+        "_slice", "_window", "_centre",
         "_reconcile_task", "_resubscribe_task", "_running",
         "_messages", "_mode", "_error_handler", "_follower",
         "_reconnect_hook",
     )
 
-    def __init__(self, app_cfg: dict, ibkr_cfg: dict, sub_cfg: dict, clock: Any) -> None:
+    def __init__(
+        self,
+        app_cfg: dict,
+        ibkr_cfg: dict,
+        sub_cfg: dict,
+        spot_cfg: dict,
+        clock: Any,
+    ) -> None:
         self._app_cfg = app_cfg
         self._ibkr_cfg = ibkr_cfg
         self._sub_cfg = sub_cfg
+        self._spot_cfg = spot_cfg
         self._clock = clock
 
         self._sink: TickSink | None = None
         self._tap: SpotTap | None = None
         self._gateway = IbkrGateway(ibkr_cfg)
-        self._factory = ContractFactory(app_cfg)
+        self._factory = ContractFactory(app_cfg, spot_cfg)
         self._resolver = ChainResolver(app_cfg, sub_cfg)
         self._manager = SubscriptionManager(self._gateway, self._factory, sub_cfg)
         self._router: TickRouter | None = None
+        self._selector: SpotSourceSelector | None = None
+        self._synthesis: SpotSynthesis | None = None
 
         self._slice = None
         self._window: tuple[float, ...] = ()
@@ -122,7 +136,21 @@ class IbkrFeed:
             return
 
         self._tap = SpotTap(self._sink)
-        self._router = TickRouter(self._tap, self._ibkr_cfg)
+        # 现货来源链：TickRouter → SpotSourceSelector → SpotTap → store。
+        # selector 同时被当作 future_sink 注入 —— 期货不进 TickSink 链
+        # （理由见 contracts.tick.FutureTick）。
+        self._synthesis = SpotSynthesis(self._spot_cfg)
+        self._selector = SpotSourceSelector(
+            self._tap,
+            self._synthesis,
+            self._clock,
+            self._spot_cfg,
+            loader.as_float(self._ibkr_cfg, "max_underlying_age_s", module=_IBKR),
+            self._note,
+        )
+        self._router = TickRouter(
+            self._selector, self._ibkr_cfg, future_sink=self._selector
+        )
 
         self._error_handler = FeedErrorHandler(
             self._manager, self._note, self._trigger_resubscribe,
@@ -174,6 +202,8 @@ class IbkrFeed:
         self._gateway.subscribe_spot(underlying)
         self._router.set_spot_con_id(int(getattr(underlying, "conId", 0) or 0))
 
+        await self._subscribe_futures()
+
         spot = await self._await_spot()
         self._note(f"标的现价 {spot:.2f}")
 
@@ -220,6 +250,58 @@ class IbkrFeed:
                 "这些档位不会有数据",
                 StatusLevel.ERROR,
             )
+
+    async def _subscribe_futures(self) -> None:
+        """
+        订阅 ES 前月 / 次月 / 次次月，并把 ``conId → 到期日`` 交给 tick 路由。
+
+        为什么是三个月而不是两个月
+        --------------------------
+        B2b 用**最近两个**未到期月份反解 ĉ。前月到期消失后，需要 (次月, 次次月)
+        顶上，所以第三个是**换月余量** —— 缺了它，换月当天会只剩一个月份，
+        合成直接 fail-closed 一整个交易日。
+
+        到期日一律取 IBKR 的 ``ContractDetails.realExpirationDate``，
+        **代码不推算任何日期**：硬编码"第三个周五"正是 B1 在换月日静默错值
+        的同族错误。
+
+        拿不到两个月就直接抛错、拒绝启动 —— 宁可启动失败，也不要拿冻结指数
+        顶上一个看起来正常的现货（实测差 8 档）。
+        """
+        if not loader.as_bool(self._spot_cfg, "enabled", module=_SPOT):
+            self._note(
+                "现货合成已按配置关闭（config/spot.json::enabled=false）："
+                "GTH 段将沿用指数，而该值可能是上一交易日收盘的冻结值",
+                StatusLevel.WARN,
+            )
+            return
+
+        count = loader.as_int(self._spot_cfg, "future_months", module=_SPOT)
+        details = await self._gateway.fetch_future_months(
+            self._factory.future(), count
+        )
+        if len(details) < 2:
+            raise SpotUnavailableError(
+                f"只枚举到 {len(details)} 个期货到期月，B2b 至少需要 2 个"
+                "（前月 + 次月联立反解 carry）。GTH 段无法合成现货，"
+                "拒绝启动 —— 不拿冻结指数顶上。"
+            )
+
+        mapping: dict[int, str] = {}
+        for item in details:
+            contract = item.contract
+            expiry = str(
+                getattr(item, "realExpirationDate", "")
+                or getattr(contract, "lastTradeDateOrContractMonth", "")
+            )
+            self._gateway.subscribe_future(contract)
+            mapping[int(getattr(contract, "conId", 0) or 0)] = expiry
+
+        self._router.set_future_contracts(mapping)
+        self._note(
+            f"期货 {len(mapping)} 个月已订阅: "
+            + ", ".join(sorted(mapping.values()))
+        )
 
     async def _await_spot(self) -> float:
         timeout = loader.as_float(self._ibkr_cfg, "spot_ready_timeout_s", module=_IBKR)

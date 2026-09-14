@@ -51,6 +51,10 @@ EXEMPT_PACKAGES = {"tools"}
 #
 # 刻意用"排除表"而不是"只收已知源码包"：排除表漏了目录 → 误报（响，能发现）；
 # 白名单漏了包 → 漏检（静默，发现不了）。方向必须选响的那一侧。
+#
+# ⚠️ 虚拟环境**不在此登记** —— 它由 ``_in_virtualenv()`` 按 ``pyvenv.cfg``
+# 结构识别。目录名（``.venv`` / ``venv`` / ``env`` …）是约定，把它登记进来
+# 等于把补丁当边界：换个名字就再漏一次。见 ``_in_virtualenv`` 的说明。
 NON_SOURCE_DIRS: dict[str, str] = {
     "notes": "会话证据目录（2026-09-13 KAI 决策复活，skill notes-session-records 的落点）；"
              "内含探针归档，不是产品代码",
@@ -75,6 +79,9 @@ REQUIRED_KEYS: dict[str, tuple[str, ...]] = {
              "qualify_batch_size", "rate_limit_max_requests", "rate_limit_interval_s"),
     "subscription": ("num_strikes_each_side", "max_total_subscriptions",
                      "reconcile_interval_s"),
+    "spot": ("enabled", "future_symbol", "future_sec_type", "future_exchange",
+             "future_currency", "future_months", "synthesised_zones",
+             "max_abs_carry", "max_carry_jump"),
     "state": ("option_buffer_seconds", "option_buffer_max_points", "prune_interval_s"),
     "features": ("impulse_windows_seconds", "glitch_min_abs_option_price",
                  "skew_target_delta", "heatmap_rows_each_side"),
@@ -117,11 +124,47 @@ def warn(msg: str) -> None:
 # 文件与 AST
 # --------------------------------------------------------------------------- #
 
+#: 目录 → 是否含 ``pyvenv.cfg``。跨调用复用，避免对同一批祖先目录反复 stat。
+_VENV_MARKERS: dict[Path, bool] = {}
+
+
+def _in_virtualenv(path: Path) -> bool:
+    """``path`` 的任一祖先目录是否为 Python 虚拟环境（含 ``pyvenv.cfg``）。
+
+    为什么按 ``pyvenv.cfg`` 而不是按目录名
+    --------------------------------------
+    目录名是**约定**：``.venv`` / ``venv`` / ``env`` / ``venv39`` …… 谁都可能用，
+    往排除表里补名字就是打补丁 —— 换一个名字再漏一次。
+
+    2026-09-14 实测到的正是这个形态：``.gitignore`` 登记了 ``.venv/`` 与 ``venv/``，
+    而 ``NON_SOURCE_DIRS`` 没有，于是 ``ROOT.rglob("*.py")`` 把两个虚拟环境的
+    site-packages 全收了进来，让 ``[1][2][8][9][10]`` 集体误报 **2582 项**、
+    ``--check`` 长期 ``RC=1`` —— 而且没有任何提示指向"是两个 venv 混进来了"。
+
+    ``pyvenv.cfg`` 是 ``venv`` 模块自己写下的**结构性标记**，与目录叫什么无关，
+    也不会被误当成源码包。判据与命名解耦，才不会再次漂移。
+    """
+    for parent in path.parents:
+        if parent == parent.parent:  # 盘根，到头了
+            break
+        hit = _VENV_MARKERS.get(parent)
+        if hit is None:
+            hit = (parent / "pyvenv.cfg").is_file()
+            _VENV_MARKERS[parent] = hit
+        if hit:
+            return True
+    return False
+
+
 def iter_py_files() -> list[Path]:
     """工程内的**产品源码** ``.py``，按路径排序。
 
-    排除两类：``__pycache__``（编译产物）、``NON_SOURCE_DIRS`` 下的任何文件
-    （会话证据、工作记忆、日志、前端资源 —— 都不是产品代码）。
+    排除三类：
+
+    * ``__pycache__``（编译产物）；
+    * ``NON_SOURCE_DIRS`` 下的任何文件（会话证据、工作记忆、日志、前端资源）；
+    * 位于 **Python 虚拟环境**内的任何文件 —— 按 ``pyvenv.cfg`` 识别，
+      与目录名解耦（见 ``_in_virtualenv``）。
 
     根级文件（``run.py``）不受目录排除影响：它没有父目录，一律保留。
     """
@@ -131,6 +174,8 @@ def iter_py_files() -> list[Path]:
         if "__pycache__" in parts:
             continue
         if len(parts) > 1 and parts[0] in NON_SOURCE_DIRS:
+            continue
+        if _in_virtualenv(path):
             continue
         found.append(path)
     return sorted(found)

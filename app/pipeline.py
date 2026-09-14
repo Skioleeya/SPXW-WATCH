@@ -55,6 +55,7 @@ class Pipeline:
             "app": loader.load("app"),
             "ibkr": loader.load("ibkr"),
             "subscription": loader.load("subscription"),
+            "spot": loader.load("spot"),
             "state": loader.load("state"),
             "features": loader.load("features"),
             "serialization": loader.load("serialization"),
@@ -122,7 +123,8 @@ class Pipeline:
 
         self._log.info("行情源: IbkrFeed（IBKR）")
         return IbkrFeed(
-            self._cfg["app"], self._cfg["ibkr"], self._cfg["subscription"], self._clock
+            self._cfg["app"], self._cfg["ibkr"], self._cfg["subscription"],
+            self._cfg["spot"], self._clock,
         )
 
     def _on_feed_reconnect(self) -> None:

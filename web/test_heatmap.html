@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<title>WebGL Heatmap Test</title>
+<title>Heatmap Panel Test</title>
 <style>
   body { margin: 0; background: #0a0c0f; padding: 20px; }
   #heatmap { width: 1200px; height: 500px; border: 1px solid #232b34; }
@@ -13,8 +13,8 @@
 <div id="heatmap"></div>
 <div id="info"></div>
 
+<script src="vendor/echarts.min.js"></script>
 <script src="config.js"></script>
-<script src="gl_heatmap.js"></script>
 <script src="heatmap.js"></script>
 <script>
   var panel = new HeatmapPanel(document.getElementById("heatmap"));

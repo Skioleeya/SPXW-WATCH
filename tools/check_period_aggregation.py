@@ -30,7 +30,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from core.clock import minutes_of_day  # noqa: E402
+from core.session_grid import minutes_of_day  # noqa: E402
 from serialization.numeric import robust_bound  # noqa: E402
 from tools import period_reference as ref  # noqa: E402
 from tools.group_guard import guard_cases, guard_problems  # noqa: E402
@@ -251,7 +251,7 @@ def _invariant_checks(result: dict) -> list[tuple[str, bool, str]]:
 def _grid_minutes(app_cfg: dict) -> int:
     """
     交易日网格的总分钟数 = 各会话时长 + 它们之间的空档。只认 ``app.json::sessions``，
-    时刻解析交给 ``core.clock.minutes_of_day``（这里不重写一份）。
+    时刻解析交给 ``core.session_grid.minutes_of_day``（这里不重写一份）。
     """
     total = 0
     prev_close: int | None = None

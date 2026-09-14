@@ -10,11 +10,17 @@ IV 的绝对水平在 0DTE 上几乎不变，画出来是一片均匀的色块�
 真正有意义的是**变化**：哪个行权价在哪个时刻突然被重新定价。所以矩阵里存的是
 相邻时间桶之间的 IV 差。
 
-前向填充（forward fill）
-------------------------
+前向填充（forward fill）—— **有上限**
+------------------------------------
 并非每个行权价每分钟都有成交。若某桶没有新 tick 就直接留空，矩阵会碎成一片
 噪点。这里用"沿用上一个已知 IV"的方式填充，于是没有成交的桶自然得到 0 变化，
 语义正确且视觉连续。
+
+但该假定**只对短跨度成立**：跨度一长，"沿用"就变成"编造"。最典型的来源是
+``load_snapshot()`` 恢复出来的**孤立旧桶** —— 上一次进程存活期在 20:15 只写了
+一个桶就结束了，重启后该桶被恢复，若一路沿用到当前，图上就出现一条横跨
+整段会话的 ΔIV=0「假 0 带」（亮黄绿，与真"IV 没变"肉眼无法区分）。
+所以跨度超过 ``heatmap_max_ffill_buckets`` 的桶一律输出 ``None``（留白）。
 
 断代（break）—— 前向填充唯一危险的地方
 --------------------------------------
@@ -75,8 +81,8 @@ class HeatmapEngine:
     """按时间桶累积 IV，并产出 ΔIV 矩阵。"""
 
     __slots__ = (
-        "_clock", "_max_buckets", "_min_buckets", "_buckets", "_tick_counts",
-        "_breaks", "_zone_starts",
+        "_clock", "_max_buckets", "_min_buckets", "_max_ffill", "_buckets",
+        "_tick_counts", "_breaks", "_zone_starts",
     )
 
     def __init__(self, clock, serial_cfg: dict) -> None:
@@ -86,6 +92,9 @@ class HeatmapEngine:
         )
         self._min_buckets = loader.as_int(
             serial_cfg, "heatmap_min_buckets", module=_SERIAL
+        )
+        self._max_ffill = loader.as_int(
+            serial_cfg, "heatmap_max_ffill_buckets", module=_SERIAL
         )
         # {行权价: {bucket_index: iv}}
         self._buckets: dict[_CellKey, dict[int, float]] = {}
@@ -239,6 +248,11 @@ class HeatmapEngine:
            假信号。**这是"5 分钟空档"在数据侧的落点**：前端把那几列整段切掉，
            而切掉之后相邻的两列本来就不该有差分关系；
         4. 该桶本身没有值（整行一个桶都没写过时由调用方提前返回 ``None``）。
+
+        第五种（2026-09-14 补）：**距上一个真实观测超过 ``_max_ffill`` 桶**。
+        前向填充的假定只对短跨度成立，跨小时沿用会把孤立旧桶（``load_snapshot()``
+        从上一进程存活期恢复出来的）拉成一条横跨整段会话的 ΔIV=0「假 0 带」——
+        亮黄绿，与真"IV 没变"肉眼无法区分。留白不画，见模块 docstring。
         """
         if not bucket:
             return None
@@ -251,14 +265,25 @@ class HeatmapEngine:
         out: list[float | None] = []
         carried: float | None = None
         previous: float | None = None
+        last_seen: int | None = None
 
         for index in range(current + 1):
-            value = bucket.get(index, carried)
+            raw = bucket.get(index)
+            if raw is not None:
+                last_seen = index
+                carried = raw
+                value: float | None = raw
+            elif last_seen is not None and index - last_seen <= self._max_ffill:
+                # 短跨度：沿用上一个已知 IV（"没有新 IV ⇒ IV 没变"）。
+                value = carried
+            else:
+                # 跨度超限，或该行还没开始：留白。见模块 docstring ——
+                # 一路沿用会把孤立旧桶拉成横跨整段会话的「假 0 带」。
+                value = None
             if value is None or previous is None or index in blocked:
                 out.append(None)
             else:
                 out.append((value - previous) * 100.0)
-            carried = value
             previous = value
 
         return tuple(out)

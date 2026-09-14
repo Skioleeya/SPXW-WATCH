@@ -14,6 +14,12 @@ greeks（``tickType`` 12/10/11）作为补充。
 本模块不 import ``ib_async``：全部按鸭子类型访问属性。好处是离线模拟器可以
 复用同一套归一化规则，且 L1 对第三方库的依赖面被压缩到两个文件。
 
+三类 ticker 的分流
+------------------
+指数（标的）/ 期货 / 期权。期货那一支**不进** ``TickSink``：它只服务 L1 内部的
+现货合成（GTH 时段），出口是**显式注入**的 ``future_sink`` —— 理由见
+``contracts.tick.FutureTick`` 的说明。
+
 依赖：L0。
 """
 
@@ -24,7 +30,7 @@ from typing import Any, Iterable
 
 from config import loader
 from contracts.ports import TickSink
-from contracts.tick import OptionRef, OptionTick, QuoteTick, SpotTick
+from contracts.tick import FutureTick, OptionRef, OptionTick, QuoteTick, SpotTick
 from core.clock import now_ts
 
 _CFG = "ibkr"
@@ -65,15 +71,25 @@ class TickRouter:
 
     __slots__ = (
         "_sink", "_max_iv", "_min_iv", "_use_model",
-        "_spot_con_id", "_routed", "_rejected",
+        "_spot_con_id", "_future_sink", "_future_contracts",
+        "_routed", "_rejected",
     )
 
-    def __init__(self, sink: TickSink, ibkr_cfg: dict) -> None:
+    def __init__(
+        self,
+        sink: TickSink,
+        ibkr_cfg: dict,
+        future_sink: Any | None = None,
+    ) -> None:
         self._sink = sink
         self._max_iv = loader.as_float(ibkr_cfg, "max_iv", module=_CFG)
         self._min_iv = loader.as_float(ibkr_cfg, "min_iv", module=_CFG)
         self._use_model = loader.as_bool(ibkr_cfg, "use_model_greeks", module=_CFG)
         self._spot_con_id: int = 0
+        #: 期货 tick 的去处。**显式注入**，不从 sink 上探测属性 ——
+        #: 期货不进 ``TickSink`` 链（理由见 ``contracts.tick.FutureTick``）。
+        self._future_sink = future_sink
+        self._future_contracts: dict[int, str] = {}
         self._routed: int = 0
         self._rejected: int = 0
 
@@ -84,6 +100,18 @@ class TickRouter:
     def set_spot_con_id(self, con_id: int) -> None:
         """登记标的合约的 conId，用于在批量回调中把它分流出去。"""
         self._spot_con_id = int(con_id or 0)
+
+    def set_future_contracts(self, mapping: dict[int, str]) -> None:
+        """
+        登记期货合约：``{conId: 到期日 "YYYYMMDD"}``。
+
+        到期日必须来自 IBKR（``ContractDetails.realExpirationDate``）。本模块
+        只做"conId → 到期日"的转发，**不推算任何日期** —— 换月日静默错值就是
+        从"自己算第三个周五"开始的。
+        """
+        self._future_contracts = {
+            int(con_id): str(expiry) for con_id, expiry in mapping.items()
+        }
 
     @property
     def routed(self) -> int:
@@ -110,6 +138,9 @@ class TickRouter:
                 if self._is_spot(ticker):
                     if self._emit_spot(ticker):
                         count += 1
+                elif self._is_future(ticker):
+                    if self._emit_future(ticker):
+                        count += 1
                 elif self._emit_option(ticker):
                     count += 1
             except Exception:
@@ -121,6 +152,12 @@ class TickRouter:
             return False
         contract = getattr(ticker, "contract", None)
         return int(getattr(contract, "conId", 0) or 0) == self._spot_con_id
+
+    def _is_future(self, ticker: Any) -> bool:
+        if not self._future_contracts:
+            return False
+        contract = getattr(ticker, "contract", None)
+        return int(getattr(contract, "conId", 0) or 0) in self._future_contracts
 
     # ------------------------------------------------------------------ #
     # 标的
@@ -154,6 +191,35 @@ class TickRouter:
         if bid and ask and bid > 0 and ask > 0:
             return (bid + ask) / 2.0
         return None
+
+    # ------------------------------------------------------------------ #
+    # 期货
+    # ------------------------------------------------------------------ #
+
+    def _emit_future(self, ticker: Any) -> bool:
+        """
+        把一条期货 ticker 归一化成 ``FutureTick`` 交给 ``future_sink``。
+
+        没有注入 ``future_sink`` 时返回 False —— 期货被忽略是**正常**的，
+        不是错误：``tools/`` 下的既有回归不传该参数，仍应照常工作。
+
+        取价复用 ``_spot_price``：期货与指数在 IBKR 侧都是普通 ticker，
+        字段名一致（实测 ``marketPrice()`` / ``last`` 均有值）。
+        """
+        if self._future_sink is None:
+            return False
+        contract = getattr(ticker, "contract", None)
+        expiry = self._future_contracts.get(int(getattr(contract, "conId", 0) or 0))
+        if not expiry:
+            return False
+        price = self._spot_price(ticker)
+        if price is None or price <= 0:
+            return False
+        self._future_sink.on_future_tick(
+            FutureTick(expiry=expiry, price=price, ts=now_ts())
+        )
+        self._routed += 1
+        return True
 
     # ------------------------------------------------------------------ #
     # 期权

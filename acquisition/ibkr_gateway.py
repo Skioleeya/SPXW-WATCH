@@ -336,9 +336,47 @@ class IbkrGateway:
             await ib.reqSecDefOptParamsAsync(symbol, "", sec_type, int(con_id))
         )
 
+    async def fetch_future_months(self, contract: Any, count: int) -> list[Any]:
+        """
+        枚举期货可交易月份，取**最近**的 ``count`` 个（按到期月升序）。
+
+        返回 ``ContractDetails`` 对象本身，而不是 ``Contract`` —— 调用方要从它
+        取 ``realExpirationDate``（精度到日），那是 ``ContractDetails`` 上的字段；
+        ``Contract.lastTradeDateOrContractMonth`` 在部分合约上只到月。
+
+        实测（2026-09-14，ES/CME）：不带月份请求会返回**全部**可交易月份
+        （21 条，远月到 2028-12），每条都带 conId 与 ``realExpirationDate``。
+        因此拿到即可直接订阅，**无需再 qualify**。
+
+        只保留有 conId 的条目：没有 conId 的合约在 ``ib_async`` 里连 ``hash()``
+        都过不了，订阅必然失败（见 ``qualify_many`` 的说明）。
+        """
+        ib = self._require_ib()
+        details = list(await ib.reqContractDetailsAsync(contract))
+        dated = [
+            item for item in details
+            if int(getattr(item.contract, "conId", 0) or 0) > 0
+        ]
+        dated.sort(
+            key=lambda item: str(
+                getattr(item.contract, "lastTradeDateOrContractMonth", "")
+            )
+        )
+        return dated[: max(int(count), 0)]
+
     def subscribe_spot(self, contract: Any, generic_ticks: str = "") -> Any:
         """订阅标的现价。"""
         return self._require_ib().reqMktData(contract, generic_ticks, False, False)
+
+    def subscribe_future(self, contract: Any) -> Any:
+        """
+        订阅一条期货行情。
+
+        与 ``subscribe_spot`` 的差别只在语义与 generic ticks：期货不需要
+        ``tickOptionComputation``（那是期权的），传空串即可，省掉无谓的消息量。
+        实测（2026-09-14）ES 前月订阅后 ``marketPrice()`` 与 bid/ask 均正常。
+        """
+        return self._require_ib().reqMktData(contract, "", False, False)
 
     def subscribe_option(self, contract: Any) -> Any:
         """

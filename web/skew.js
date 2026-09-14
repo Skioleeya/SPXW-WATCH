@@ -116,6 +116,10 @@
     var sign = H.splitBySign(skew);
     this._series = series;
 
+    /* 图例色陷阱：ECharts 的 legend 图标读 `series.itemStyle.color`，
+       不读 `lineStyle.color`；两者都没设时才退到按 series 索引的默认调色板。
+       ⇒ 每条的 `itemStyle.color` 必须与 `lineStyle.color` 同值 —— **两处必须一起改**，
+       `itemStyle` 不是冗余（`showSymbol:false` 时它不参与画线，只喂图例）。 */
     var graphs = [
       {
         name: H.NAME_POS,
@@ -125,6 +129,7 @@
         showSymbol: false,
         smooth: false,
         lineStyle: { width: 2.2, color: CFG.theme.hot },
+        itemStyle: { color: CFG.theme.hot },
         connectNulls: false,
         z: 5
       },
@@ -136,6 +141,7 @@
         showSymbol: false,
         smooth: false,
         lineStyle: { width: 2.2, color: CFG.theme.cool },
+        itemStyle: { color: CFG.theme.cool },
         connectNulls: false,
         z: 5
       }
@@ -146,6 +152,7 @@
         name: "ATM IV", type: "line", yAxisIndex: 1, data: atm,
         showSymbol: false, smooth: false,
         lineStyle: { width: 1.1, type: "dotted", color: CFG.theme.textFaint },
+        itemStyle: { color: CFG.theme.textFaint },
         connectNulls: true, z: 2
       });
     }
@@ -154,6 +161,7 @@
         name: "25Δ Put IV", type: "line", yAxisIndex: 1, data: put25,
         showSymbol: false, smooth: false,
         lineStyle: { width: 1.1, type: "dashed", color: CFG.theme.hot, opacity: .75 },
+        itemStyle: { color: CFG.theme.hot },
         connectNulls: true, z: 3
       });
     }
@@ -162,6 +170,7 @@
         name: "25Δ Call IV", type: "line", yAxisIndex: 1, data: call25,
         showSymbol: false, smooth: false,
         lineStyle: { width: 1.1, type: "dashed", color: CFG.theme.cool, opacity: .75 },
+        itemStyle: { color: CFG.theme.cool },
         connectNulls: true, z: 3
       });
     }

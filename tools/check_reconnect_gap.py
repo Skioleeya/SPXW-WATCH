@@ -19,8 +19,16 @@ L6 — 断流恢复的「断代留白」回归。
 本回归的判别力
 --------------
 用例 2 是**对照**：同一串数据、不打断代标记，必须复现出 +2.5 波动率点的尖峰。
-它证明用例 1 的断言不是恒真的。``--selftest`` 进一步把 ``HeatmapEngine.observe``
-换成"吞掉 break_now 参数"的版本 —— 此时用例 1 必须 FAIL。
+它证明用例 1 的断言不是恒真的。
+
+另一条同族判据（2026-09-14 加）：**长空洞不能拉出「假 0 带」**。前向填充的假定
+只对短跨度成立；进程重启后 ``recover()`` 捞回的孤立旧桶若被一路沿用，图上会
+出现横跨整段会话的 ΔIV=0 亮黄绿带，与真"IV 没变"无法区分。用例 4 走真实恢复
+入口 ``load_snapshot()``，钉住"上限内沿用、上限外留白、恢复首桶不做差"。
+
+``--selftest`` 注入两处缺陷 —— ① 把 ``HeatmapEngine.observe`` 换成"吞掉
+break_now 参数"的版本（用例 1 必须 FAIL）；② 把 ``_row_values`` 里的前向填充
+上限推到无穷（用例 4 必须 FAIL）。两者都复现不出失败 ⇒ 回归是空转的。
 
 用法::
 
@@ -197,6 +205,40 @@ def case_quiet_strike_keeps_zero() -> tuple[bool, str]:
     return ok, f"安静档位中间各桶 ΔIV = {middle}（期望全 0，前向填充未被打断）"
 
 
+def case_long_gap_is_blanked() -> tuple[bool, str]:
+    """孤立旧桶 + 长空洞：**超出前向填充上限**的桶必须留白，不能拉出「假 0 带」。
+
+    2026-09-14 实测来源：进程重启后 ``recover()`` 捞回上一存活期写在 20:15 的
+    单个桶，而 ``load_snapshot()`` 照单全收；若前向填充没有上限，该桶会被一路
+    沿用到当前，图上出现一条横跨整段会话的 ΔIV=0 亮黄绿带 —— 与真"IV 没变"
+    肉眼无法区分，且在首次真观测处与陈旧值做差、凭空造出一个冲量。
+
+    上限值不写死，从 ``config/serialization.json::heatmap_max_ffill_buckets`` 读，
+    这样调阈值不会让本用例变成假警报。
+    """
+    cfg = loader.load("serialization")
+    limit = int(cfg["heatmap_max_ffill_buckets"])
+    far = limit + 5                       # 明确越过上限
+    clock, _ = make_clock()
+    engine = HeatmapEngine(clock, cfg)
+
+    # 走真实恢复入口（app/pipeline.py 就是这么喂的），而不是直接摸 _buckets
+    engine.load_snapshot([
+        {"bucket_index": 0, "ivs": {STRIKE: IV_BEFORE}, "break": False},
+        {"bucket_index": far, "ivs": {STRIKE: IV_AFTER}, "break": False},
+    ])
+    row = row_of(engine, STRIKE, far)
+
+    inside = row[limit]        # 上限之内：沿用上一个已知 IV ⇒ 0
+    beyond = row[limit + 1]    # 上限之外：必须留白
+    resume = row[far]          # 恢复首桶：不与陈旧值做差
+    ok = inside == 0.0 and beyond is None and resume is None
+    return ok, (
+        f"上限内 ΔIV={inside!r}（期望 0.0）· 上限外 ΔIV={beyond!r}（期望 None）"
+        f"· 恢复桶 ΔIV={resume!r}（期望 None）[上限 {limit} 桶]"
+    )
+
+
 def case_gap_state_machine() -> tuple[bool, str]:
     """``FeatureEngine._note_feed_gap`` 每次断流只报一次 True，且只在恢复那刻。"""
     from features.feature_engine import FeatureEngine
@@ -231,6 +273,7 @@ def run_suite(use_break: bool) -> tuple[bool, list[str]]:
         ("断流恢复的第一桶留白", case_gap_is_blanked(use_break)),
         ("断代只影响那一桶", case_break_is_one_bucket_only()),
         ("安静档位不被误伤", case_quiet_strike_keeps_zero()),
+        ("长空洞不拉出假 0 带", case_long_gap_is_blanked()),
         ("断流状态机只报一次", case_gap_state_machine()),
     ]
     lines: list[str] = []
@@ -254,23 +297,42 @@ def main(argv: list[str] | None = None) -> int:
     print("=" * 72)
 
     if args.selftest:
-        original = HeatmapEngine.observe
+        original_observe = HeatmapEngine.observe
+        original_row_values = HeatmapEngine._row_values
 
-        def broken(self, cells, now, break_now=False):  # noqa: ANN001
-            return original(self, cells, now, break_now=False)
+        def broken_observe(self, cells, now, break_now=False):  # noqa: ANN001
+            return original_observe(self, cells, now, break_now=False)
 
-        HeatmapEngine.observe = broken
-        print("\n[--selftest] 已注入缺陷：HeatmapEngine.observe 吞掉 break_now\n")
+        def broken_row_values(self, bucket, current):  # noqa: ANN001
+            """把前向填充上限推到无穷 —— 复现 2026-09-14 的「假 0 带」。"""
+            saved = self._max_ffill
+            self._max_ffill = 10 ** 9
+            try:
+                return original_row_values(self, bucket, current)
+            finally:
+                self._max_ffill = saved
+
+        HeatmapEngine.observe = broken_observe
+        HeatmapEngine._row_values = broken_row_values
+        print(
+            "\n[--selftest] 已注入两处缺陷："
+            "① observe 吞掉 break_now；② 前向填充上限推到无穷\n"
+        )
         try:
             ok, lines = run_suite(use_break=True)
         finally:
-            HeatmapEngine.observe = original
+            HeatmapEngine.observe = original_observe
+            HeatmapEngine._row_values = original_row_values
         print("\n".join(lines))
+        red = [
+            ln.split("] ", 1)[1].split(" ——")[0]
+            for ln in lines if "[FAIL]" in ln
+        ]
         print()
         if ok:
             print("结果: --selftest 未复现失败 —— 回归是空转的，必须修")
             return 1
-        print("结果: --selftest 已复现失败（用例 1 变红）—— 回归有判别力")
+        print(f"结果: --selftest 已复现失败（变红: {red}）—— 回归有判别力")
         return 0
 
     ok, lines = run_suite(use_break=True)

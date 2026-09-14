@@ -48,6 +48,24 @@ window.SWATCH_CONFIG = {
     xLabelCount: 14,
     showSpotLine: true,
 
+    /* 网格线 —— 旧版 ECharts 的 `itemStyle: {borderWidth:1, borderColor: theme.grid}`
+       在 af2e2e4 的 WebGL 重写中被删除（theme.grid 一度成为**死配置**，2026-09-14 定位）。
+       2026-09-14 渲染器换回 ECharts 后，恢复方式改为轴 `splitLine`：
+       颜色取 `theme.grid`、宽度 1px，`cellBorderMix` 映射为线的 opacity ——
+       `opacity m` 的线叠在数据色上 ≡ 旧 shader 的 `mix(color, border, m)`，数学等价。
+
+       **网格线按最小间距抽样**：细档位列宽只有 1–2 像素（30 秒档 2370 列在
+       1250px 网格里每列仅 0.53px；1 分档 630 列 ⇒ 2px），每格都画线等于把格子吃光。
+       所以每 `stride` 个分类画一条，`stride = ceil(cellBorderMinPx / cellPx)` ——
+       线间距恒 ≥ 本值。
+       用 splitLine 而不是逐格 `itemStyle.borderWidth` 的原因：后者要给 5.7 万个矩形
+       各描一次边，在 2370 列下既是性能灾难、又会把细档位糊成一片。
+
+       取值建议：**5 左右**。太小（< 3）线会挨到一起变糊；太大（> 10）网格会稀到
+       失去"格子"的观感。单位是 CSS 像素（ECharts 坐标单位）。 */
+    cellBorderMix: 0.55,
+    cellBorderMinPx: 5,
+
     /* 可选时间周期（秒）。这是纯呈现参数：它只决定给用户几个缩放档位。
        真正的基线桶宽由后端帧里的 heatmap.bucket_seconds 给出，前端不复制 ——
        不满足"基线桶宽整数倍"的项会被自动丢弃并告警（见 web/period.js）。 */

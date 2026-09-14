@@ -5,7 +5,7 @@ L0 — 通用基元层。
 **不 import 项目内任何其他包**，也不读取配置（配置由上层注入）。
 """
 
-from core.clock import SessionClock, WallClock, minutes_of_day, now_ts, parse_hm
+from core.clock import SessionClock, WallClock, now_ts
 from core.errors import (
     AcquisitionError,
     ChainResolveError,
@@ -25,6 +25,7 @@ from core.errors import (
 )
 from core.logging_setup import configure, get_logger
 from core.ring_buffer import RingBuffer, Sample
+from core.session_grid import minutes_of_day, parse_hm
 
 __all__ = [
     "AcquisitionError",

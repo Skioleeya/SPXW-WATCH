@@ -1,32 +1,57 @@
-/* 日内 IV 冲量热力图 (WebGL 版)
+/* 日内 IV 冲量热力图（ECharts 版）
  * ------------------------------------------------------------------
- * 底层用原生 WebGL (gl_heatmap.js) 渲染格子，上层用 HTML/CSS 覆盖轴标签
- * 与交互。接口与旧版（ECharts）保持兼容，app.js 无需改动。
+ * 2026-09-14：渲染器由原生 WebGL（gl_heatmap.js）换回 ECharts。
  *
- * 布局（与旧版 ECharts grid 对齐）：
- *   left=66  right=84  top=10  bottom=28
+ * 为什么换回来
+ * ------------
+ * 自写 GL 引擎连续产出四个只有真打开页面才看得见的缺陷：行序镜像、格子边框
+ * 丢失、调色板纹理被绑错单元（换任何色都不生效）、高 dpi 下网格阈值漂移。
+ * ECharts 的坐标轴 / 色标 / 提示框都是被验证过的实现，且 Skew 面板本就在用
+ * 同一个库 —— 换回来同时消掉"两套渲染栈"这件事。
+ *
+ * 代价（实测，必须记住）
+ * ----------------------
+ * headless Chrome 153 + SwiftShader，1400×520 画布、24 行、27% 填充：
+ *   cols=630   ECharts 重绘 65.7ms   vs WebGL 0.6ms
+ *   cols=1352  ECharts 重绘 159.9ms  vs WebGL 1.0ms
+ *   cols=2370  ECharts 重绘 188.1ms  vs WebGL 1.3ms
+ * 帧到达节拍由 web/ws_client.js 合并到 400ms（后端推送间隔）⇒ 宽档位下本面板
+ * 会持续占用 40–47% 单核。这是**已知且被接受**的取舍，不是回归。
+ * 另：`progressive` 在此形状下是负优化（2370 列 424ms），故恒为 0。
+ *
+ * 网格线
+ * ------
+ * 参考项目（live-volatility-surface）用 Plotly 的 `xgap=1 / ygap=1` 做格子间隙，
+ * ECharts 的 heatmap 没有等价项。这里改用轴的 splitLine 按步长抽样：
+ *   stride = ceil(cellBorderMinPx / cellPx)，每 stride 个分类画一条 1px 线。
+ * `cellBorderMix` 映射为线的 opacity —— `opacity m` 的线叠在数据色上
+ * ≡ 旧 shader 的 `mix(color, border, m)`，两者数学等价。
+ * 用 splitLine 而不是逐格 `itemStyle.borderWidth` 的原因：后者在 2370 列时
+ * 等于给 5.7 万个矩形各描一次边，既是性能灾难、又会把细档位糊成一片。
  * ------------------------------------------------------------------ */
-(function(global) {
+(function (global) {
   "use strict";
 
   var CFG = global.SWATCH_CONFIG;
+  /* 边距与旧 WebGL 版一致，轴标签与色标的位置不变。 */
   var PAD = { left: 66, right: 84, top: 10, bottom: 28 };
 
   function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, function(m) {
-      return { "&":"&amp;", "<":"&lt;", ">":"&gt;", "\"":"&quot;", "'":"&#39;" }[m];
+    return String(s).replace(/[&<>"']/g, function (m) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[m];
     });
   }
 
+  /* 轴标签抽稀：返回值直接喂给 ECharts 的 axisLabel.interval（0 = 全画）。 */
   function xInterval(cols) {
     var want = CFG.heatmap.xLabelCount;
-    if (cols <= want) return 0;
+    if (cols <= want) { return 0; }
     return Math.max(Math.floor(cols / want) - 1, 0);
   }
 
   function yInterval(rows) {
     var want = CFG.heatmap.maxYLabels;
-    if (rows <= want) return 0;
+    if (rows <= want) { return 0; }
     return Math.max(Math.floor(rows / want) - 1, 0);
   }
 
@@ -39,8 +64,136 @@
     return best;
   }
 
+  /* 网格线抽样步长。列/行宽于 cellBorderMinPx 时 stride=1（每格一条）。 */
+  function strideFor(spanPx, count) {
+    var cellPx = spanPx / Math.max(count, 1);
+    var minPx = CFG.heatmap.cellBorderMinPx;
+    if (!(minPx > 0) || !(cellPx > 0)) { return 1; }
+    return Math.max(1, Math.ceil(minPx / cellPx));
+  }
+
   /* ------------------------------------------------------------------ */
-  /* 构造函数                                                            */
+  /* Option 构建                                                         */
+  /* ------------------------------------------------------------------ */
+
+  function buildOption(panel, block, spot, vmax) {
+    var strikes = block.strikes || [];
+    var rights = block.rights || [];
+    var labels = block.labels || [];
+    var values = block.values || [];
+    var rows = strikes.length;
+    var cols = labels.length;
+
+    var data = [];
+    for (var r = 0; r < rows; r++) {
+      var row = values[r] || [];
+      for (var c = 0; c < cols; c++) {
+        var v = row[c];
+        if (v !== null && v !== undefined) { data.push([c, r, v]); }
+      }
+    }
+
+    var rect = panel._el.getBoundingClientRect();
+    var gridW = Math.max(1, rect.width - PAD.left - PAD.right);
+    var gridH = Math.max(1, rect.height - PAD.top - PAD.bottom);
+    var strideX = strideFor(gridW, cols);
+    var strideY = strideFor(gridH, rows);
+    var mix = CFG.heatmap.cellBorderMix > 0 ? CFG.heatmap.cellBorderMix : 0;
+    var line = { color: CFG.theme.grid, width: 1, opacity: mix };
+
+    var yNames = [];
+    for (var i = 0; i < rows; i++) { yNames.push(strikes[i] + (rights[i] || "")); }
+
+    var bound = vmax > 0 ? vmax : CFG.heatmap.boundEpsilon;
+    var markLine;
+    if (CFG.heatmap.showSpotLine && spot > 0) {
+      var idx = nearestIndex(strikes, spot);
+      if (idx >= 0) {
+        markLine = {
+          silent: true, symbol: "none", animation: false,
+          label: { show: false },
+          lineStyle: { color: CFG.theme.accent, type: "dashed", width: 1 },
+          data: [{ yAxis: idx }]
+        };
+      }
+    }
+
+    return {
+      animation: false,
+      backgroundColor: "transparent",
+      grid: { left: PAD.left, right: PAD.right, top: PAD.top, bottom: PAD.bottom },
+      tooltip: {
+        trigger: "item",
+        backgroundColor: "rgba(17,21,26,.96)",
+        borderColor: CFG.theme.border,
+        textStyle: { color: CFG.theme.text, fontSize: 11 },
+        formatter: function (p) {
+          var c = p.value[0], r = p.value[1], v = p.value[2];
+          var sign = v > 0 ? "+" : "";
+          return escapeHtml(labels[c]) + " · " + escapeHtml(strikes[r]) +
+            escapeHtml(rights[r] || "?") + "<br/>ΔIV <b>" + sign +
+            Number(v).toFixed(CFG.decimals.impulse) + "</b> 波动率点";
+        }
+      },
+      /* 色标：连续 visualMap，量程 [-vmax, +vmax] 与后端下发一致。
+         15 色 = config.heatmap.palette（逐色抄自参考项目的 Plotly Turbo）。 */
+      visualMap: {
+        type: "continuous",
+        show: true,
+        min: -bound, max: bound,
+        calculable: false,
+        orient: "vertical",
+        right: 14, top: "center",
+        itemWidth: 11, itemHeight: 150,
+        precision: 2,
+        text: ["IV 上行 +" + bound.toFixed(2), "IV 下行 -" + bound.toFixed(2)],
+        textStyle: { color: CFG.theme.textDim, fontSize: 9.5 },
+        inRange: { color: CFG.heatmap.palette }
+      },
+      xAxis: {
+        type: "category",
+        data: labels,
+        boundaryGap: true,
+        axisLine: { lineStyle: { color: CFG.theme.border } },
+        axisTick: { show: false },
+        splitLine: { show: mix > 0, interval: strideX - 1, lineStyle: line },
+        axisLabel: {
+          color: CFG.theme.textFaint,
+          fontSize: 10,
+          interval: xInterval(cols),
+          hideOverlap: true
+        }
+      },
+      yAxis: {
+        type: "category",
+        data: yNames,
+        boundaryGap: true,
+        /* 索引 0 = 最高行权价，必须落在屏幕最上方（帧行序即降序行权价）。 */
+        inverse: true,
+        axisLine: { lineStyle: { color: CFG.theme.border } },
+        axisTick: { show: false },
+        splitLine: { show: mix > 0, interval: strideY - 1, lineStyle: line },
+        axisLabel: {
+          color: CFG.theme.textDim,
+          fontSize: 10,
+          interval: yInterval(rows),
+          hideOverlap: true
+        }
+      },
+      series: [{
+        type: "heatmap",
+        data: data,
+        /* 此形状下 progressive 更慢（见文件头实测），恒关。 */
+        progressive: 0,
+        animation: false,
+        itemStyle: { borderWidth: 0 },
+        markLine: markLine
+      }]
+    };
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* 面板                                                                */
   /* ------------------------------------------------------------------ */
 
   function HeatmapPanel(el) {
@@ -48,206 +201,41 @@
     this._rows = 0;
     this._cols = 0;
     this._cells = 0;
-
-    el.style.position = "relative";
-    el.innerHTML = "";
-
-    var canvas = document.createElement("canvas");
-    canvas.style.cssText = "position:absolute;top:0;left:0;width:100%;height:100%;";
-    el.appendChild(canvas);
-
-    var overlay = document.createElement("div");
-    overlay.style.cssText = "position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;";
-    el.appendChild(overlay);
-    this._overlay = overlay;
-
-    var tip = document.createElement("div");
-    tip.style.cssText =
-      "position:absolute;display:none;padding:6px 10px;" +
-      "background:rgba(17,21,26,.96);border:1px solid " + CFG.theme.border + ";" +
-      "color:" + CFG.theme.text + ";font-size:11px;z-index:10;" +
-      "pointer-events:none;white-space:nowrap;line-height:1.6;";
-    el.appendChild(tip);
-    this._tooltip = tip;
-
-    var spotLine = document.createElement("div");
-    spotLine.style.cssText =
-      "position:absolute;display:none;border-top:1px dashed " + CFG.theme.accent + ";" +
-      "pointer-events:none;z-index:5;";
-    el.appendChild(spotLine);
-    this._spotLine = spotLine;
-
-    /* WebGL 初始化 */
-    try {
-      this._gl = new global.GlHeatmap(canvas);
-    } catch (err) {
-      canvas.style.display = "none";
-      var msg = document.createElement("div");
-      msg.style.cssText = "padding:40px;text-align:center;color:" + CFG.theme.hot;
-      msg.textContent = "WebGL 不可用，无法渲染热力图";
-      el.appendChild(msg);
-      this._gl = null;
-    }
-
     this._block = null;
     this._spot = 0;
-
-    this._bindEvents();
-    this._onResize();
-    var self = this;
-    global.addEventListener("resize", function() { self._onResize(); });
+    this._chart = global.echarts.init(el, null, { renderer: "canvas" });
   }
 
-  /* ------------------------------------------------------------------ */
-  /* 几何                                                                */
-  /* ------------------------------------------------------------------ */
-
-  HeatmapPanel.prototype._onResize = function() {
-    if (!this._gl) return;
-    var r = this._el.getBoundingClientRect();
-    this._gl.resize(Math.floor(r.width), Math.floor(r.height));
-    if (this._block) this._draw();
-  };
-
-  HeatmapPanel.prototype._gridRect = function() {
-    var r = this._el.getBoundingClientRect();
-    var w = r.width, h = r.height;
-    return {
-      x: PAD.left, y: PAD.top,
-      w: Math.max(1, w - PAD.left - PAD.right),
-      h: Math.max(1, h - PAD.top - PAD.bottom),
-      totalW: w, totalH: h
-    };
-  };
-
-  /* ------------------------------------------------------------------ */
-  /* 绘制                                                                */
-  /* ------------------------------------------------------------------ */
-
-  HeatmapPanel.prototype._drawOverlay = function() {
+  HeatmapPanel.prototype._render = function () {
     var block = this._block;
-    if (!block) return;
-    var strikes = block.strikes || [];
-    var labels = block.labels || [];
-    var rows = strikes.length;
-    var cols = labels.length;
-    var g = this._gridRect();
-    var html = "";
-
-    /* Y 轴：行权价（左侧） */
-    var yi = yInterval(rows);
-    for (var i = 0; i < rows; i++) {
-      if (yi > 0 && i % (yi + 1) !== 0) continue;
-      var y = g.y + (i + 0.5) / rows * g.h;
-      html += '<div style="position:absolute;left:8px;top:' + y.toFixed(1) +
-        'px;transform:translateY(-50%);color:' + CFG.theme.textDim +
-        ';font-size:10px;">' + escapeHtml(strikes[i]) + '</div>';
-    }
-
-    /* X 轴：时间标签（底部） */
-    var xi = xInterval(cols);
-    for (var i = 0; i < cols; i++) {
-      if (xi > 0 && i % (xi + 1) !== 0) continue;
-      var x = g.x + (i + 0.5) / cols * g.w;
-      html += '<div style="position:absolute;left:' + x.toFixed(1) +
-        'px;bottom:6px;transform:translateX(-50%);color:' + CFG.theme.textFaint +
-        ';font-size:10px;">' + escapeHtml(labels[i]) + '</div>';
-    }
-
-    /* Visual map：色标条（右侧） */
-    var vmW = 11, vmH = 150;
-    var vmX = g.totalW - PAD.right + 30;
-    var vmY = g.totalH / 2;
-    var grad = "linear-gradient(to top," + CFG.heatmap.palette.join(",") + ")";
-    html += '<div style="position:absolute;left:' + vmX + 'px;top:' + vmY +
-      'px;transform:translateY(-50%);width:' + vmW + 'px;height:' + vmH +
-      'px;border-radius:2px;background:' + grad + ';"></div>';
-    /* 数值 */
-    var vmax = (block.vmax > 0 ? block.vmax : CFG.heatmap.boundEpsilon).toFixed(2);
-    html += '<div style="position:absolute;left:' + (vmX + vmW + 6) + 'px;top:' +
-      (vmY - vmH / 2 - 2) + 'px;color:' + CFG.theme.textDim +
-      ';font-size:9.5px;">+' + vmax + '</div>';
-    html += '<div style="position:absolute;left:' + (vmX + vmW + 6) + 'px;top:' +
-      (vmY + vmH / 2 - 8) + 'px;color:' + CFG.theme.textDim +
-      ';font-size:9.5px;">-' + vmax + '</div>';
-    /* 语义 */
-    html += '<div style="position:absolute;left:' + (vmX + vmW + 6) + 'px;top:' +
-      (vmY - vmH / 2 + 10) + 'px;color:' + CFG.theme.textDim +
-      ';font-size:9.5px;">IV 上行</div>';
-    html += '<div style="position:absolute;left:' + (vmX + vmW + 6) + 'px;top:' +
-      (vmY + vmH / 2 - 22) + 'px;color:' + CFG.theme.textDim +
-      ';font-size:9.5px;">IV 下行</div>';
-
-    this._overlay.innerHTML = html;
-  };
-
-  HeatmapPanel.prototype._drawSpotLine = function() {
-    var line = this._spotLine;
-    if (!CFG.heatmap.showSpotLine || this._spot <= 0 || !this._block) {
-      line.style.display = "none";
-      return;
-    }
-    var strikes = this._block.strikes || [];
-    var idx = nearestIndex(strikes, this._spot);
-    if (idx < 0) { line.style.display = "none"; return; }
-    var g = this._gridRect();
-    var y = g.y + (idx + 0.5) / strikes.length * g.h;
-    line.style.display = "block";
-    line.style.left = g.x + "px";
-    line.style.top = y.toFixed(1) + "px";
-    line.style.width = g.w + "px";
-  };
-
-  HeatmapPanel.prototype._draw = function() {
-    if (!this._gl) return;
-    var block = this._block;
-    if (!block || !block.values) return;
-
-    var strikes = block.strikes || [];
-    var labels = block.labels || [];
-    var values = block.values || [];
-    var rows = strikes.length;
-    var cols = labels.length;
-    if (!rows || !cols) return;
-
+    if (!block) { return; }
     var vmax = block.vmax > 0 ? block.vmax : CFG.heatmap.boundEpsilon;
-
-    var g = this._gridRect();
-    var gl = this._gl;
-    gl.setGrid(
-      PAD.left / g.totalW,
-      1.0 - PAD.top / g.totalH,
-      (PAD.left + g.w) / g.totalW,
-      1.0 - (PAD.top + g.h) / g.totalH
-    );
-    gl.setBg(0.067, 0.078, 0.102, 1.0);
-    gl.update(rows, cols, values, vmax, block.volumes);
-    gl.render();
-
-    this._drawOverlay();
-    this._drawSpotLine();
+    this._chart.setOption(buildOption(this, block, this._spot, vmax), true);
   };
 
-  /* ------------------------------------------------------------------ */
-  /* 公共接口（与旧版完全兼容）                                          */
-  /* ------------------------------------------------------------------ */
+  HeatmapPanel.prototype.resize = function () {
+    this._chart.resize();
+    /* 网格线步长按画布像素算，尺寸变了要重画。 */
+    this._render();
+  };
 
-  HeatmapPanel.prototype.update = function(block, spot) {
-    if (!block || !block.values) return false;
+  /* 公共接口与旧 WebGL 版完全一致，app.js / app_render.js 无需改动。 */
+  HeatmapPanel.prototype.update = function (block, spot) {
+    if (!block || !block.values) { return false; }
 
     var strikes = block.strikes || [];
     var labels = block.labels || [];
     var values = block.values || [];
     var rows = strikes.length;
     var cols = labels.length;
-    if (!rows || !cols) return false;
+    if (!rows || !cols) { return false; }
 
     var vmax = block.vmax > 0 ? block.vmax : CFG.heatmap.boundEpsilon;
     var cells = 0;
     for (var r = 0; r < rows; r++) {
       var row = values[r] || [];
       for (var c = 0; c < cols; c++) {
-        if (row[c] !== null && row[c] !== undefined) cells++;
+        if (row[c] !== null && row[c] !== undefined) { cells++; }
       }
     }
 
@@ -257,86 +245,21 @@
     this._cols = cols;
     this._cells = cells;
 
-    if (!this._gl) return false;
-    this._draw();
-
+    this._render();
     return { rows: rows, cols: cols, cells: cells, vmax: vmax };
   };
 
-  HeatmapPanel.prototype.resize = function() {
-    this._onResize();
-  };
-
-  HeatmapPanel.prototype.clear = function() {
+  HeatmapPanel.prototype.clear = function () {
     this._block = null;
+    this._spot = 0;
     this._rows = 0;
     this._cols = 0;
     this._cells = 0;
-    this._overlay.innerHTML = "";
-    this._spotLine.style.display = "none";
-    this._tooltip.style.display = "none";
-    if (!this._gl) return;
-    var g = this._gridRect();
-    this._gl.setBg(0.067, 0.078, 0.102, 1.0);
-    this._gl.setGrid(0, 1, 0, 0);
-    this._gl.render();
+    this._chart.clear();
   };
 
-  HeatmapPanel.prototype.stats = function() {
+  HeatmapPanel.prototype.stats = function () {
     return { rows: this._rows, cols: this._cols };
-  };
-
-  /* ------------------------------------------------------------------ */
-  /* 交互：Tooltip                                                       */
-  /* ------------------------------------------------------------------ */
-
-  HeatmapPanel.prototype._bindEvents = function() {
-    if (!this._gl) return;
-    var self = this;
-    var canvas = this._gl._canvas;
-
-    canvas.addEventListener("mousemove", function(e) {
-      var block = self._block;
-      if (!block) return;
-      var rect = canvas.getBoundingClientRect();
-      var mx = e.clientX - rect.left;
-      var my = e.clientY - rect.top;
-      var g = self._gridRect();
-
-      if (mx < g.x || mx > g.x + g.w || my < g.y || my > g.y + g.h) {
-        self._tooltip.style.display = "none";
-        return;
-      }
-
-      var col = Math.floor((mx - g.x) / g.w * self._cols);
-      var row = Math.floor((my - g.y) / g.h * self._rows);
-      col = Math.max(0, Math.min(self._cols - 1, col));
-      row = Math.max(0, Math.min(self._rows - 1, row));
-
-      var strikes = block.strikes || [];
-      var rights = block.rights || [];
-      var labels = block.labels || [];
-      var values = block.values || [];
-      var v = values[row] ? values[row][col] : null;
-
-      if (v === null || v === undefined) {
-        self._tooltip.style.display = "none";
-        return;
-      }
-
-      var sign = v > 0 ? "+" : "";
-      var elRect = self._el.getBoundingClientRect();
-      self._tooltip.innerHTML = escapeHtml(labels[col]) + " · " +
-        escapeHtml(strikes[row]) + escapeHtml(rights[row] || "?") +
-        "<br/>ΔIV <b>" + sign + v.toFixed(CFG.decimals.impulse) + "</b> 波动率点";
-      self._tooltip.style.display = "block";
-      self._tooltip.style.left = (e.clientX - elRect.left + 14) + "px";
-      self._tooltip.style.top = (e.clientY - elRect.top + 10) + "px";
-    });
-
-    canvas.addEventListener("mouseleave", function() {
-      self._tooltip.style.display = "none";
-    });
   };
 
   global.HeatmapPanel = HeatmapPanel;

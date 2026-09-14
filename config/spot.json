@@ -1,0 +1,16 @@
+{
+  "_comment": "L1 采集层 — GTH 时段现货基准合成。背景：SPX 指数在 GTH 不被计算、不被播发（Cboe Rule 9.20 强制披露；S&P DJI 实时指数依赖成分股 Consolidated Tape），IBKR 在 GTH 给的 SPX 指数是**上一交易日收盘的冻结值** —— 2026-09-14 实测：恒定 7656.98，而 ticker.marketDataType 仍报 1（『实时』）。因此 GTH 时段必须自己合成现货基准，锚用 ES 期货（唯一在 GTH 连续交易、学术与业界都认的载体）。禁止引用其他配置文件。",
+  "_method_comment": "合成口径 = B2b（2026-09-14 KAI 拍板）：由前后月期货联立反解 carry，再折回现货。ĉ = (ln F2 − ln F1) / (T2 − T1)；S = F1 · e^(−ĉ · T1)。**不需要任何外部输入**（r 与 q 都由市场价内蕴）。被否的替代：B2a 用外部 (r−q)（实测差 26.6bp，T=0.25 时值 5.04 点，静默错值）；B1 冻结 RTH 观测基差（换月日静默错值数十点）；B3 同到期日期权平价（数值正确，但 GTH 冷时段一侧无报价就取不到 F，降为可选校验通道）。",
+  "_future_comment": "期货合约月与到期日**必须由 IBKR 给**，不得硬编码『第三个周五』—— 那正是 B1 换月失效的同族错误。实测（2026-09-14，ES/CME）：不带月份请求 reqContractDetails 会返回**全部**可交易月份（21 条，远月到 2028-12），每条都带 conId 与 realExpirationDate（精度到日）。future_months 决定取最近几个月；B2b 至少要 2 个（前月 + 次月），订第 3 个是为了**换月之后** (次月, 次次月) 仍能反解 ĉ。",
+  "_handover_comment": "synthesised_zones 决定『哪些会话区段用合成值』。gth 在内、rth 不在 ⇒ 09:25 GTH 段一结束，现货源立即切回 SPX 指数直读（KAI 2026-09-14 指令：必须下线 GTH 的锚定、订阅 SPX；09:30 一开盘指数就有实时数据）。这次切源会让锚跳变 40+ 点（≈8 档，SPXW 档距 5 点），远超订阅侧的 recenter_trigger_strikes（3 档）⇒ 期权订阅窗口会**自动重建**，不需要额外代码。空档 09:25–09:30 系统本就静默（特征层不出值，10 桶留白）。",
+  "_gate_comment": "两层闸门（2026-09-14 KAI 拍板）。第一层 max_abs_carry：|ĉ| 越界即 fail-closed，拦『合约选错 / 数值算崩』这类荒谬值 —— 15% 远超任何现实利率环境。第二层 max_carry_jump：相邻两次反解的 |Δĉ| 越界即**拒收该桶**，拦瞬时毛刺（实测 ĉ 波动仅 2.7bp，50bp ≈ 18σ）。两层都只做『本次不出值』，**绝不回落到上一次的旧值** —— 静默回落等于把『没有现货』伪装成『有现货』。",
+  "enabled": true,
+  "future_symbol": "ES",
+  "future_sec_type": "FUT",
+  "future_exchange": "CME",
+  "future_currency": "USD",
+  "future_months": 3,
+  "synthesised_zones": ["gth"],
+  "max_abs_carry": 0.15,
+  "max_carry_jump": 0.005
+}

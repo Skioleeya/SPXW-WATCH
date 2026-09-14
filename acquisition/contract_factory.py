@@ -22,17 +22,19 @@ from contracts.tick import OptionRef
 from core.errors import ContractResolveError
 
 _CFG_MODULE = "app"
+_SPOT_MODULE = "spot"
 
 
 class ContractFactory:
-    """按 ``config/app.json`` 的定义构造标的与期权合约。"""
+    """按 ``config/app.json`` 与 ``config/spot.json`` 构造标的、期权与期货合约。"""
 
     __slots__ = (
         "_symbol", "_und_sec_type", "_und_exchange", "_currency",
         "_trading_class", "_opt_exchange", "_multiplier",
+        "_future_symbol", "_future_sec_type", "_future_exchange", "_future_currency",
     )
 
-    def __init__(self, app_cfg: dict) -> None:
+    def __init__(self, app_cfg: dict, spot_cfg: dict) -> None:
         m = _CFG_MODULE
         self._symbol = loader.as_str(app_cfg, "symbol", module=m)
         self._und_sec_type = loader.as_str(app_cfg, "underlying_sec_type", module=m)
@@ -41,6 +43,12 @@ class ContractFactory:
         self._trading_class = loader.as_str(app_cfg, "option_trading_class", module=m)
         self._opt_exchange = loader.as_str(app_cfg, "option_exchange", module=m)
         self._multiplier = loader.as_str(app_cfg, "option_multiplier", module=m)
+
+        s = _SPOT_MODULE
+        self._future_symbol = loader.as_str(spot_cfg, "future_symbol", module=s)
+        self._future_sec_type = loader.as_str(spot_cfg, "future_sec_type", module=s)
+        self._future_exchange = loader.as_str(spot_cfg, "future_exchange", module=s)
+        self._future_currency = loader.as_str(spot_cfg, "future_currency", module=s)
 
     # ------------------------------------------------------------------ #
     # 只读属性
@@ -77,6 +85,25 @@ class ContractFactory:
         contract.secType = self._und_sec_type
         contract.exchange = self._und_exchange
         contract.currency = self._currency
+        return contract
+
+    def future(self) -> Contract:
+        """指数期货合约（**刻意不带月份**）。
+
+        为什么不能在这里算月份
+        ----------------------
+        合约月与到期日必须由 IBKR 给（见 ``IbkrGateway.fetch_future_months``）。
+        硬编码"第三个周五"正是 B1 在换月日静默错值的同族错误 —— 本项目明确禁止。
+
+        实测（2026-09-14，ES/CME）：不带月份的 ``reqContractDetails`` 会返回
+        **全部**可交易月份（21 条，远月到 2028-12），每条都带 conId 与
+        ``realExpirationDate``（精度到日），因此拿到即可直接订阅，无需再 qualify。
+        """
+        contract = Contract()
+        contract.symbol = self._future_symbol
+        contract.secType = self._future_sec_type
+        contract.exchange = self._future_exchange
+        contract.currency = self._future_currency
         return contract
 
     def option(self, expiry: str, strike: float, right: OptionRight) -> Option:

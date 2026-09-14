@@ -113,7 +113,20 @@ window.SWATCH_CONFIG = {
     axisDecimals: 1,
     /* 横轴时间标签的目标数量。按**当前可见列数**算间隔，所以滚轮放大之后
        标签会自动变密（与 heatmap.xLabelCount 同一规则）。 */
-    xLabelCount: 14
+    xLabelCount: 14,
+
+    /* 三条 IV 曲线（右轴）的语义色。
+       **必须与主序列的分段色区分开**：主序列 25Δ Skew 按正负用 hot(红)/cool(蓝)
+       分段；IV 曲线若复用同样两色，图上就只剩"两条红、两条蓝"，再叠加图例里
+       两个同名的 25Δ Skew，用户无法判断哪条是 IV、哪条是 Skew。三条 IV 曲线
+       之间也必须互不同色。
+       语义：atm = ATM 跨式（straddle）IV，put25 = 25Δ Put IV，call25 = 25Δ Call IV。
+       与 style.css 的 --warn / --put / --call 同值（顶栏读数用同一套语义色）。 */
+    colors: {
+      atm: "#ffb020",
+      put25: "#2fd07a",
+      call25: "#ff5a5a"
+    }
   },
 
   /* 小数位（仅显示用） */

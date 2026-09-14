@@ -69,6 +69,19 @@ CLIP_COLUMNS = 400
 SPIKE_AT = 100
 SPIKE_VALUE = 9.0
 
+#: 沙箱按顺序求值的 web 脚本 —— 顺序 = index.html 的真实依赖顺序：
+#: period_align 合并进 SWATCH_PERIOD，skew_helpers 提供 ``global.SKEW``，
+#: skew_option 提供 ``buildSkewFullOption``，skew.js 依赖后两者。
+#:
+#: **单一真相**：沙箱的求值列表与 ``check_skew_viewport._selftest`` 的变异副本
+#: 都取自这一份。2026-09-14 拆分 ``web/`` 时两处各写一份、双双漏补后三个文件，
+#: 让三个回归在驱动阶段直接崩（``P.alignSkew is not a function``）—— 正是这种
+#: 双份清单造成的。
+WEB_SCRIPTS: tuple[str, ...] = (
+    "config.js", "matrix_codec.js", "period.js", "period_align.js",
+    "skew_helpers.js", "skew_option.js", "skew.js",
+)
+
 #: node 侧沙箱：装好 window / atob / ECharts 垫片，按 ``app.js::render()`` 的真实
 #: 顺序求值 ``web`` 侧脚本，并把各回归共用的公共量摆好 —— ``F``（已解码的帧）、
 #: ``P``（period.js）、``CFG``（config.js）、``out``（结果容器）。
@@ -104,7 +117,8 @@ const sandbox = {
 sandbox.window = sandbox;
 const ctx = vm.createContext(sandbox);
 
-for (const f of ["config.js", "matrix_codec.js", "period.js", "skew.js"]) {
+/* 求值列表由 Python 侧的 WEB_SCRIPTS 注入（见本常量定义之后的替换）—— 单一真相。 */
+for (const f of __WEB_SCRIPTS__) {
   vm.runInContext(fs.readFileSync(webDir + "/" + f, "utf8"), ctx, { filename: f });
 }
 
@@ -123,6 +137,10 @@ const out = {
   periods: {}, window: null
 };
 """
+
+#: 把 ``__WEB_SCRIPTS__`` 占位符换成真实列表。只做一次，之后 ``SANDBOX_JS`` 即成品；
+#: 所有驱动（``NODE_DRIVER`` 与各回归自带的 ``*_BODY``）拿到的都是替换后的版本。
+SANDBOX_JS = SANDBOX_JS.replace("__WEB_SCRIPTS__", json.dumps(list(WEB_SCRIPTS)))
 
 #: 对齐回归的驱动体：``decodeFrame → aggregate → clipTail → alignSkew →
 #: SkewPanel.update``，逐周期吐出落列结果，外加三档视口下的纵轴量程。

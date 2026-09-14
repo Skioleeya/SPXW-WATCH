@@ -62,22 +62,25 @@ TICK_VALUE = 1.5
 PROBE_DECIMALS = 3
 
 #: 变异表：(名称, 文件, 原文, 替换, 期望被抓住的判据前缀)。
+#: **文件字段必须跟着代码拆分走**：2026-09-14 `skew.js` 拆出 `skew_helpers.js`
+#: （NAME_POS/NAME_NEG）与 `skew_option.js`（图例 formatter、两个纵轴刻度），
+#: 四条变异的锚点却仍指向 `skew.js`，`--selftest` 全部报"变异点已失效"。
 MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
-    ("skew 两条曲线改回同名", "skew.js",
+    ("skew 两条曲线改回同名", "skew_helpers.js",
      'var NAME_NEG = NAME_POS + "·负";',
      "var NAME_NEG = NAME_POS;",
      "[G1]"),
-    ("图例 formatter 不再抹内部后缀", "skew.js",
-     "        formatter: displayName",
+    ("图例 formatter 不再抹内部后缀", "skew_option.js",
+     "        formatter: H.displayName",
      "        formatter: function (n) { return n; }",
      "[G1]"),
-    ("左轴刻度改回硬编码 toFixed(2)", "skew.js",
+    ("左轴刻度改回硬编码 toFixed(2)", "skew_option.js",
      "            color: CFG.theme.textDim, fontSize: 10,\n"
      "            formatter: function (v) { return v.toFixed(CFG.skew.axisDecimals); }",
      "            color: CFG.theme.textDim, fontSize: 10,\n"
      "            formatter: function (v) { return v.toFixed(2); }",
      "[G2]"),
-    ("右轴刻度改回硬编码 toFixed(2)", "skew.js",
+    ("右轴刻度改回硬编码 toFixed(2)", "skew_option.js",
      "            color: CFG.theme.textFaint, fontSize: 10,\n"
      "            formatter: function (v) { return v.toFixed(CFG.skew.axisDecimals); }",
      "            color: CFG.theme.textFaint, fontSize: 10,\n"
@@ -286,7 +289,7 @@ def _report(title: str, checks: list[tuple[str, bool, str]]) -> int:
 def _selftest(frame: dict, source: dict) -> int:
     print("\n[非空转自检] 逐条把修复改回旧行为，检查器必须报出来")
     failures = 0
-    files = ("config.js", "matrix_codec.js", "period.js", "skew.js")
+    files = ref.WEB_SCRIPTS
     sources = {f: (ROOT / "web" / f).read_text("utf-8") for f in files}
 
     with tempfile.TemporaryDirectory(prefix="swatch-skew-viewport-") as tmp:

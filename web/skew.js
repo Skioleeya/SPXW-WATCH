@@ -147,12 +147,15 @@
       }
     ];
 
+    /* 三条 IV 曲线走 `CFG.skew.colors`，**不要退回 `CFG.theme.hot/cool`** ——
+       那两个是主序列的分段色，复用会让图上出现两红两蓝、图例再同名，彻底分不清。
+       颜色清单与理由见 config.js 的 skew.colors。 */
     if (CFG.skew.showAtm) {
       graphs.push({
         name: "ATM IV", type: "line", yAxisIndex: 1, data: atm,
         showSymbol: false, smooth: false,
-        lineStyle: { width: 1.1, type: "dotted", color: CFG.theme.textFaint },
-        itemStyle: { color: CFG.theme.textFaint },
+        lineStyle: { width: 1.1, type: "dotted", color: CFG.skew.colors.atm },
+        itemStyle: { color: CFG.skew.colors.atm },
         connectNulls: true, z: 2
       });
     }
@@ -160,8 +163,8 @@
       graphs.push({
         name: "25Δ Put IV", type: "line", yAxisIndex: 1, data: put25,
         showSymbol: false, smooth: false,
-        lineStyle: { width: 1.1, type: "dashed", color: CFG.theme.hot, opacity: .75 },
-        itemStyle: { color: CFG.theme.hot },
+        lineStyle: { width: 1.1, type: "dashed", color: CFG.skew.colors.put25, opacity: .75 },
+        itemStyle: { color: CFG.skew.colors.put25 },
         connectNulls: true, z: 3
       });
     }
@@ -169,8 +172,8 @@
       graphs.push({
         name: "25Δ Call IV", type: "line", yAxisIndex: 1, data: call25,
         showSymbol: false, smooth: false,
-        lineStyle: { width: 1.1, type: "dashed", color: CFG.theme.cool, opacity: .75 },
-        itemStyle: { color: CFG.theme.cool },
+        lineStyle: { width: 1.1, type: "dashed", color: CFG.skew.colors.call25, opacity: .75 },
+        itemStyle: { color: CFG.skew.colors.call25 },
         connectNulls: true, z: 3
       });
     }

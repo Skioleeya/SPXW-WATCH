@@ -51,18 +51,20 @@ ZONE_KEEPS: tuple[tuple[str, ...], ...] = (
     ("nosuch",),        # 选了一个帧里没有的时段：必须返回空，前端保留上一帧
 )
 
-#: node 侧驱动：求值 config.js + period.js，把结果原样吐成 JSON。
+#: node 侧驱动：求值 config.js + period.js + period_align.js，把结果原样吐成 JSON。
 #: 数据由 Python 生成后经临时文件传入 —— 两侧各自造数的话，"对拍对象其实不是
 #: 同一个矩阵"这件事会悄无声息地让整组对照失效。
 NODE_DRIVER = r"""
 const fs = require("fs");
 const periodPath = process.argv[1];
 const configPath = process.argv[2];
-const casesPath = process.argv[3];
+const casesPath = process.argv[3], alignPath = process.argv[4];
 
 const window = { console: console };
 eval(fs.readFileSync(configPath, "utf8"));
 eval(fs.readFileSync(periodPath, "utf8"));
+/* period_align.js 必须排在 period.js 之后：它读 SWATCH_PERIOD 再合并回去。 */
+eval(fs.readFileSync(alignPath, "utf8"));
 
 const P = window.SWATCH_PERIOD;
 const cfg = window.SWATCH_CONFIG;
@@ -377,14 +379,18 @@ def ref_align_indexed(
 # node 驱动
 # --------------------------------------------------------------------------- #
 
-def run_node(period_path: Path, config_path: Path, payload: dict) -> dict:
-    """把 cases 交给 node，取回 period.js 的实际输出。"""
+def run_node(period_path: Path, config_path: Path, payload: dict,
+             align_path: Path = ROOT / "web" / "period_align.js") -> dict:
+    """把 cases 交给 node，取回 period.js 的实际输出。
+
+    ``align_path`` 缺省用仓库的 ``web/period_align.js``（变异只复制 period.js）。
+    """
     with tempfile.TemporaryDirectory(prefix="swatch-period-") as tmp:
         cases_file = Path(tmp) / "cases.json"
         cases_file.write_text(json.dumps(payload), encoding="utf-8")
         proc = subprocess.run(
             ["node", "-e", NODE_DRIVER, str(period_path), str(config_path),
-             str(cases_file)],
+             str(cases_file), str(align_path)],
             capture_output=True, text=True, encoding="utf-8", timeout=120,
         )
     if proc.returncode != 0:

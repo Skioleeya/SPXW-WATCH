@@ -18,6 +18,11 @@
   --accent:    #00e5ff;
   --warn:      #ffb020;
   --ok:        #2fd07a;
+  /* Skew 三条 IV 曲线的语义色，与 config.js 的 skew.colors 同值。
+     put/call 刻意**不复用** --hot / --cool：那两个是热力图色标与 Skew 分段色，
+     复用会让"IV 曲线"看起来和"Skew 正负段"是同一族，正是要修的混淆。 */
+  --put:       #2fd07a;
+  --call:      #ff5a5a;
   --mono: "JetBrains Mono", "SF Mono", "Cascadia Mono", Consolas, monospace;
 }
 
@@ -96,6 +101,8 @@ body {
 .readout.wide { min-width: 128px; }
 .readout b.hero { font-size: 19px; }
 .readout b.cool { color: var(--cool); }
+.readout b.put  { color: var(--put); }
+.readout b.call { color: var(--call); }
 .readout b.hot  { color: var(--hot); }
 .readout b.flat { color: var(--text); }
 

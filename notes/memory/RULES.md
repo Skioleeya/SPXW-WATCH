@@ -91,13 +91,21 @@
 
 ### 6.1 基线验证命令
 ```
-python run.py --check                    # 预期 RC=1（[1] 3 项 FAIL = 真违规）
+python run.py --check                    # RC=0（13 组；2026-09-14 实跑）
 python tools/smoke_test.py               # RC=0
-python tools/check_*.py                  # 17 个；14 RC=0 / 4 RC=1（基线一致）
-python tools/check_skew_viewport.py      # RC=0（21 项 + 6 变异）
-python tools/check_skew_alignment.py     # RC=0（4 变异）
-python tools/check_web_syntax.py         # 7/7 JS 语法 OK
+python tools/check_*.py                  # 20 个；19 RC=0 / 1 RC=1（2026-09-14 实跑）
+                                         #   RC=1 = check_ws_compression：需服务在跑，
+                                         #   实测压缩比 71.5% < 80% 阈值（既有失败）
+python tools/check_skew_viewport.py      # RC=0（21 项 + 7 变异）
+python tools/check_skew_colors.py        # RC=0（6 项 + 3 变异）三条 IV 曲线配色
+python tools/check_skew_alignment.py     # RC=0
+python tools/check_web_syntax.py         # RC=0（13 个 JS 文件）
 ```
+
+**node 沙箱的脚本清单只有一个来源**：`tools/skew_reference.py::WEB_SCRIPTS`。
+`web/` 拆文件时忘了补它，会让回归在**驱动阶段**就崩（`P.alignSkew is not a function`）
+—— 2026-09-14 修过一次，三个回归（skew_viewport / skew_alignment /
+period_aggregation）同时红。加/删 `web/*.js` 后先看这里。
 
 ### 6.2 分组式回归守卫
 - **期望前缀不得由分组表自推**（`known = [p for _, ps in GROUPS …]`）—— 删掉一组时期望集合跟着变小、守卫失明
@@ -107,6 +115,13 @@ python tools/check_web_syntax.py         # 7/7 JS 语法 OK
 - **回归覆盖面按"目录"清点**，别按"我记得测过什么"清点
 - `web/*.js` 由 `tools/check_web_syntax.py`（按目录枚举）封口
 - **"检查里写了" ≠ "检查里跑了"** —— 函数在、标题在，evaluate() 没串进去就是零次执行
+
+### 6.4 变异锚点跟着代码位置走
+- 变异表里的 `(文件, 原文)` 是**硬锚点**：代码被拆到别的文件后，锚点找不到原文，
+  `--selftest` 会报"变异点已失效"。2026-09-14 `skew.js` 拆出 `skew_helpers.js` /
+  `skew_option.js`，viewport 回归的 4 条变异全部失效（检查器**主动报出来**了，
+  没有静默通过 —— 这是好设计，别把它改回去）。
+- 判断"修复真的被守住"的唯一标准：**摘掉修复要能报 FAIL**。跑 `--selftest`。
 
 ## 7. 环境
 

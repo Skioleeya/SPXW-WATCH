@@ -91,11 +91,12 @@
 
 ### 6.1 基线验证命令
 
-> ⚠️ **必须用项目自带的 `venv/Scripts/python.exe`，不要用裸 `python`。** 裸解释器没有
-> `ib_async` / `aiohttp` ⇒ `check_reconnect_flow`、`check_web_contract` 在 **import 阶段**就崩，
-> 且 `run.py --check` 的 `[13]` 会**误报**"端口开放但 WS 握手失败，跳过动态检查"。
-> 同一份代码、同一时刻实测：裸 `python` = **15 RC=0 / 5 RC=1**；`venv` = **17 RC=0 / 3 RC=1**。
-> **看到红先确认解释器，再怀疑代码。**
+> ⚠️ **必须用带依赖的 venv 解释器，不要用裸 `python`。** 本仓库自带的
+> `venv/Scripts/python.exe`（实测 Py 3.13.14 / `ib_async` 2.1.0 / `aiohttp` / `tzdata` 齐备）
+> 即可；裸解释器没有 `ib_async` / `aiohttp` ⇒ `check_reconnect_flow`、`check_web_contract`
+> 在 **import 阶段**就崩，且 `run.py --check` 的 `[13]` 会**误报**"端口开放但 WS 握手失败，
+> 跳过动态检查"。同一份代码、同一时刻实测：裸 `python` = **15 RC=0 / 5 RC=1**；
+> `venv` = **17 RC=0 / 3 RC=1**。**看到红先确认解释器，再怀疑代码。**
 
 ```
 <VENV>/python.exe run.py --check                  # RC=0（13 组；2026-09-14 10:3x 实跑）

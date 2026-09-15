@@ -160,6 +160,34 @@
       labels.push(groupLabel(block.labels[i * g], g * baseSeconds));
     }
 
+    /* volume 跟着一起聚合：组内 tick 计数**求和**。
+       30 秒桶是唯一数据源，更粗的周期只是把若干个 30 秒桶并起来。
+       与 values 的"组内任一 null 则整组 null"刻意不同 —— ΔIV 少加一段会得到一个
+       偏小却看着正常的数（静默错值）；而 tick 计数少一个桶就是少几个 tick，
+       求和依然正确。整组一个 tick 都没有时才给 null（= 该格无边框）。 */
+    var volumes = null;
+    if (block.volumes) {
+      volumes = [];
+      for (var rv = 0; rv < rows; rv++) {
+        var vsrc = block.volumes[rv] || [];
+        var vdst = new Array(outCols);
+        for (var cv = 0; cv < outCols; cv++) {
+          var vstart = cv * g;
+          var vend = Math.min(vstart + g, cols);
+          var vsum = 0;
+          var vany = false;
+          for (var kv = vstart; kv < vend; kv++) {
+            var vv = vsrc[kv];
+            if (vv === null || vv === undefined) { continue; }
+            vsum += vv;
+            vany = true;
+          }
+          vdst[cv] = vany ? vsum : null;
+        }
+        volumes.push(vdst);
+      }
+    }
+
     var policy = block.scale_policy || {};
     var quantile = Number(policy.quantile);
     var floor = Number(policy.floor);
@@ -177,6 +205,7 @@
       strikes: block.strikes,
       rights: block.rights,
       values: values,
+      volumes: volumes,
       vmax: Math.round(bound(flat, quantile, floor) * 1000) / 1000,
       rows: rows,
       cols: outCols,
@@ -214,11 +243,22 @@
       values.push(block.values[r].slice(drop));
     }
 
+    /* volume 必须与 values 用**同一个 drop** 裁掉同样多的左端列，
+       否则边框粗细会整体右移（错位后依然"看着像"一张正常的图）。 */
+    var volumes = null;
+    if (block.volumes) {
+      volumes = [];
+      for (var rv = 0; rv < block.volumes.length; rv++) {
+        volumes.push(block.volumes[rv].slice(drop));
+      }
+    }
+
     return {
       labels: block.labels.slice(drop),
       strikes: block.strikes,
       rights: block.rights,
       values: values,
+      volumes: volumes,
       vmax: block.vmax,
       rows: block.rows,
       cols: limit,

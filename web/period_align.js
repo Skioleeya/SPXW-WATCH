@@ -85,6 +85,19 @@
       values.push(dst);
     }
 
+    /* volume 与 values 同形、同列序 —— 用**同一个 picked** 取列，
+       否则边框粗细会与格子错位（错位了看不出来：只是粗细对不上成交量）。 */
+    var volumes = null;
+    if (block.volumes) {
+      volumes = [];
+      for (var rv = 0; rv < block.volumes.length; rv++) {
+        var vsrc = block.volumes[rv];
+        var vdst = new Array(labels.length);
+        for (var nv = 0; nv < picked.length; nv++) { vdst[nv] = vsrc[picked[nv]]; }
+        volumes.push(vdst);
+      }
+    }
+
     var here = index[Math.floor(Number(block.bucket_index))];
     if (typeof here !== "number" || here < 0) { here = labels.length - 1; }
 
@@ -94,6 +107,7 @@
         strikes: block.strikes,
         rights: block.rights,
         values: values,
+        volumes: volumes,
         vmax: block.vmax,
         rows: block.rows,
         cols: labels.length,

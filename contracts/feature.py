@@ -108,7 +108,11 @@ class HeatmapMatrix:
     * 横轴 ``bucket_labels``：会话时间桶，从开盘到收盘。
     * ``values[i][j]``：第 i 个行权价、第 j 个时间桶的 ΔIV（波动率点）。
     * ``volumes[i][j]``：同一格的 tick 计数（None 表示无数据）。
-      用于前端「成交量加权」视觉层 —— tick 数多 = 圆点大。
+      用于前端「成交量加权」视觉层 —— **tick 数越多，该格黑色边框越粗**
+      （颜色恒定，粗细是唯一编码维度）。数据源唯一：**30 秒桶**；
+      更粗的显示周期由 ``web/period.js::aggregate`` 在组内求和，不另取数据。
+      前端消费点在 ``web/heatmap.js::buildOption``，参数在
+      ``web/config.js::heatmap.volumeBorder``。
 
     每个行权价只取 OTM 一侧（行权价 < 现价取 Put，否则取 Call），
     这样一张矩阵就能完整呈现 0DTE 微笑的两翼，无需再拆成两张图。

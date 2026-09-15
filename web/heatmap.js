@@ -19,15 +19,24 @@
  * 会持续占用 40–47% 单核。这是**已知且被接受**的取舍，不是回归。
  * 另：`progressive` 在此形状下是负优化（2370 列 424ms），故恒为 0。
  *
- * 网格线
- * ------
- * 参考项目（live-volatility-surface）用 Plotly 的 `xgap=1 / ygap=1` 做格子间隙，
- * ECharts 的 heatmap 没有等价项。这里改用轴的 splitLine 按步长抽样：
- *   stride = ceil(cellBorderMinPx / cellPx)，每 stride 个分类画一条 1px 线。
- * `cellBorderMix` 映射为线的 opacity —— `opacity m` 的线叠在数据色上
- * ≡ 旧 shader 的 `mix(color, border, m)`，两者数学等价。
- * 用 splitLine 而不是逐格 `itemStyle.borderWidth` 的原因：后者在 2370 列时
- * 等于给 5.7 万个矩形各描一次边，既是性能灾难、又会把细档位糊成一片。
+ * 网格线（两套，各司其职）
+ * ------------------------
+ * 1) **成交量驱动的逐格边框**（`config.heatmap.volumeBorder`）——
+ *    该格成交量越大，黑色边框越粗；颜色恒定，粗细是唯一编码维度。
+ *    走逐格 `itemStyle.borderWidth`，这是唯一能表达"逐格不同粗细"的画法。
+ *    代价：2370 列 = 给 5.7 万个矩形各描一次边。但细档位下格子本身只有亚像素
+ *    宽，`borderWidth` 按格子短边等比缩放后趋近 0，自然退化为"看不见"，
+ *    不会像固定宽度那样糊成一片。
+ * 2) **轴 splitLine 抽样网格**（`cellBorderMinPx` / `cellBorderMix`）——
+ *    细档位（30 秒档 2360 列 ⇒ 格宽约 0.44px）下逐格边框不可见，靠它提供
+ *    间距 ≥ `cellBorderMinPx` 的可读网格：
+ *      stride = ceil(cellBorderMinPx / cellPx)，每 stride 个分类画一条 1px 线。
+ *    `cellBorderMix` 映射为线的 opacity —— `opacity m` 的线叠在数据色上
+ *    ≡ 旧 shader 的 `mix(color, border, m)`，两者数学等价。
+ *
+ * 为什么保留 2)：**不能只留逐格边框** —— 细档位下它必然不可见，而"数据密集区
+ * 完全看不见网格"正是 2026-09-14 修过的缺陷（见 notes/context/open_tasks.md）。
+ * 两套颜色都落在深色端，粗档位下逐格边框（上层）盖住 splitLine，不冲突。
  * ------------------------------------------------------------------ */
 (function (global) {
   "use strict";
@@ -84,15 +93,6 @@
     var rows = strikes.length;
     var cols = labels.length;
 
-    var data = [];
-    for (var r = 0; r < rows; r++) {
-      var row = values[r] || [];
-      for (var c = 0; c < cols; c++) {
-        var v = row[c];
-        if (v !== null && v !== undefined) { data.push([c, r, v]); }
-      }
-    }
-
     var rect = panel._el.getBoundingClientRect();
     var gridW = Math.max(1, rect.width - PAD.left - PAD.right);
     var gridH = Math.max(1, rect.height - PAD.top - PAD.bottom);
@@ -100,6 +100,52 @@
     var strideY = strideFor(gridH, rows);
     var mix = CFG.heatmap.cellBorderMix > 0 ? CFG.heatmap.cellBorderMix : 0;
     var line = { color: CFG.theme.grid, width: 1, opacity: mix };
+
+    /* ---- 成交量驱动的逐格边框 ------------------------------------------
+       该格成交量越大，黑色边框越粗；颜色恒定，粗细是唯一的编码维度。
+       数据源是 30 秒桶的 tick 计数（`block.volumes`，由 matrix_codec 解码、
+       period.js 在更粗周期上按组求和），这里只做归一化。
+
+       volMax 取**本视口内**的最大值而不是全局最大值：滚动到低量时段后，
+       用全局最大值会让整屏边框都细到看不见。 */
+    var vb = CFG.heatmap.volumeBorder || {};
+    var vbOn = vb.enabled !== false;
+    var volumes = block.volumes || null;
+    var volMax = 0;
+    if (vbOn && volumes) {
+      for (var vr = 0; vr < rows; vr++) {
+        var vrow = volumes[vr] || [];
+        for (var vc = 0; vc < cols; vc++) {
+          var vv = vrow[vc];
+          if (vv !== null && vv !== undefined && vv > volMax) { volMax = vv; }
+        }
+      }
+    }
+    /* 最粗边框锚在格子**短边**上：锚长边时窄行的上下边框会互相吃穿。 */
+    var cellShort = Math.min(gridW / Math.max(cols, 1), gridH / Math.max(rows, 1));
+    var vbMaxPx = cellShort * (vb.maxRatio > 0 ? vb.maxRatio : 0);
+    var vbMinPx = vb.minPx > 0 ? vb.minPx : 0;
+
+    var data = [];
+    for (var r = 0; r < rows; r++) {
+      var row = values[r] || [];
+      var vrowSrc = (vbOn && volumes) ? (volumes[r] || []) : null;
+      for (var c = 0; c < cols; c++) {
+        var v = row[c];
+        if (v === null || v === undefined) { continue; }
+        if (!vrowSrc || !(volMax > 0)) { data.push([c, r, v]); continue; }
+        var vol = vrowSrc[c];
+        var bw = 0;
+        if (vol !== null && vol !== undefined) {
+          bw = (vol / volMax) * vbMaxPx;
+          if (bw < vbMinPx) { bw = vbMinPx; }
+        }
+        data.push({
+          value: [c, r, v],
+          itemStyle: { borderWidth: bw, borderColor: vb.color }
+        });
+      }
+    }
 
     var yNames = [];
     for (var i = 0; i < rows; i++) { yNames.push(strikes[i] + (rights[i] || "")); }
@@ -186,6 +232,8 @@
         /* 此形状下 progressive 更慢（见文件头实测），恒关。 */
         progressive: 0,
         animation: false,
+        /* 默认无边框。带成交量的格子由 data item 自己的 itemStyle 逐格覆盖
+           （series 级与 data 级是**合并**关系，data 级优先）。 */
         itemStyle: { borderWidth: 0 },
         markLine: markLine
       }]

@@ -22,6 +22,10 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+#: 跑 JS 取结果的驱动已拆到 tools/period_node.py（IO 与造数分离，
+#: 原文件因此超 400 行上限）。re-export 以免改动调用点。
+from tools.period_node import run_node  # noqa: F401
+
 ROOT = Path(__file__).resolve().parent.parent
 
 #: 合成矩阵的形状。列数刻意取 125 —— 它能被 2/6/10/60 整除却不能被 30 整除，
@@ -51,81 +55,7 @@ ZONE_KEEPS: tuple[tuple[str, ...], ...] = (
     ("nosuch",),        # 选了一个帧里没有的时段：必须返回空，前端保留上一帧
 )
 
-#: node 侧驱动：求值 config.js + period.js + period_align.js，把结果原样吐成 JSON。
-#: 数据由 Python 生成后经临时文件传入 —— 两侧各自造数的话，"对拍对象其实不是
-#: 同一个矩阵"这件事会悄无声息地让整组对照失效。
-NODE_DRIVER = r"""
-const fs = require("fs");
-const periodPath = process.argv[1];
-const configPath = process.argv[2];
-const casesPath = process.argv[3], alignPath = process.argv[4];
 
-const window = { console: console };
-eval(fs.readFileSync(configPath, "utf8"));
-eval(fs.readFileSync(periodPath, "utf8"));
-/* period_align.js 必须排在 period.js 之后：它读 SWATCH_PERIOD 再合并回去。 */
-eval(fs.readFileSync(alignPath, "utf8"));
-
-const P = window.SWATCH_PERIOD;
-const cfg = window.SWATCH_CONFIG;
-const cases = JSON.parse(fs.readFileSync(casesPath, "utf8"));
-
-const out = {
-  declared: (cfg.heatmap && cfg.heatmap.periods) || [],
-  maxColumns: cfg.heatmap ? cfg.heatmap.maxColumns : null,
-  options: {}, bound: {}, aggregate: {}, clip: null, slice: {}, index: null
-};
-
-for (const key of Object.keys(cases.options)) {
-  out.options[key] = P.options(Number(key)).map(function (p) {
-    return [p.seconds, p.group, p.label];
-  });
-}
-
-for (const c of cases.bound) {
-  out.bound[c.name] = P.bound(c.values, c.quantile, c.floor);
-}
-
-for (const c of cases.aggregate) {
-  const r = P.aggregate(c.block, c.group);
-  out.aggregate[c.name] = {
-    cols: r.cols, rows: r.rows, labels: r.labels, values: r.values,
-    vmax: r.vmax, bucket_seconds: r.bucket_seconds, bucket_index: r.bucket_index
-  };
-}
-
-const cl = P.clipTail(cases.clip.block, cases.clip.maxColumns);
-out.clip = {
-  cols: cl.cols, labels: cl.labels, values: cl.values,
-  bucket_index: cl.bucket_index,
-  clipped: cl.clipped === undefined ? null : cl.clipped
-};
-
-for (const c of cases.slice.cases) {
-  const r = P.sliceZones(c.block, cases.slice.zones, c.keep);
-  out.slice[c.name] = r === null ? null : {
-    cols: r.block.cols, labels: r.block.labels, values: r.block.values,
-    bucket_index: r.block.bucket_index, index: r.index
-  };
-}
-
-/* 时段切列对 Skew 的影响：带 index 的路径必须与"先把桶号预映射一遍再走普通
-   路径"逐值相同；而**不带** index（用原始桶号）必须不同 —— 后者是非空转判据，
-   少了它，"index 被忽略"这个缺陷会静默通过。 */
-const idx = cases.index;
-function runSkew(series, index) {
-  const a = P.alignSkew(series, idx.group,
-    { labels: idx.labels, drop: idx.drop, index: index });
-  return a === null ? null : a.skew;
-}
-out.index = {
-  withIndex: runSkew(idx.series, idx.index),
-  premapped: runSkew(idx.premapped, null),
-  unsliced: runSkew(idx.raw, null)
-};
-
-process.stdout.write(JSON.stringify(out));
-"""
 
 
 # --------------------------------------------------------------------------- #
@@ -152,6 +82,22 @@ def _cell(row: int, col: int) -> float | None:
     return round(raw / 100.0, 3)
 
 
+def _vol(row: int, col: int) -> int | None:
+    """造一格成交量（tick 计数）。
+
+    ``null`` 的位置**刻意与** ``_cell`` **不同**（这里落在 ``col % 7 == 3``），
+    因为两者聚合规则不同，必须能被区分开：
+
+    * ``values``：组内**任一** null ⇒ 整组 null（ΔIV 少加一段会得到偏小的假数）
+    * ``volumes``：组内 null 当缺席，**求和其余**；整组全 null 才给 null
+
+    若两者用同一套 null 布局，上面对拍就分不出"规则被写成了同一条"。
+    """
+    if col % 7 == 3:
+        return None
+    return (row * 13 + col * 7) % 50
+
+
 def block(cols: int = COLS) -> dict[str, Any]:
     """造一个与后端帧同形状的基线矩阵（``strikes`` 降序，与真实帧一致）。"""
     return {
@@ -159,6 +105,7 @@ def block(cols: int = COLS) -> dict[str, Any]:
         "strikes": [6400 + 5 * r for r in range(ROWS - 1, -1, -1)],
         "rights": ["P" if r % 2 else "C" for r in range(ROWS)],
         "values": [[_cell(r, c) for c in range(cols)] for r in range(ROWS)],
+        "volumes": [[_vol(r, c) for c in range(cols)] for r in range(ROWS)],
         "vmax": 3.25,
         "rows": ROWS,
         "cols": cols,
@@ -286,10 +233,26 @@ def ref_aggregate(base: dict, group: int) -> dict[str, Any]:
             flat.append(total)
         out_values.append(row)
 
+    # volumes 与 values 的规则**不同**：null 当缺席，求和其余；全 null 才给 null。
+    # 与前端 web/period.js::aggregate 的对应分支逐值对拍。
+    src_volumes = base.get("volumes")
+    out_volumes: list[list[int | None]] | None = None
+    if src_volumes:
+        out_volumes = []
+        for r in range(rows):
+            src = src_volumes[r] if r < len(src_volumes) else []
+            row_v: list[int | None] = []
+            for c in range(out_cols):
+                chunk = src[c * group:min(c * group + group, cols)]
+                known = [v for v in chunk if v is not None]
+                row_v.append(sum(known) if known else None)
+            out_volumes.append(row_v)
+
     return {
         "labels": [ref_group_label(labels[c * group], group * span)
                    for c in range(out_cols)],
         "values": out_values,
+        "volumes": out_volumes,
         "cols": out_cols,
         "rows": rows,
         "bucket_seconds": span * group,
@@ -300,14 +263,17 @@ def ref_aggregate(base: dict, group: int) -> dict[str, Any]:
 def ref_clip(base: dict, limit: int) -> dict[str, Any]:
     """列数超上限时保留**最近**的 limit 列。"""
     cols = len(base["labels"])
+    src_volumes = base.get("volumes")
     if cols <= limit:
         return {"cols": cols, "labels": base["labels"], "values": base["values"],
+                "volumes": [list(row) for row in src_volumes] if src_volumes else None,
                 "bucket_index": base["bucket_index"], "clipped": None}
     drop = cols - limit
     return {
         "cols": limit,
         "labels": base["labels"][drop:],
         "values": [row[drop:] for row in base["values"]],
+        "volumes": [row[drop:] for row in src_volumes] if src_volumes else None,
         "bucket_index": base["bucket_index"] - drop,
         "clipped": drop,
     }
@@ -322,9 +288,11 @@ def ref_slice_zones(
     所选区段一列都没有时返回 ``None``（前端据此保留上一帧）。
     """
     cols = len(base["labels"])
+    src_volumes = base.get("volumes")
     if not keep_ids:
         return {"cols": cols, "labels": list(base["labels"]),
                 "values": [list(row) for row in base["values"]],
+                "volumes": [list(row) for row in src_volumes] if src_volumes else None,
                 "bucket_index": base["bucket_index"],
                 "index": list(range(cols))}
 
@@ -351,6 +319,8 @@ def ref_slice_zones(
         "cols": len(labels),
         "labels": labels,
         "values": [[row[c] for c in picked] for row in base["values"]],
+        "volumes": ([[row[c] for c in picked] for row in src_volumes]
+                    if src_volumes else None),
         "bucket_index": here,
         "index": index,
     }
@@ -377,22 +347,3 @@ def ref_align_indexed(
 
 # --------------------------------------------------------------------------- #
 # node 驱动
-# --------------------------------------------------------------------------- #
-
-def run_node(period_path: Path, config_path: Path, payload: dict,
-             align_path: Path = ROOT / "web" / "period_align.js") -> dict:
-    """把 cases 交给 node，取回 period.js 的实际输出。
-
-    ``align_path`` 缺省用仓库的 ``web/period_align.js``（变异只复制 period.js）。
-    """
-    with tempfile.TemporaryDirectory(prefix="swatch-period-") as tmp:
-        cases_file = Path(tmp) / "cases.json"
-        cases_file.write_text(json.dumps(payload), encoding="utf-8")
-        proc = subprocess.run(
-            ["node", "-e", NODE_DRIVER, str(period_path), str(config_path),
-             str(cases_file), str(align_path)],
-            capture_output=True, text=True, encoding="utf-8", timeout=120,
-        )
-    if proc.returncode != 0:
-        raise RuntimeError(f"node 驱动失败: {proc.stderr.strip()}")
-    return json.loads(proc.stdout)

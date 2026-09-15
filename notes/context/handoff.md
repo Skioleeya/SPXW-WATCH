@@ -1,6 +1,28 @@
 # Handoff Index
-- Latest session: 2026-09-15/persistence-session-files
-- Current session handoff: notes/sessions/2026-09-15/persistence-session-files/handoff.md
+- Latest session: 2026-09-15/period-file-split
+- Current session handoff: notes/sessions/2026-09-15/period-file-split/handoff.md
+- Status: **`tools/` 两个超限文件拆分完成 + 修掉 2 条失效变异锚点（未提交）** ——
+  2026-09-15 05:4x EDT，GTH 段。
+  ① **超限事实**：`period_reference.py` **441**（改动前 398 ⇒ 上轮改超）/
+  `check_period_aggregation.py` **416**，均 `> MAX_LINES=400` ⇒ `selfcheck.py [1]`
+  **确会判红**（`check_file_sizes` 判据是 `>=`；该文件无 `__main__`，由统一入口调用）。
+  ② **拆出** `tools/period_node.py`（**120 行**，node 驱动 / IO）⇒ `period_reference.py`
+  **441 → 349**，`run_node` 以 **re-export** 保留 ⇒ 调用点零改动。
+  ③ **拆出** `tools/period_selftest.py`（**90 行**，"证明对拍会红"）⇒
+  `check_period_aggregation.py` **416 → 346**；判据由调用方 `evaluate` 回调注入 ⇒
+  **不反向 import 检查器**，无循环依赖。
+  ④ **顺带真缺陷**：`--selftest` 变异表 **2 条锚点早已失效** —— `sliceZones` / `alignSkew`
+  已从 `period.js` 拆到 `period_align.js`，旧表却写死"锚点都在 period.js"⇒
+  那两条**长期打印"变异点已失效"**。按 `check_skew_alignment.py` 写法改为
+  **5 元组** `(名称, 目标文件, 原文, 替换, 期望前缀)`，`WEB_FILES` 每轮两个文件都重写。
+  ⑤ **验证**：`selfcheck.py` **`RC=0`**（`[1]` 97 py + 13 js 全合规，最长
+  `check_session_grid.py` 399）；`check_period_aggregation` **`RC=0`**；
+  `--selftest` **`RC=0`**（守卫 2 条 + 注入缺陷 **5 条全抓且全落期望前缀**）。
+  **非空转反向验证**：故意写坏 `alignSkew` 锚点 ⇒ **`[FAIL] 变异点已失效` + `RC=1`**，
+  还原即回 `RC=0`。
+  ⑥ **未提交**；新文件未 `git add`（本仓库**禁用 `git rm` / `git mv`**）。
+- Previous: 2026-09-15/persistence-session-files
+- Previous handoff: notes/sessions/2026-09-15/persistence-session-files/handoff.md
 - Archive: notes/context/archive/handoff_2026-09.md
 - Status: **已提交并推送（`HEAD = 53da940`，工作区干净）** ——
   持久化落点改为一交易日一文件 + 历史**归档不删**（三轮改动合并提交）。

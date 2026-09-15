@@ -373,6 +373,102 @@ Archive: notes/context/archive/open_tasks_2026-09.md
 - ~~**[低] 本机缺 `ib_async` 与 `aiohttp`**~~ —— **已解决**（2026-09-13 KAI 启动 Gateway 后安装）。
   `check_reconnect_flow` / `check_web_contract` / `ws_probe` 现在都能跑。
 
+- ~~**[中] 网格粗细「受成交量无级调节」未实现**~~ —— **已实现**（2026-09-15 05:3x，KAI 拍板方案）。
+
+  **丢失与发现**（2026-09-15 04:5x）：该特性原在旧 `web/gl_heatmap.js` 的 fragment shader
+  （`float vol = s.b/255.0; float border = vol*0.35;`），`6828e3a`（WebGL→ECharts 重写）
+  删掉该文件时一并消失。此后数据链"三跳掉在最后一跳"：后端在发（`heatmap_engine.py::_row_volumes`
+  → `heatmap_matrix.py` 打包 `vol_bm`/`vol_i16`）、前端在解（`matrix_codec.js` → `block.volumes`）、
+  **但没有任何渲染器消费**（`heatmap.js` 全文零引用 `volumes`）。
+  ⚠️ 本条与上方「格子边框在 WebGL 重写时丢失（已修）」是**两件事**：那条修的是**固定 1px 网格线**，
+  并在描述里把 shader 的 volume 白边当成"要替换的旧实现"抹掉 —— 丢失点就在这里。
+
+  **KAI 定的方案**（2026-09-15 05:1x）：① 数据源唯一 = **30 秒桶**的 tick 计数，更粗周期在组内聚合；
+  ② 视觉 = **统一黑色边框**，成交量越大越粗（不做白边、不做圆点）。
+
+  **实现**：
+  - `web/config.js` 新增 `heatmap.volumeBorder{enabled,color,maxRatio:0.35,minPx}`
+  - `web/heatmap.js::buildOption` 读 `block.volumes` → 逐格 `itemStyle.borderWidth`，
+    `volMax` 取**本视口内**最大值，宽度锚在格子**短边**（锚长边时窄行上下边框会吃穿）
+  - **补齐三条变换链路的 volumes 传递**（此前三处都丢，只有 `app_render.js::applyViewport` 保留了）：
+    `period_align.js::sliceZones`（复用同一 `picked`）、`period.js::aggregate`（组内求和）、
+    `period.js::clipTail`（同一个 `drop`）
+  - 注释去重：`contracts/feature.py` 原写"tick 数多 = **圆点大**"、`matrix_codec.js` 写"不画圆点"、
+    shader 画白边 —— 三种说法已统一为"黑色边框越粗"
+
+  **实测（`tmp/vol_border_probe/`，Playwright + Chrome 153，像素级）**：
+  受控设计 = 同一列内 volume 随行递增（vol 0→10）、**水平位置固定** ⇒ 排除位置伪影；`values` 全 0。
+
+  | 模式 | 带宽（vol 0→2→…→10） | 极差 | 判定 | RC |
+  |---|---|---|---|---|
+  | `on`（生产配置） | 1.00 → 2.81 → 5.13 → 7.38 → 9.56 → 11.81 px | **11.00 px** | PASS | 0 |
+  | `off`（只关 `volumeBorder.enabled`） | 恒定 1.00 px | 0.00 px | FAIL | 1 |
+
+  **非空转**：两份跑的是**同一份 `web/heatmap.js`**，唯一差异是一个开关 ⇒ 相反判定。
+  另有**真帧端到端**（`real.html`）：用后端 `HeatmapSerializer` 铸帧 → `SWATCH_MATRIX.decode`
+  → 渲染，断言 `volumes` 逐值一致、`values` 往返误差 < 1e-6 ⇒ 全过。
+
+  **回归已补**（这是本条的重点：此前"没有任何回归守着"）：
+  `tools/check_period_aggregation.py` + `tools/period_reference.py` 新增 13 条 volumes 逐值对拍
+  （aggregate 7 档 × / clipTail / sliceZones 4 组）。**变异验证**：从 `period.js` 删掉 2 处传递
+  ⇒ `aggregate(g2…g200)` 与 `clipTail` 全转 FAIL；从 `period_align.js` 删 1 处 ⇒ `sliceZones(gth/rth/gth+rth)`
+  全转 FAIL；还原后复绿。`g1` 与 `keep=none` 变异后仍 ok 属正确（走恒等分支，原样返回整块）。
+
+  **性能代价（实测，画布 1400×520 / 24 行 / 27% 填充）**：
+
+  | 列数 | off | on | 增量 |
+  |---|---|---|---|
+  | 630（默认 1 分档） | 57.4 ms | 88.0 ms | +53% |
+  | 1352 | 86.1 ms | 140.7 ms | +63% |
+  | 2370（30 秒档全时段） | 135.9 ms | 273.5 ms | **+101%** |
+
+  节拍 = 后端推送 400 ms ⇒ 最坏 273.5 ms 仍**在预算内**（占用 68%，此前 34%）。
+  ⚠️ 若日后把推送提到 2 Hz 以上，这里会先撞线。
+
+  **契约清单为何没加 volume 字段**：`vol_bm`/`vol_i16` 是**可选字段**（后端只在 `matrix.volumes`
+  非空时才发），而 `check_web_contract.py` 的语义是"键缺失算失败" ⇒ 加进去会让合法帧误报。
+  已在 `PAYLOAD_PATHS` 处写明理由，并指向上面那两个守它的检查器。
+
+  **同类排查（2026-09-15 05:0x 顺带做完，已封口）**：`tmp/audit_dead_payload.py`
+  把 `serialization/` 的 82 个键名逐个在 `web/` 里按词边界搜 ⇒ 17 个零命中。
+  逐个定性后 **16 个是"前端从不解码的诊断元数据"，属设计**：
+  - `health.rate_limit.*` / `health.sub_limit_backoff` —— skill `spxw-live-verify/references/live-link.md`
+    第 53-58 行明写这是**抓帧排查读数**（`f["health"]["rate_limit"]`），前端本就不显示
+  - `health.ticks_received` / `ticks_dropped`、`session.date` / `is_open`
+  - `cells.quality` / `delta_iv` / `primary_impulse` —— 前端不画 cells 表格
+  - `skew.series.put25_strike` / `call25_strike` / `atm_delta` / `quality` —— 前端只画曲线
+
+  **判据（唯一可靠）**：看**前端是否为它写过代码** ——
+  写了却不用 = 掉地；从没写 = 不需要。按这条判据，**`volumes` 是唯一一处**：
+  `matrix_codec.js:101-126` 专门解码它、`app_render.js:27` 在 viewport 缩放时专门
+  切片搬运它 —— 数据流一路维护到最后，却没有任何渲染器接。
+  ⇒ **本项是同类缺陷里的孤例，不是普遍现象。**
+  ⚠️ 反向检查（"后端发的字段前端是否都读"）**不可**固化成常驻门禁 ——
+  上面 16 个合法的不读会让它满屏误报（同 `frontend.md` 文末"不要把前端探针
+  固化成常驻回归"的理由）。该排查是**一次性取证**，脚本留 `tmp/`。
+
+  **遗留**：`splitLine` 抽样网格**保留**（细档位 30 秒档格宽约 0.44 px，逐格边框等比缩到
+  亚像素必然不可见，去掉它等于回归掉 2026-09-14 修的"密集区看不见网格"）。两套线颜色都在
+  深色端，粗档位下逐格边框在上层盖住 splitLine，不冲突。**待盘中肉眼确认**实际观感。
+
+  **同类排查（2026-09-15 05:0x 顺带做完，已封口）**：`tmp/audit_dead_payload.py`
+  把 `serialization/` 的 82 个键名逐个在 `web/` 里按词边界搜 ⇒ 17 个零命中。
+  逐个定性后 **16 个是"前端从不解码的诊断元数据"，属设计**：
+  - `health.rate_limit.*` / `health.sub_limit_backoff` —— skill `spxw-live-verify/references/live-link.md`
+    第 53-58 行明写这是**抓帧排查读数**（`f["health"]["rate_limit"]`），前端本就不显示
+  - `health.ticks_received` / `ticks_dropped`、`session.date` / `is_open`
+  - `cells.quality` / `delta_iv` / `primary_impulse` —— 前端不画 cells 表格
+  - `skew.series.put25_strike` / `call25_strike` / `atm_delta` / `quality` —— 前端只画曲线
+
+  **判据（唯一可靠）**：看**前端是否为它写过代码** ——
+  写了却不用 = 掉地；从没写 = 不需要。按这条判据，**`volumes` 是唯一一处**：
+  `matrix_codec.js:101-126` 专门解码它、`app_render.js:27` 在 viewport 缩放时专门
+  切片搬运它 —— 数据流一路维护到最后，却没有任何渲染器接。
+  ⇒ **本项是同类缺陷里的孤例，不是普遍现象。**
+  ⚠️ 反向检查（"后端发的字段前端是否都读"）**不可**固化成常驻门禁 ——
+  上面 16 个合法的不读会让它满屏误报（同 `frontend.md` 文末"不要把前端探针
+  固化成常驻回归"的理由）。该排查是**一次性取证**，脚本留 `tmp/`。
+
 ## Stale / Needs Verification
 
 - [ ] **`check_reconnect_gap.py` 的假冲量场景未在真实断线下复现** ——

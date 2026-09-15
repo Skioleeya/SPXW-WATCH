@@ -71,6 +71,13 @@ PAYLOAD_PATHS: tuple[str, ...] = (
     # heatmap.js
     "heatmap.strikes", "heatmap.labels",
     "heatmap.rights", "heatmap.vmax",
+    # ⚠️ `heatmap.vol_bm` / `heatmap.vol_i16` **故意不在本清单里** —— 前端确实读
+    # 它们（`web/heatmap.js` 的成交量驱动边框），但它们是**可选字段**：后端只在
+    # `matrix.volumes` 非空时才发（`serialization/heatmap_matrix.py`），
+    # 无 tick 的帧合法地没有这两个键。而本检查的语义是"键缺失算失败"，
+    # 加进来会让合法帧误报。这条数据链路由
+    # `tools/check_period_aggregation.py` 的 volumes 逐值对拍（含变异验证）
+    # 与 `tools/check_matrix_codec.py` 的编解码往返对拍共同守住。
     # period.js（周期聚合要用基线桶宽换算组大小，并用后端的色标规则重算量程）
     "heatmap.bucket_seconds", "heatmap.scale_policy",
     "heatmap.scale_policy.quantile", "heatmap.scale_policy.floor",

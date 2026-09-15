@@ -118,7 +118,10 @@ class HeatmapSerializer:
             "spot": round(float(matrix.spot), 2),
         }
 
-        # P1: volume 视觉层 —— tick 计数用同样的位图+定标整数编码，scale=1
+        # volume 视觉层 —— tick 计数用同样的位图+定标整数编码，scale=1。
+        # 前端消费点：web/heatmap.js 逐格黑色边框宽度 ∝ 该格 tick 数
+        # （30 秒桶是唯一数据源，更粗周期由 web/period.js 组内求和）。
+        # 字段是可选的：旧帧没有它，前端就不描边，不报错。
         if matrix.volumes:
             vol_bm, vol_i16, vol_filled = pack(matrix.volumes, 1)
             out["vol_bm"] = vol_bm

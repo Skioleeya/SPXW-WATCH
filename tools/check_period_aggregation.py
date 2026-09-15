@@ -1,21 +1,14 @@
 """
-L6 — 时间周期聚合回归。
-========================
-唯一职责：证明前端那份周期聚合（``web/period.js``）算出来的东西与后端的定义
-一致 —— 尤其是那份**镜像**实现 ``bound()``（对应 ``serialization/numeric.py``
-的 ``robust_bound``）没有漂移。七组对照见本文件末 ``GROUPS`` 常量。
+L6 — 时间周期聚合回归（``web/period.js`` ↔ 后端定义）。
+====================================================
+唯一职责：证明前端那份周期聚合与后端定义一致 —— 尤其是那份**镜像**实现
+``bound()``（对应 ``serialization/numeric.py::robust_bound``）没有漂移。
+七组对照见文末 ``GROUPS``；造数与参考实现见 ``tools/period_reference.py``。
 
-为什么需要它：周期切换把聚合放在前端，色标量程必须在前端按同一规则重算，于是
-同一个算法有了 Python 与 JS 两份实现。后端改一次分位规则、前端照旧，图上不会
-报错、只是颜色悄悄不对了 —— 这正是本项目最怕的"探针全绿但实际是坏的"。
-参数已由后端随帧下发（``heatmap.scale_policy``），**算法本身只能靠对拍钉住**。
+算法在前端有第二份实现，后端改分位规则而前端照旧时图上不报错、只是颜色悄悄不对
+—— 只能靠对拍钉住。``--selftest`` 的变异自证在 ``tools/period_selftest.py``。
 
-非空转验证（``--selftest``）：把 ``period.js`` 复制到临时目录并**故意注入**五种
-缺陷，要求检查器逐条报出来。造数与参考实现见 ``tools/period_reference.py``。
-
-用法::
-
-    python tools/check_period_aggregation.py [--selftest]
+用法：``python tools/check_period_aggregation.py [--selftest]``
 """
 
 from __future__ import annotations
@@ -23,7 +16,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -33,23 +25,12 @@ sys.path.insert(0, str(ROOT))
 from core.session_grid import minutes_of_day  # noqa: E402
 from serialization.numeric import robust_bound  # noqa: E402
 from tools import period_reference as ref  # noqa: E402
+from tools import period_selftest  # noqa: E402
 from tools.group_guard import guard_cases, guard_problems  # noqa: E402
 
 GREEN, RED, RESET = "\033[32m", "\033[31m", "\033[0m"
 
 TOLERANCE = 1e-9
-
-#: 变异表：(名称, 原文, 替换) —— ``--selftest`` 用它证明检查器不是空转。
-MUTATIONS: tuple[tuple[str, str, str], ...] = (
-    ("聚合系数偏移", "sum += v;", "sum += v + 0.001;"),
-    ("色标漏掉下限保护", "return Math.max(picked, floor);", "return picked;"),
-    ("组数取整方向反了", "var outCols = Math.ceil(cols / g);",
-     "var outCols = Math.floor(cols / g);"),
-    ("切列忽略区段过滤（空档被留下）",
-     "      if (keep[zones[z].id]) { order.push(zones[z]); }",
-     "      order.push(zones[z]);"),
-    ("alignSkew 忽略时段映射", "        pos = index[b];", "        pos = b;"),
-)
 
 
 # --------------------------------------------------------------------------- #
@@ -63,19 +44,18 @@ def _close(a: Any, b: Any) -> bool:
 
 
 def _close_matrix(got: list, want: list) -> bool:
-    if len(got) != len(want):
-        return False
-    for got_row, want_row in zip(got, want):
-        if len(got_row) != len(want_row):
-            return False
-        for got_cell, want_cell in zip(got_row, want_row):
-            if not _close(got_cell, want_cell):
-                return False
-    return True
+    return len(got) == len(want) and all(
+        len(g) == len(w) and all(_close(a, b) for a, b in zip(g, w))
+        for g, w in zip(got, want))
 
 
 def _flat(values: list) -> list:
     return [v for row in values for v in row if v is not None]
+
+
+def _shape(m: list) -> str:
+    """volumes 对不上时先看形状 —— 聚合/截断最常错的就是行列。"""
+    return f"{0 if not m else len(m)} 行 × {0 if not m else len(m[0])} 列"
 
 
 # --------------------------------------------------------------------------- #
@@ -115,9 +95,8 @@ def _aggregate_checks(result: dict, payload: dict) -> list[tuple[str, bool, str]
         want = ref.ref_aggregate(case["block"], group)
 
         if group <= 1:
-            # group=1 是恒等变换：前端刻意原样返回整块，不复制 —— 30 秒视图下
-            # 矩阵有 780 列，每帧复制一遍纯属浪费。此时量程就用后端已经按同一
-            # 规则算好的那个，**不能**再拿舍入后的值重算（那会与后端差在末几位）。
+            # group=1 是恒等变换：前端原样返回整块、不复制（30 秒视图 780 列，每帧
+            # 复制纯属浪费）。量程直接用后端按同一规则算好的那个，不能再重算。
             want_vmax = case["block"]["vmax"]
         else:
             policy = case["block"]["scale_policy"]
@@ -141,6 +120,11 @@ def _aggregate_checks(result: dict, payload: dict) -> list[tuple[str, bool, str]
             (f"aggregate({name}) bucket_index",
              got["bucket_index"] == want["bucket_index"],
              f"{got['bucket_index']} vs {want['bucket_index']}"),
+            # volumes 求和规则与 values 不同（null 当缺席），values 那条断言覆盖
+            # 不了；丢了它前端不报错、只是格子全不描边（静默失效）。
+            (f"aggregate({name}) volumes 逐格一致",
+             got["volumes"] == want["volumes"],
+             f"{_shape(got['volumes'])} vs {_shape(want['volumes'])}"),
         ]
     return checks
 
@@ -161,6 +145,11 @@ def _clip_checks(result: dict, payload: dict) -> list[tuple[str, bool, str]]:
          f"{got['bucket_index']} vs {want['bucket_index']}"),
         ("clipTail 报告被丢弃的列数", got["clipped"] == want["clipped"],
          f"{got['clipped']} vs {want['clipped']}"),
+        # 与 values 用同一个 drop，否则边框粗细会整体右移（错位后依然"看着像"
+        # 一张正常的图，只有逐值对拍才抓得住）。
+        ("clipTail volumes 与 values 用同一个 drop",
+         got["volumes"] == want["volumes"],
+         f"{_shape(got['volumes'])} vs {_shape(want['volumes'])}"),
     ]
 
 
@@ -195,6 +184,10 @@ def _slice_checks(result: dict, payload: dict) -> list[tuple[str, bool, str]]:
             (f"sliceZones({name}) bucket_index 同步平移",
              got["bucket_index"] == want["bucket_index"],
              f"{got['bucket_index']} vs {want['bucket_index']}"),
+            # 必须复用同一个 picked；另起一套列映射迟早与 values 分叉。
+            (f"sliceZones({name}) volumes 用同一 picked 取列",
+             got["volumes"] == want["volumes"],
+             f"{_shape(got['volumes'])} vs {_shape(want['volumes'])}"),
         ]
     return checks
 
@@ -221,9 +214,8 @@ def _index_checks(result: dict, payload: dict) -> list[tuple[str, bool, str]]:
 def _invariant_checks(result: dict) -> list[tuple[str, bool, str]]:
     """跨文件不变量：显示窗口上限与基线桶宽，都以**整个交易日网格**为准。"""
     app_cfg = json.loads((ROOT / "config" / "app.json").read_text("utf-8"))
-    serial_cfg = json.loads(
-        (ROOT / "config" / "serialization.json").read_text("utf-8")
-    )
+    serial_path = ROOT / "config" / "serialization.json"
+    serial_cfg = json.loads(serial_path.read_text("utf-8"))
     grid_s = _grid_minutes(app_cfg) * 60
     bucket_s = int(serial_cfg["heatmap_bucket_seconds"])
     max_columns = int(result["maxColumns"] or 0)
@@ -232,9 +224,8 @@ def _invariant_checks(result: dict) -> list[tuple[str, bool, str]]:
     checks = [
         ("基线桶宽整除交易日网格（各会话 + 空档恰好铺满）",
          grid_s % bucket_s == 0, f"网格 {grid_s}s ÷ 桶宽 {bucket_s}s"),
-        # 上限必须盖住**整个交易日网格**。横轴是时间轴，从尾部截掉历史段在图
-        # 上看不出来（只是左边少了几列，没有滚动条也没有提示）—— 于是 GTH
-        # 开盘那一段会静默消失，而"能在 GTH 时段完成实盘验证"恰恰要求看得见它。
+        # 上限必须盖住**整个交易日网格**。横轴是时间轴，从尾部截掉历史段在图上
+        # 看不出来（左边少几列，无滚动条无提示）—— GTH 开盘那一段会静默消失。
         ("maxColumns 覆盖整个交易日网格（基线粒度下永不截断）",
          max_columns >= grid_buckets,
          f"maxColumns={max_columns} vs 网格 {grid_buckets} 桶"),
@@ -249,10 +240,8 @@ def _invariant_checks(result: dict) -> list[tuple[str, bool, str]]:
 
 
 def _grid_minutes(app_cfg: dict) -> int:
-    """
-    交易日网格的总分钟数 = 各会话时长 + 它们之间的空档。只认 ``app.json::sessions``，
-    时刻解析交给 ``core.session_grid.minutes_of_day``（这里不重写一份）。
-    """
+    """交易日网格总分钟数 = 各会话时长 + 它们之间的空档。只认 ``app.json::sessions``，
+    时刻解析交给 ``core.session_grid.minutes_of_day``（这里不重写一份）。"""
     total = 0
     prev_close: int | None = None
     for item in app_cfg["sessions"]:
@@ -277,51 +266,10 @@ def evaluate(result: dict, payload: dict) -> list[tuple[str, bool, str]]:
 
 def _report(title: str, checks: list[tuple[str, bool, str]]) -> int:
     print(f"\n{title}")
-    failures = 0
     for label, ok, detail in checks:
-        if not ok:
-            failures += 1
         print(f"  {GREEN if ok else RED}[{'ok' if ok else 'FAIL'}]{RESET} {label}"
               + (f"  {detail}" if detail else ""))
-    return failures
-
-
-# --------------------------------------------------------------------------- #
-# 非空转自检
-# --------------------------------------------------------------------------- #
-
-def _selftest(config_path: Path, payload: dict) -> int:
-    print("\n[非空转自检] 往 period.js 注入缺陷，检查器必须逐条抓住")
-    source = (ROOT / "web" / "period.js").read_text("utf-8")
-    failures = 0
-
-    with tempfile.TemporaryDirectory(prefix="swatch-mutant-") as tmp:
-        for name, needle, replacement in MUTATIONS:
-            if needle not in source:
-                print(f"  {RED}[FAIL]{RESET} 变异点已失效：period.js 里找不到 "
-                      f"{needle!r}，请更新 MUTATIONS")
-                failures += 1
-                continue
-
-            mutant = Path(tmp) / "period.js"
-            mutant.write_text(source.replace(needle, replacement, 1), encoding="utf-8")
-            try:
-                result = ref.run_node(mutant, config_path, payload)
-            except RuntimeError as exc:
-                print(f"  {GREEN}[ok]{RESET} {name} → 已抓住（变异后驱动报错）"
-                      f"  {str(exc)[:70]}")
-                continue
-
-            caught = [label for label, ok, _ in evaluate(result, payload) if not ok]
-            if caught:
-                print(f"  {GREEN}[ok]{RESET} {name} → 已抓住"
-                      f"（{len(caught)} 项失败，例：{caught[0]}）")
-            else:
-                print(f"  {RED}[FAIL]{RESET} {name} → **未被抓住**："
-                      "这组对照是空转的")
-                failures += 1
-
-    return failures
+    return sum(1 for _, ok, _ in checks if not ok)
 
 
 # --------------------------------------------------------------------------- #
@@ -385,7 +333,7 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print(f"  {RED}[FAIL]{RESET} {name} → **未被抓住**：守卫是空转的")
                 failures += 1
-        failures += _selftest(config_path, payload)
+        failures += period_selftest.run(config_path, payload, evaluate)
 
     print()
     print("=" * 72)

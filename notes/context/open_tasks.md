@@ -4,6 +4,43 @@ Archive: notes/context/archive/open_tasks_2026-09.md
 
 ## Active
 
+- [ ] **[高] 空图真根因已定性：IBKR `modelGreeks` **间歇缺失**，不是"GTH 结构性"**
+  （2026-09-15 04:3x 查清，KAI 提供两条网关日志后收口）。
+
+  **证伪**：当天 `data/sessions/20260915.db` 的空洞史显示 **GTH 段内 IV 连续跑了好几小时**
+  （bucket 527–806 = 00:38:59→02:46、852–927 = 03:21→03:58:56，GTH = bucket 0..1579）。
+  每个空洞都对齐一次连通性/重启事件（807–851 ↔ `1100` 丢失 → `1102` 恢复；
+  928–994 ↔ 服务重启 + 网关重启），**没有一次对齐 GTH 边界**。
+  ⇒ 我 04:1x 写进 skill 的"GTH 段热力图必然为空是结构性的"**是错的，已改写**
+  （`spxw-live-verify/references/pitfalls.md` §5b，同条目重写、未新增清单项）。
+
+  **量化指纹（可直接复现，比看热力图强）**：`health.ticks_dropped` = `router.rejected`
+  （`acquisition/feed_service.py:120`）。`use_model_greeks = true` ⇒
+  `tick_router._pick_computation` 只收 tick 13 ⇒ 模型缺失窗口留下巨大拒绝计数：
+  ```text
+  失效窗口 04:12→04:32（20 min）：received 80,207  dropped 317,621
+  恢复后   04:36:40→04:37:00（20 s）：received +127  dropped **+0**
+  ```
+  ⇒ **判据**：抓两帧间隔 10–20 s 比增量。`dropped` 增量为 0 ⇒ 模型正常；
+  若此时仍空图，才该怀疑项目自己。**实测 04:32:55 自愈**（`atm_iv 17.22`、
+  `heatmap.filled 8543`），未做任何代码改动。
+
+  **网关那条日志不是客户端的锅**（已排除）：`Client 71 Output exceeded limit
+  (was: 100010), removed first half` —— 同窗口内 ① 帧计数**精确 149–150 帧/分钟**
+  （= 400ms 间隔，事件循环有大量空闲）② `现价` 每分钟都在变（期货 tick 走同一条
+  socket、同一个 `pendingTickersEvent`）③ `ticks_received` 持续增长 ⇒ 客户端在读在排空。
+  读侧结构也支持：`ib_async` 读路径纯事件驱动（`Connection.data_received` →
+  `Client._onSocketHasData` 同步解完缓冲区内**全部**消息 → `tcpDataProcessed` 发
+  `pendingTickersEvent`），**没有会被卡住的读循环**。`netstat` 亦确认 4002 只有
+  **一条**连接（PID 8504），无僵尸进程占 `clientId`。
+
+  **待 KAI 定（二选一）**：
+  - [ ] 前端是否加提示。⚠️ 提示**不能写"夜盘无 IV"**（已证伪）—— 必须是**数据驱动**的
+    "model IV 不可用"（判据：`ticks_received` 在涨 + `store_cells == 0` +
+    `ticks_dropped` 在涨）。现状：帧里已有这三个数，但前端未据此给原因。
+  - [ ] 是否把 `ticks_dropped` 的**增量**纳入健康判据（当前它只被 `feed_service` 计数，
+    没有任何检查器/日志在盯它；317,621 这个量级此前无人看见）。
+
 - [ ] **[中] 三条卡片是"欠账"：能机械守、但没写检查器**（2026-09-15 02:5x 审计；
   判据见 `notes/memory/QUICKREF.md` 的"收录判据"节：**每条卡片必须能报出"谁守着它"
   或"为什么守不住"**）。这三条两样都报不出 ⇒ 不是永久卡片，是欠账：

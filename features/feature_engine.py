@@ -289,16 +289,23 @@ class FeatureEngine:
 
         每次 ``compute()`` 后调用；同一桶被多次覆盖写入是安全的
         （SQLite ``INSERT OR REPLACE`` 保证幂等）。
+
+        **必须带会话身份**（``_session_key``，由 ``_sync_session()`` 在本函数
+        之前落定）：``bucket_index`` 是日内坐标、每个交易日复用，不带身份的桶
+        落盘后无法与别的交易日区分，恢复时就会把昨天当成今天。
         """
         writer = self._writer
         if writer is None:
             return
+        session_key = self._session_key
+        if not session_key:
+            return  # _sync_session() 未跑过 ⇒ 身份未知，宁可不写
         idx = self._clock.bucket_index_of_ts(now)
         ivs = self._heatmap.dump_bucket(idx)
         if ivs:
-            writer.enqueue(idx, ivs, self._heatmap.is_break(idx))
+            writer.enqueue(idx, ivs, self._heatmap.is_break(idx), session_key)
         if skew_point is not None:
-            writer.enqueue_skew(idx, skew_point)
+            writer.enqueue_skew(idx, skew_point, session_key)
 
     # ------------------------------------------------------------------ #
     # 生命周期

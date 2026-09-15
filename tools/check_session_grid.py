@@ -214,6 +214,9 @@ def _trading_day_checks(tz: str, sessions: list, bucket_s: int, monday) -> list:
     """交易日 = 网格**终点**那一天，夜里跑的仍是终点日那张 0DTE 合约。只认周一至周五；
     周末与"早于下一个网格开盘"的时刻解析到**下一个**交易日。
     """
+    # ⚠️ 锚点必须是**周一**（下面 friday/saturday/sunday 按"前 3/2/1 天"推星期）；
+    # 传别的星期几会把工作日当周末探 ⇒ 假红。2026-09-15 周二实测 4 红，见会话记录。
+    monday = monday - timedelta(days=monday.weekday())
     friday = monday - timedelta(days=3)
     saturday = monday - timedelta(days=2)
     sunday = monday - timedelta(days=1)

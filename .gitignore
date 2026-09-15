@@ -1,5 +1,5 @@
 # 运行时输出
-# logs/ 由 core/logging_setup.py 自动创建，data/ 由 persistence.py 自动创建，均无需入库
+# logs/ 由 core/logging_setup.py 自动创建，data/ 由 features/persistence_store.py 自动创建，均无需入库
 logs/
 data/
 
@@ -8,6 +8,9 @@ data/
 # 与之配套的是 tools/selfcheck_core.py::NON_SOURCE_DIRS 里的 "tmp" 条目：
 # 少了任何一条，探针里的 .py 都会被 [1][2][9][10] 当成产品代码误报。见 README §8。
 tmp/
+
+# 浏览器自动化产物（playwright-cli 的 console 日志等；KAI 2026-09-15 定）
+.playwright-cli/
 
 # WorkBuddy 本地记忆与日志
 .workbuddy-ai/

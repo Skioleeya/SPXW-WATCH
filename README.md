@@ -44,6 +44,7 @@ python tools/check_session_rollover.py         # 回归：跨会话不得共用�
 python tools/check_session_grid.py             # 回归：多会话网格铺满交易日、空档留白
 python tools/check_clock_protocol.py           # 回归：注入下层的时间源必须满足 ClockPort
 python tools/check_persistence.py              # 回归：SQLite 旁路持久化的写入 ↔ 恢复往返
+python tools/check_persistence_sessions.py     # 回归：持久化按交易日分文件 + 历史归档（跨日切文件 / 重启续写 / 启动归档旧会话 / 同名不覆盖）
 python tools/check_web_contract.py             # 回归：前端引用 → 后端定义的对照
 python tools/check_page_render.py              # 回归：真浏览器打开，断言画出来了
 python tools/check_period_aggregation.py       # 回归：前端周期聚合 ↔ 后端定义逐值对拍
@@ -322,13 +323,27 @@ Qualify contract to populate 'conId'.
 25Δ Put IV − 25Δ Call IV，单位波动率点。两侧在 Delta 空间插值定位，容差由
 `skew_delta_tolerance` 控制；插值点不足 `skew_min_points` 时判定为未定义。
 
-### 旁路持久化：重启后接着画（`features/persistence.py`）
+### 旁路持久化：一天一个文件，重启后接着画（`features/persistence.py` + `persistence_store.py`）
 
 ΔIV 矩阵与 25Δ Skew 序列**不会因为服务重启而清零** —— 原始 IV 桶由
-`AsyncPersistenceWriter` 异步写入 `data/session.db`（SQLite），启动时由组装层
-`recover()` 回灌进 `HeatmapEngine` / `SkewEngine`。
+`AsyncPersistenceWriter` 异步写入 SQLite，启动时由组装层 `recover()` 回灌进
+`HeatmapEngine` / `SkewEngine`。
 
-三个设计点：
+两个模块一条边界：`persistence.py` = **队列与调度**（`asyncio.Queue`、批量消费、
+序列化），`persistence_store.py` = **文件与表**（路径派生、连接的开/切/关、建表、
+读写）。`require_session_key()` 只在 store 里定义一份，上层 import 它。
+
+**落点是一天一个文件**：由 `config/persistence.json` 的 `db_dir` + `db_filename`
+决定（默认 `data/sessions/{session_key}.db`，`session_key` = 当日到期日）。
+三种时序：
+
+| 时序 | 行为 |
+|---|---|
+| 同一天内重启 | 接着写**同一个文件**（落点由 `SessionClock.expiry_str()` 决定，与重启几次无关） |
+| 跨日（0DTE 换到期日） | `FeatureEngine._sync_session()` 改 `_session_key` ⇒ 下一批换到**新文件** |
+| 旧结构文件（缺 `session_key` 列） | 整张丢弃，行数写进 `WARNING`（`legacy_dropped_count`） |
+
+五个设计点：
 
 * **旁路**：写入走独立的 `asyncio.Queue`，队列满时**丢桶而不阻塞**行情主循环
   （丢桶数在日志里可见）。行情接收与 WS 推送的节奏完全不受磁盘 I/O 影响。
@@ -336,12 +351,61 @@ Qualify contract to populate 'conId'.
   存原始值让恢复后的引擎**自己重走一遍差分**，语义与不中断时一致。
 * **默认开启**（`persistence.json::enabled`）。置 `false` 时完全不碰 SQLite，
   行为与没有持久化时一致。
+* **`db_dir` 只留当前会话，历史归档不删**（KAI 2026-09-15 定）。启动时
+  `AsyncPersistenceWriter.start()` 打开本会话文件后调用
+  `SessionFileStore.archive_other_sessions()`，把 `db_dir` 内所有非当前会话的库文件
+  **移动**到 `archive_dir`（`persistence.json::archive_dir`，默认 `data/archive`），
+  并把 `(已归档, 未归档)` 两组文件名**返回给调用方**（`features/` 整层不写日志，
+  由 `app/pipeline.py` 各记一行 —— 动到一整天数据不允许静默，"没归档成功"更不允许）。
+  **为什么是归档而不是删除**：那是逐交易日的 ΔIV / Skew **原始记录**，回看、对拍、
+  做数据集只有这一份来源。⚠️ 02:2x 曾一度实现为 `unlink()` 直接删除 —— 那是把
+  KAI「不留档、不备份」的适用范围**从旧单库 `data/session.db` 误扩到了全部逐日文件**，
+  同日 03:0x 已改回归档；**不要再"简化"回去**。
+  范围是**两道闸门**：只在 `db_dir` 之内 glob + 只匹配 `db_filename` 模板派生的
+  名字（`{session_key}` → `*`）—— 所以 db_dir 上一级的东西、或同目录里别的 `*.db`
+  都不会被误搬；归档目录里的**同名文件一律不覆盖**（同名即跳过并上报，宁可让源文件
+  留在 `db_dir` 下次再试，也不静默毁掉一份历史）。由
+  `check_persistence_sessions.py::_case_archive_leaves_parent_dir_alone` 与
+  `_case_archive_conflict_does_not_overwrite` 守着。
+  ⚠️ **跨日那一刻产生的旧文件留到下次启动才归档** —— `features/` 无日志可记。
+  ⇒ **未归档数 = 自上次启动以来的交易日数**（实测 `tmp/probe_rollover_residue.py`：
+  进程不重启跨 5 个交易日 ⇒ 5 个文件 ≈ 9.4 MB；每天重启一次则最多 1 个 ≈ 2.35 MB）。
+  未归档文件**永不会被读到**（读侧只开当前会话那个文件），只是还没归位。
+* **文件边界与行内身份，两道都要**。桶序号是**日内坐标**（0..2369，从会话开盘
+  起算）、**每个交易日复用同一段序号**，所以"这一行属于哪一天"不能靠桶序号推。
+  文件名先把它钉死（`20260915.db` 里只可能有 20260915 的桶），行内的
+  `session_key` 列再让文件**自述**归属 —— 文件被改名贴错日期时，查询一条也取不到
+  （图上留白），而不是把别天的桶画出来。
+
+  这不是洁癖：只有一张表、只靠一列时，昨天 index 448..2183 的行与今天同一段
+  序号的行落在同一个键空间里。2026-09-15 实测后果 —— 昨天 RTH 的数据被画在
+  **今天 GTH 的时刻**上（index 448 → 今日 23:59），而对外帧的 `skew.latest` 取的是
+  `skew_series[-1]`（按桶序号升序的末元素）⇒ 帧把**昨天 14:26:48** 的点当成
+  "最新"报出去，`tools/ws_probe.py` 的「25Δ Put 行权价低于现价」因此 FAIL。
+  同一条根因也解释"20:15 起满宽假 0 带"（孤桶被前向填充一路沿用）。
+
+  ⇒ 升级到本结构时，**缺 `session_key` 列的旧表会被整张丢弃**。**宁可丢，
+  不可错** —— 这些行在新会话里本来就无效，行情重跑会重新写入。
+
+  ⚠️ 与之配套的两条纪律：`enqueue()` 的 `session_key` 是**必填**、空值抛错
+  （不接受"无身份的行"）；`FeatureEngine._persist_current_bucket()` 只在
+  `_session_key` 已落定时才写（该值由 `_sync_session()` 在每次 `compute()` 最前面
+  落定）。会话身份由**掌握会话时钟的那一层**提供，持久化层不自行推算。
+
+⚠️ **换文件时必须先提交再关闭**（`SessionFileStore.close()`）。SQLite 的
+`Connection.close()` 对未提交事务是**回滚**；跨日那一刻的批次里旧会话的尾巴与
+新会话的开头同时存在，换文件若不先提交，旧会话刚写的那批会被**静默丢掉**。
+`tools/check_persistence_sessions.py::_case_rollover_splits_batch` 守着这条。
 
 落盘快照的 `ivs` 键序由产出点显式排序为**降序**（高行权价在前），与对外帧的
 `strikes` 同向 —— 冷数据与帧不再方向相反。由
 `tools/check_persistence.py::_case_key_order_descending` 守着。
 
-`data/` 在 `.gitignore` 里，不进版本控制。回归：`tools/check_persistence.py`。
+`data/` 在 `.gitignore` 里，不进版本控制。回归分两个文件：
+`tools/check_persistence.py`（7 组：往返 / 队列 / 键序 / 旧表迁移 / 空身份拒绝）与
+`tools/check_persistence_sessions.py`（7 组：一交易日一文件 / 同日内重启续写 /
+跨日切文件 / 坏配置被拒（模板越界 + 归档目录落进 db_dir）/ **启动归档非当前会话文件**
+/ **归档不越出 db_dir** / **归档目录同名不覆盖**）。
 
 ---
 

@@ -1,8 +1,162 @@
 # Handoff Index
-- Latest session: 2026-09-14/webgl-to-echarts
-- Current session handoff: notes/sessions/2026-09-14/webgl-to-echarts/handoff.md
+- Latest session: 2026-09-15/persistence-session-files
+- Current session handoff: notes/sessions/2026-09-15/persistence-session-files/handoff.md
 - Archive: notes/context/archive/handoff_2026-09.md
-- Status: **热力图渲染器由原生 WebGL 换成 ECharts；改动未提交** ——
+- Status: **持久化落点改为一交易日一文件（改动未提交，`HEAD = 9ec4fb9`）** ——
+  2026-09-15 01:0x–01:2x EDT，GTH 段。KAI 的目标："第一天就写第一天的数据，重启后
+  接着写第一天的；第二天新开一份，第二天重启，继续写第二天的"。
+  ① **落点**：`config/persistence.json` 的 `db_path` 改为 `db_dir: data/sessions` +
+  `db_filename: {session_key}.db`（`session_key` = 当日到期日）。
+  ② **拆分**：新增 `features/persistence_store.py`（文件与表）—— `features/persistence.py`
+  改动前 **384 行 / 上限 400**，余 16 行放不下（拆后 310 行）。
+  ③ **换文件**：`_batch_write` **逐条**按 `session_key` 切文件（跨日那一刻的批次里
+  混着两个会话）；`SessionFileStore.close()` **必须先提交再关闭** —— SQLite 的
+  `close()` 对未提交事务是**回滚**，实测会丢掉旧会话那一行。
+  ④ **迁移**：旧库当前会话 88+88 行 → `data/sessions/20260915.db`（走 store 写）。
+  旧库 `data/session.db` 当时未动；**2026-09-15 02:2x 已按 KAI 明令删除（无备份）**，见 ⑧。
+  ⑤ **验证**：`run.py --check` `RC=0`；`check_persistence` **7/7**；新增
+  `check_persistence_sessions` **4/4**；全量 **22** 个 `tools/check_*.py` ⇒ **21 `RC=0` /
+  1 `RC=1`**（唯一红 `check_page_render`，**既有**）；`ws_probe` **25/25**；
+  非空转两个变异各抓 2 条。重启日志 `持久化落点 data\sessions\20260915.db` +
+  `恢复 88 个历史桶`；20 秒后旧库 mtime 停在 01:22:07（**已停写**）、新库在长（88→90）。
+  ⑥ **收尾（01:4x）**：旧单库路径残留清扫 —— 存活代码/配置/README 对
+  `session.db` / `db_path` **0 命中**；清掉 `heatmap_engine.py` docstring、`.gitignore`
+  的 `data/` 创建者、README §5 模块边界；`RULES.md §6.1` 基线按实测重测（22 个检查 ⇒
+  `venv` **20 RC=0 / 2 RC=1**、裸解释器 **18 / 4**）。⚠️ 复测时 `check_ws_compression`
+  也是红的（70.7% < 80%，**状态依赖**）⇒ 当轮记的 21/1 不是永久事实。
+  ⑦ **收尾（02:0x，KAI 裁定）**：**记忆文件改为纯路由器** —— 速查卡 A–V（23 条）自
+  `.workbuddy-ai/memory/MEMORY.md` 迁出，新家 `notes/memory/QUICKREF.md`（T1 层，与
+  `TROUBLESHOOTING.md` 按"静默错值 / 立刻报错"分工）。`MEMORY.md` **7850 → 1479 字符**，
+  只留路由表 + 时间戳。同轮清掉两处重复：原 §1 全局摘要（与 `ARCHITECTURE.md §1/§2/§6`
+  重复）、原 §3 当前脏态（与 `notes/context/*` 三处重复，改成指针）。
+  存活文档对「速查卡 / MEMORY.md 速查卡」的引用 **0 命中**（含 `tools/skew_reference.py`
+  的夹具注释）；`run.py --check` **`RC=0`**；22 个 `tools/check_*.py` 复测 **20 / 2**（同 01:4x）。
+  ⑧ **收尾（02:2x，KAI 两条明令）**：
+  ① `.playwright-cli/` 进 `.gitignore`（浏览器自动化产物，8 个 console 日志）。
+  ② **保留策略首版定为"不留档、不备份"** —— ⚠️ **已被 03:1x 的 ⑩ 改写为"归档不删"。**
+  当时新增 `SessionFileStore.prune_other_sessions()`，`AsyncPersistenceWriter.start()`
+  打开本会话文件后调用它清掉 db_dir 内所有非当前会话的库文件，并把被删文件名**返回给
+  调用方**（`features/` 整层不写日志，由 `app/pipeline.py` 记一行）。删除范围两道闸门：
+  只在 `db_dir` 之内 glob + 只匹配 `db_filename` 模板派生的名字。回归
+  `check_persistence_sessions` **4/4 → 6/6**；非空转 2 个变异各抓 1–2 条。
+  ⚠️ **这一版把 KAI「不留档、不备份」的适用范围从旧单库 `data/session.db` 误扩到了
+  全部逐日文件 —— 是我误读，见 ⑩。** 数量规律不变：跨日旧文件留到下次启动才处理
+  ⇒ **未归档数 = 自上次启动以来的交易日数**（实测 `tmp/probe_rollover_residue.py`：
+  不重启跨 5 个交易日 ⇒ 5 个文件 ≈ 9.4 MB；每天重启一次则最多 1 个 ≈ 2.35 MB）。
+  未归档文件**永不会被读到**。
+  ③ **`data/session.db` 已删**（1,064,960 B / 88+88 行，`data/` 在 `.gitignore` ⇒
+  不可恢复、无备份）。`data/sessions/20260915.db` 未受影响。
+  ⑨ **收尾（02:5x，KAI 追加明令「禁止新增速查卡」）**：知识库的增长模型从
+  **O(错误条数)** 改为 **O(不变量条数)**。起因是 KAI 质问 *"以后有 1200 个错误，
+  你也要写 1200 个检查表吗？"*。
+  ⓐ **审计 23 条卡片**：**12 条有守卫**（B/C/D/H/J/K/O/P/Q/S/T/U）；**11 条无守卫**，
+  其中 **A/E/L 是"能机械化但没写"的欠账**（`grep inverse tools/*.py` 0 命中 /
+  `selfcheck_core` 只查 `market_data_type` 键在不在不查值 / `grep 'splitLine\|cellBorder'
+  tools/*.py` 0 命中），**8 条是真永久**（F/G/I/K2/M/N/R/V）。
+  ⓑ **硬规则**：`QUICKREF.md` 收录判据节标题改为「**本文件只减不增**」——允许降级、
+  合并、删除，**不允许追加**。四条出路（**没有一条会增加条目数**）：① 能机械判定 ⇒
+  写检查器、原条目**降为指针**（净减）；② 同类 ⇒ **并入**；③ 一次性 ⇒ 只进
+  `notes/sessions/**`；④ 会立刻报错 ⇒ `TROUBLESHOOTING.md`。要新增 ⇒ **先问 KAI**。
+  ⓒ **传播到 4 处**：`QUICKREF.md` / 用户级 `~/.workbuddy-ai/MEMORY.md`（路由 ②
+  "归纳成 1 条" → "并入已有条目"）/ `open_tasks.md`（A/E/L 那条改为"**23 → 20，净减**"）/
+  skill `spxw-live-verify/references/pitfalls.md`（声明"不是第二张速查卡表"）。
+  ⓓ **顺手修 skill 计数漂移**：`pitfalls.md` 头部"15 条" + `SKILL.md` 三处"19 条"
+  ⇒ 实际 **20**，四处统一。
+  ⓔ **两个自踩的坑**（都是"写了规则 ≠ 规则生效"的实证）：**同一文件多处编辑并行提交
+  ⇒ 只活最后一条**（踩了 `pitfalls.md §9` 自己记的规则）；**`grep -c '^| [A-Z]'` 数卡片
+  会得 34 不是 23**（审计表也单字母开头）⇒ 正确数法已写进 `QUICKREF.md` 页脚。
+  ⓕ 核对：`run.py --check` **`RC=0`**（本轮只动 `.md` 与仓库外 skill）。
+  ⑩ **改写保留策略：删除 → 归档（03:1x，KAI 两条明令）** —— KAI 原话
+  **"这就是历史数据，有用。"** 与 **"'不留档、不备份' 只针对旧单库 `data/session.db`"**。
+  ⇒ 我 02:2x 那句「不留档、不备份」的适用范围**是我扩大错了**：`data/sessions/<到期日>.db`
+  是逐交易日的 ΔIV / Skew **原始记录**，不是残留垃圾；而当时的 `unlink()` 实现**正在
+  销毁它**。
+  ⓐ **实现**：`prune_other_sessions()` → `archive_other_sessions()`，`unlink()` →
+  `rename()` 到 `archive_dir`（`persistence.json` 新键，默认 `data/archive`）；`start()`
+  返回 `(已归档, 未归档)`，`app/pipeline.py` **各记一行**（归档 INFO / 冲突 WARNING）。
+  ⓑ **三道闸门 + 一道构造期校验**：只在 db_dir 内 glob / 只匹配 `db_filename` 模板 /
+  归档目录**同名不覆盖**；`archive_dir` 落在 db_dir 之内 ⇒ **构造时抛错**（否则归档件
+  下次启动又会被当成待归档项）。
+  ⓒ **回归 6/6 → 7/7**；非空转 3 个变异（`tmp/probe_mutation_archive.py`：不归档抓 1 /
+  glob 越界抓 3 / 同名覆盖抓 1），还原后全绿。
+  ⓓ **实盘验证**：合成 `data/sessions/20990101.db` → 新代码重启 →
+  `03:18:42 INFO pipeline 已归档 1 个历史会话文件到 data\archive（db_dir 只留当前会话）: 20990101.db`；
+  `data/sessions/` 只剩 `20260915.db`、`data/archive/20990101.db`（20,480 B）在。
+  ⓔ 配置项 50 → **51**（`selfcheck_core::REQUIRED_KEYS["persistence"]` 同步）；
+  `features/persistence_store.py` 因新增内容一度 **429 行 > 400**，压回 **398 行**。
+  ⓕ **本轮撞上外部故障两次**：03:18 重启时 IB Gateway 又掉（`ConnectionRefusedError 1225`，
+  4002 无监听）；KAI 重启 Gateway 后 03:20 起来，`All data farms are connected`
+  （usfarm.nj; hfarm; usfuture; apachmds; secdefhk），现价恢复跳动。
+  终态：`run.py --check` **`RC=0`**；22 个 `tools/check_*.py` ⇒ **20 RC=0 / 2 RC=1**
+  （`check_page_render` / `check_ws_compression`，两个既有红）。
+  ⓖ **03:4x 复核（记录同步后重跑，非引用旧结论）**：`check_persistence_sessions` **7/7 `RC=0`**；
+  `run.py --check` **`RC=0`**（`[13]` 热力图 24 档 × 880 桶 / Skew 303 点）；行数
+  `persistence_store.py` **398** / `persistence.py` **329** / `pipeline.py` **381** /
+  `check_persistence_sessions.py` **397**（全部 < 400）；`data/sessions/20260915.db` 430,080 B
+  在长、`data/archive/20990101.db` 20,480 B 在；8060 `LISTENING`（PID 3900）。
+- Previous: 2026-09-15/persistence-session-identity
+- Previous handoff: notes/sessions/2026-09-15/persistence-session-identity/handoff.md
+- Previous status: **启动成功 + 跨会话持久化污染已结构性修复（改动未提交，`HEAD = 9ec4fb9`）** ——
+  2026-09-15 00:27 EDT，GTH 段。① **启动**：IB Gateway 4002（KAI 于 00:27 前开）→
+  `run.py` `00:27:58 流水线已就绪`；12/12 静态资源 200；`connected` / `last_tick_age_s 0.0` /
+  80-92 订阅 / 24 档热力图。② **挖出缺陷**（`ws_probe` 26/27，唯一 FAIL =
+  `25Δ Put 行权价低于现价 7626.51 < 7605.41`）：`data/session.db` 两表**都没有会话列**，
+  `bucket_index` 是**日内坐标、每交易日复用** ⇒ 昨天 RTH 的行落进今天的键空间。
+  三条后果：帧的 `skew.latest`（= `skew_series[-1]`）报出**昨天 14:26:48**；
+  `skew.series` 混入 871 行昨天的点（label 按今天网格算 ⇒ 曲线画到未来）；
+  热力图把昨天 RTH 的数据画在**今天 GTH 的时刻**上。⚠️ **顶栏读 `atm` 块（活值）⇒ 顶栏对、面板错**。
+  ③ **修法**（KAI 选定结构性修复）：`session_key`（= 当日到期日）进主键
+  `(session_key, bucket_index)`；`recover()`/`recover_skew()` 按会话过滤；
+  **缺列的旧表整张丢弃并报出行数**（重启日志 `丢弃 1830 行`）；`enqueue` 空身份抛错。
+  ④ **验证**：`run.py --check` `RC=0`；`check_persistence` **8/8**；
+  `ws_probe` **25/25 全通过**（`7567.52 < 7603.93`，与按 cells 插值算出的 ≈7569 一致 ⇒
+  delta 定位一直是对的）；截图对照假 0 带一并消失。非空转：摘掉会话过滤 ⇒
+  跨会话用例报 `今日会话应只有 1 个桶，实际 3`。
+  ⚠️ `notes/context/*` 与 `web/config.js` 仍含**另一会话未提交**的改动、
+  `notes/sessions/2026-09-14/live-render-verify/` 仍未跟踪 —— 本轮**未替它背书**。
+- Previous: 2026-09-14/live-render-verify
+- Status: **实盘首次出图验证完成（纯只读，无源码改动）** —— 2026-09-14 09:45 EDT
+  RTH 段，复用 KAI 常驻 `run.py`（**未强杀**）。四项全部 ✅：
+  ① `health.mode = delayed` 是**由 `market_data_type=3` 推导**的值，非观测；
+     独立探针（clientId=97）实测**期权与 SPX 指数 `marketDataType=1`**（任务书预期的
+     "指数 = 3" 是过期预期），`modelGreeks` 与 bid/ask/last Greeks 并存且值不同。
+  ② 订阅 **48/92**，`projected_subscriptions()` = 49。
+  ③ `ws_probe` 全部通过：帧 18059→18068、**24 档** × 1624 桶、15,420 格；
+     真 Chrome 截图 185,973 字节，顶栏 `connected`，热力图 + Skew 双面板出图。
+  ④ `health.rate_limit` 四要素（45 / 1.0s）+ 两条非空转证伪
+     （非默认 12/0.5s 驱动生效、回调确实挂在 `ib.client`；突发 200 条 ⇒
+     `events` 0→1、`throttling` 翻真后复位、`throttled_total_s` 0.502→4.004）。
+  ⇒ 同时闭合 open_tasks 两条：`[中] 实盘首次出图未验证`、
+  `[中] 交易日 RTH 段实盘验证`（指数 09:30 后确实恢复实时、09:25 交班平滑、RTH 走指数直读）。
+  ⚠️ 未停服务（任务书要求不得强杀常驻进程）；`run.py --check` 未重跑（无源码改动）。
+- Previous: 2026-09-14/skew-iv-colors
+- Previous handoff: notes/sessions/2026-09-14/skew-iv-colors/handoff.md
+- Previous status: **Skew 三条 IV 曲线配色按 KAI 指定钉死（跨式黄 / Put 绿 / Call 红）；
+  顺带修掉三个回归的 node 沙箱清单漂移 + 4 条变异锚点漂移；改动未提交** ——
+  ① 问题（KAI 报"曲线标签与实际图例色彩混乱"）：三条 IV 曲线复用主序列的分段色
+  （Put = `theme.hot` 红 / Call = `theme.cool` 蓝 / ATM = `theme.textFaint` 灰），
+  而主序列 25Δ Skew 按正负也走 hot/cool ⇒ 四条线只有两种颜色，叠加图例里两个
+  同名的 25Δ Skew，无法分辨哪条是 IV、哪条是 Skew。
+  ② 修法：`web/config.js` 新增 `skew.colors`（唯一来源）；`web/skew.js` 三条 IV
+  曲线改读它；`web/style.css` + `web/index.html` 顶栏读数同色（put/call 不再都用 cool）。
+  ③ 新增常驻回归 `tools/check_skew_colors.py`（6 判据 + 3 变异，255 行）。
+  ④ 顺带修既有缺陷：`web/` 拆文件后 node 沙箱清单没补 ⇒ `check_skew_viewport` /
+  `check_skew_alignment` / `check_period_aggregation` 在**驱动阶段**就崩
+  （`P.alignSkew` / `P.sliceZones is not a function`）；清单已收敛为
+  `skew_reference.WEB_SCRIPTS` 单一真相。viewport 的 4 条变异锚点也修正到拆分后的
+  文件，7 条变异全部抓住。
+  ⑤ 验证：`run.py --check` RC=0；真浏览器取像素（真 Chrome + 真 ECharts）三条 IV 色
+  全部命中，`--old` 覆盖回旧配色立刻 FAIL。详见会话根。
+  ⚠️ **订正（2026-09-14 10:3x，会话 `3d38495` 之后实测）**：本行原写「`check_*.py`
+  20 个 → 19 RC=0（余 1 为既有）」，**该数字系自报、未实跑，与事实不符**。
+  实测（`venv/Scripts/python.exe`）当时为 **17 RC=0 / 3 RC=1** —— 多出的两个红是
+  `check_persistence`（手写夹具缺 `heatmap_max_ffill_buckets`，自 `6828e3a` 起红）
+  与 `check_page_render`。前者已修（夹具改为从真配置派生），当前基线
+  **20 个 → 18 RC=0 / 2 RC=1**（红 = `check_page_render` / `check_ws_compression`）。
+  另：**必须用 `venv/Scripts/python.exe`**，裸 `python` 会多出两个假红。
+- Previous: 2026-09-14/webgl-to-echarts
+- Previous handoff: notes/sessions/2026-09-14/webgl-to-echarts/handoff.md
+- Previous status: **热力图渲染器由原生 WebGL 换成 ECharts；改动未提交** ——
   ① **根因**（KAI 报"绿色周围黑色色块"）：`gl_heatmap.js:157-165` 把调色板绑在 TEXTURE1，
   `:261-270` 首次 `update()` 未先 `activeTexture(TEXTURE0)` 就 `bindTexture(_dataTex)`
   ⇒ **数据纹理顶掉调色板** ⇒ `u_palette` 采到数据纹理中间行：有效格 `(R,255,0)` 绿、

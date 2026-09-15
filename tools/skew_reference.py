@@ -220,7 +220,7 @@ def build() -> tuple[dict, dict]:
     open_dt = clock.grid_start_dt()
 
     labels = clock.bucket_labels()[:BUCKETS]
-    #: strikes 降序 —— 与真实帧一致（帧与屏幕同向，见项目 MEMORY）
+    #: strikes 降序 —— 与真实帧一致（帧与屏幕同向，见 notes/memory/QUICKREF.md 卡 A）
     strikes = tuple(6500.0 + 5 * i for i in range(ROWS // 2 - 1, -ROWS // 2 - 1, -1))
     values = tuple(
         tuple(

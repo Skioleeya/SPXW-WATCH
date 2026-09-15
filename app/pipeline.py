@@ -171,16 +171,45 @@ class Pipeline:
             )
         self._log.info("界面地址 %s | 行情通道 %s", self._server.url, self._server.ws_url)
 
-        await self._writer.start()
-        recovered = self._writer.recover()
+        # 会话身份（当日到期日）是持久化的**落点**：它同时决定这一轮写进哪个
+        # 文件、以及重启时从哪个文件恢复。网格跨午夜而到期日不跨，所以 0DTE 的
+        # 到期日就是会话身份（见 core/session_grid.py）。
+        session_key = self._clock.expiry_str()
+        archived, held_back = await self._writer.start(session_key)
+        if archived:
+            # 保留策略 = db_dir 只留当前会话，历史**归档不删**。归档必须留痕：
+            # features/ 整层不写日志，这行是唯一能看到"搬了哪几个文件"的地方。
+            self._log.info(
+                "已归档 %d 个历史会话文件到 %s（db_dir 只留当前会话）: %s",
+                len(archived), self._writer.archive_dir, "、".join(archived),
+            )
+        if held_back:
+            # 冲突比成功更显眼：归档目录同名**不覆盖** ⇒ 源文件仍留在 db_dir，
+            # "db_dir 只留当前会话"这条不变量此刻**不成立**，必须看得见。
+            self._log.warning(
+                "有 %d 个历史会话文件未归档（归档目录已有同名，不覆盖）: %s",
+                len(held_back), "、".join(held_back),
+            )
+        if self._writer.legacy_dropped_count:
+            self._log.warning(
+                "丢弃 %d 行无会话身份的旧持久化数据（旧表缺 session_key 列，"
+                "无法判断归属哪个交易日）", self._writer.legacy_dropped_count,
+            )
+        self._log.info("持久化落点 %s（会话 %s，同日内重启续写同一文件）",
+                       self._writer.session_path, session_key)
+        # 恢复必须限定在**本会话**：桶序号是日内坐标、每个交易日复用，
+        # 不带会话身份就会把别的交易日的数据当成今天的（见 persistence 模块）。
+        recovered = self._writer.recover(session_key)
         if recovered:
             self._engine.restore_heatmap(recovered)
-            self._log.info("已从 SQLite 恢复 %d 个历史桶", len(recovered))
+            self._log.info("已从 SQLite 恢复 %d 个历史桶（会话 %s）",
+                           len(recovered), session_key)
 
-        recovered_skew = self._writer.recover_skew()
+        recovered_skew = self._writer.recover_skew(session_key)
         if recovered_skew:
             self._engine.restore_skew(recovered_skew)
-            self._log.info("已从 SQLite 恢复 %d 个历史 Skew 点", len(recovered_skew))
+            self._log.info("已从 SQLite 恢复 %d 个历史 Skew 点（会话 %s）",
+                           len(recovered_skew), session_key)
 
         self._feed.set_sink(self._store)
         self._running = True

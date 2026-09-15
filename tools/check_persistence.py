@@ -1,4 +1,4 @@
-"""回归：旁路异步 SQLite 持久化。
+"""回归：旁路异步 SQLite 持久化（往返与队列语义）。
 
 覆盖点
 ------
@@ -9,6 +9,12 @@
 5. ``load_snapshot`` 后引擎状态与落盘内容一致（行数、断代数、断代桶）。
 6. 冷数据的键序恒为**降序**，与 ``_buckets`` 的首次出现顺序无关，且与对外帧
    的 ``strikes`` 同向（高行权价在前）。
+7. **旧结构迁移**：缺 ``session_key`` 列的旧表被整张丢弃，且丢弃行数被如实报出。
+8. **空会话身份被拒**：写入与读取两侧都不得接受"无身份的行"。
+
+**分文件语义**（一交易日一文件、同日内重启续写、跨日切文件、模板越界）不在本
+文件，在 ``tools/check_persistence_sessions.py`` —— 两个文件各自 < 400 行，且
+各自只有一个主题。
 
 注：本文件**不**覆盖 ``build()`` 的 ΔIV（``_row_values`` 的前向填充与留白由
 ``tools/check_reconnect_gap.py`` 覆盖），此前 docstring 声称覆盖，与代码不符。
@@ -16,6 +22,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
 import tempfile
 from pathlib import Path
@@ -27,6 +34,9 @@ sys.path.insert(0, str(ROOT))
 from config import loader  # noqa: E402
 from features.heatmap_engine import HeatmapEngine  # noqa: E402
 from features.persistence import AsyncPersistenceWriter  # noqa: E402
+from tools.fixtures import persist_cfg  # noqa: E402
+
+SESSION = "20260915"
 
 
 def _make_clock() -> MagicMock:
@@ -58,13 +68,9 @@ def _make_serial_cfg() -> dict:
     return dict(loader.load("serialization"))
 
 
-def _make_persist_cfg(db_path: Path) -> dict:
-    return {
-        "enabled": True,
-        "db_path": str(db_path),
-        "queue_maxsize": 10,
-        "write_interval_s": 0.01,
-    }
+def _open(writer: AsyncPersistenceWriter) -> None:
+    """白盒：直接打开会话文件，不起 async worker（回归要确定性、不要后台竞争）。"""
+    writer._store.open_session(SESSION)
 
 
 def _case_roundtrip() -> None:
@@ -80,23 +86,17 @@ def _case_roundtrip() -> None:
     engine._breaks = {11}
 
     with tempfile.TemporaryDirectory() as tmp:
-        db = Path(tmp) / "test.db"
-        writer = AsyncPersistenceWriter(_make_persist_cfg(db))
-        # 手动建立连接（不启动 async worker）
-        import sqlite3
-        writer._conn = sqlite3.connect(str(db), timeout=5.0)
-        writer._ensure_table()
+        writer = AsyncPersistenceWriter(persist_cfg(Path(tmp)))
+        _open(writer)
 
         # 手动入队并同步刷
         for idx in (10, 11, 12):
             ivs = engine.dump_bucket(idx)
-            writer.enqueue(idx, ivs, engine.is_break(idx))
+            writer.enqueue(idx, ivs, engine.is_break(idx), SESSION)
         writer._batch_write([writer._queue.get_nowait() for _ in range(3)])
 
-        # 恢复（用同一连接，避免 Windows 文件锁冲突）
-        recovered = writer.recover()
-        writer._conn.close()
-        writer._conn = None
+        recovered = writer.recover(SESSION)
+        writer._store.close()
         assert len(recovered) == 3, f"期望 3 个桶，实际 {len(recovered)}"
 
         # 验证断代
@@ -119,27 +119,20 @@ def _case_roundtrip() -> None:
 
 
 def _case_idempotent_overwrite() -> None:
-    clock = _make_clock()
-    serial = _make_serial_cfg()
-
     with tempfile.TemporaryDirectory() as tmp:
-        db = Path(tmp) / "test.db"
-        writer = AsyncPersistenceWriter(_make_persist_cfg(db))
-        import sqlite3
-        writer._conn = sqlite3.connect(str(db), timeout=5.0)
-        writer._ensure_table()
+        writer = AsyncPersistenceWriter(persist_cfg(Path(tmp)))
+        _open(writer)
 
         # 第一次写入
-        writer.enqueue(5, {5500.0: 0.10}, False)
+        writer.enqueue(5, {5500.0: 0.10}, False, SESSION)
         writer._batch_write([writer._queue.get_nowait()])
 
         # 第二次覆盖同一桶
-        writer.enqueue(5, {5500.0: 0.99}, False)
+        writer.enqueue(5, {5500.0: 0.99}, False, SESSION)
         writer._batch_write([writer._queue.get_nowait()])
 
-        recovered = writer.recover()
-        writer._conn.close()
-        writer._conn = None
+        recovered = writer.recover(SESSION)
+        writer._store.close()
 
         assert len(recovered) == 1
         assert recovered[0]["ivs"][5500.0] == 0.99
@@ -147,27 +140,24 @@ def _case_idempotent_overwrite() -> None:
 
 def _case_queue_drop() -> None:
     with tempfile.TemporaryDirectory() as tmp:
-        db = Path(tmp) / "test.db"
-        cfg = _make_persist_cfg(db)
-        cfg["queue_maxsize"] = 2
-        writer = AsyncPersistenceWriter(cfg)
+        writer = AsyncPersistenceWriter(persist_cfg(Path(tmp), queue_maxsize=2))
 
-        writer.enqueue(1, {5500.0: 0.1}, False)
-        writer.enqueue(2, {5500.0: 0.2}, False)
-        writer.enqueue(3, {5500.0: 0.3}, False)  # 队列满，应被丢弃
+        writer.enqueue(1, {5500.0: 0.1}, False, SESSION)
+        writer.enqueue(2, {5500.0: 0.2}, False, SESSION)
+        writer.enqueue(3, {5500.0: 0.3}, False, SESSION)  # 队列满，应被丢弃
         assert writer.dropped_count == 1
 
 
 def _case_disabled_no_op() -> None:
     with tempfile.TemporaryDirectory() as tmp:
-        db = Path(tmp) / "test.db"
-        cfg = _make_persist_cfg(db)
+        cfg = persist_cfg(Path(tmp))
         cfg["enabled"] = False
         writer = AsyncPersistenceWriter(cfg)
 
-        writer.enqueue(1, {5500.0: 0.1}, False)
+        writer.enqueue(1, {5500.0: 0.1}, False, SESSION)
         assert writer.dropped_count == 0  # 不操作
-        assert writer.recover() == []
+        assert writer.recover(SESSION) == []
+        assert writer.session_path is None, "关闭状态不得打开任何库文件"
 
 
 def _case_key_order_descending() -> None:
@@ -198,25 +188,19 @@ def _case_key_order_descending() -> None:
     assert dumped == expected, f"dump_bucket 未降序: {dumped}"
 
     with tempfile.TemporaryDirectory() as tmp:
-        db = Path(tmp) / "test.db"
-        writer = AsyncPersistenceWriter(_make_persist_cfg(db))
-        import sqlite3
-        writer._conn = sqlite3.connect(str(db), timeout=5.0)
-        writer._ensure_table()
-        writer.enqueue(10, engine.dump_bucket(10), False)
+        writer = AsyncPersistenceWriter(persist_cfg(Path(tmp)))
+        _open(writer)
+        writer.enqueue(10, engine.dump_bucket(10), False, SESSION)
         writer._batch_write([writer._queue.get_nowait()])
 
-        raw = json.loads(
-            writer._conn.execute(
-                "select ivs_json from heatmap_buckets"
-            ).fetchone()[0]
-        )
+        rows = writer._store.load_heatmap(SESSION)
+        assert len(rows) == 1, f"应落盘 1 行，实际 {len(rows)}"
+        raw = json.loads(rows[0][1])
         on_disk = [float(k) for k in raw]
         assert on_disk == sorted(on_disk, reverse=True), f"落盘键序非降序: {on_disk}"
 
-        recovered = writer.recover()
-        writer._conn.close()
-        writer._conn = None
+        recovered = writer.recover(SESSION)
+        writer._store.close()
 
     keys = list(recovered[0]["ivs"])
     assert keys == expected, f"recover 后键序变了: {keys}"
@@ -226,12 +210,82 @@ def _case_key_order_descending() -> None:
     assert list(engine2.dump_bucket(10)) == expected, "load_snapshot 后键序变了"
 
 
+def _case_legacy_table_dropped() -> None:
+    """缺 ``session_key`` 列的旧表必须整张丢弃，并**如实报出**丢弃行数。
+
+    旧行没有会话身份 ⇒ 留着只能靠猜；宁可丢。判据同时要求丢弃数被报出 ——
+    否则"丢弃"会变成静默的数据丢失，比错值更难发现。
+
+    再跑一次 ``ensure_tables()`` 不得再丢（累计值不变），否则每次重启都会把当天
+    的数据也丢掉。
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = persist_cfg(Path(tmp))
+        # 文件名从真配置的模板派生，不在这里写死 —— 否则模板改了、回归还在测旧名字
+        db = Path(tmp) / cfg["db_filename"].format(session_key=SESSION)
+        conn = sqlite3.connect(str(db), timeout=5.0)
+        conn.execute(
+            "CREATE TABLE heatmap_buckets ("
+            "bucket_index INTEGER PRIMARY KEY, ivs_json TEXT NOT NULL, "
+            "is_break INTEGER NOT NULL DEFAULT 0)"
+        )
+        conn.execute(
+            "CREATE TABLE skew_points ("
+            "bucket_index INTEGER PRIMARY KEY, skew_json TEXT NOT NULL)"
+        )
+        for i in range(4):
+            conn.execute(
+                "INSERT INTO heatmap_buckets VALUES (?, ?, 0)",
+                (i, json.dumps({"5500.0": 0.1})),
+            )
+        conn.execute("INSERT INTO skew_points VALUES (?, ?)", (0, "{}"))
+        conn.commit()
+        conn.close()
+
+        writer = AsyncPersistenceWriter(cfg)
+        _open(writer)
+
+        assert writer.legacy_dropped_count == 5, \
+            f"应丢弃 4 桶 + 1 点 = 5 行，实际 {writer.legacy_dropped_count}"
+        assert writer.recover(SESSION) == [], "旧行仍被恢复"
+        assert writer.recover_skew(SESSION) == [], "旧 Skew 点仍被恢复"
+
+        writer._store.ensure_tables()
+        assert writer.legacy_dropped_count == 5, "新结构不应再触发丢弃"
+        writer._store.close()
+
+
+def _case_empty_session_key_rejected() -> None:
+    """空会话身份必须抛错，不得落盘成"无身份的行"。
+
+    空值落盘后与其它交易日无法区分，恢复时只能靠猜 —— 那正是本模块要堵的
+    静默错值。写入与读取两侧都要拦。
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        writer = AsyncPersistenceWriter(persist_cfg(Path(tmp)))
+        for bad in ("", "   "):
+            for call in (
+                lambda: writer.enqueue(1, {5500.0: 0.1}, False, bad),
+                lambda: writer.enqueue_skew(1, MagicMock(), bad),
+                lambda: writer.recover(bad),
+                lambda: writer.recover_skew(bad),
+            ):
+                try:
+                    call()
+                except ValueError:
+                    continue
+                raise AssertionError(f"空会话身份未被拒绝: {bad!r}")
+        assert writer._queue.empty(), "被拒的载荷不得入队"
+
+
 _CASES = [
     _case_roundtrip,
     _case_idempotent_overwrite,
     _case_queue_drop,
     _case_disabled_no_op,
     _case_key_order_descending,
+    _case_legacy_table_dropped,
+    _case_empty_session_key_rejected,
 ]
 
 

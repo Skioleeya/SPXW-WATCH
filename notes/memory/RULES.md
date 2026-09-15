@@ -19,6 +19,9 @@
 
 ## 2. 关键接口约定（静默错值型）
 
+> 本节讲**接口该怎么写**；同属"静默错值型"的**故障判据**在 `QUICKREF.md`（速查卡 A–V）。
+> 同一事实只留一处：本节不重复卡片内容，卡片也不重复本节的接口约定。
+
 ### 2.1 Skew 与热力图共用列网格
 - `app.js::renderHeatmap` 返回 `view`，`period.js::alignSkew` 消费它
 - 热力图聚合 ΔIV（可加，组内求和）；Skew 是**水平量**取**组内末值**
@@ -95,19 +98,22 @@
 > `venv/Scripts/python.exe`（实测 Py 3.13.14 / `ib_async` 2.1.0 / `aiohttp` / `tzdata` 齐备）
 > 即可；裸解释器没有 `ib_async` / `aiohttp` ⇒ `check_reconnect_flow`、`check_web_contract`
 > 在 **import 阶段**就崩，且 `run.py --check` 的 `[13]` 会**误报**"端口开放但 WS 握手失败，
-> 跳过动态检查"。同一份代码、同一时刻实测：裸 `python` = **15 RC=0 / 5 RC=1**；
-> `venv` = **17 RC=0 / 3 RC=1**。**看到红先确认解释器，再怀疑代码。**
+> 跳过动态检查"。同一份代码、同一时刻实测（2026-09-15 01:4x，服务在跑，同为 22 个检查）：
+> 裸 `python` = **18 RC=0 / 4 RC≠0**；`venv` = **20 RC=0 / 2 RC=1**。
+> **看到红先确认解释器，再怀疑代码。**
 
 ```
-<VENV>/python.exe run.py --check                  # RC=0（14 组；2026-09-14 13:1x 实跑，需服务在跑）
+<VENV>/python.exe run.py --check                  # RC=0（14 组；2026-09-15 01:4x 实跑，需服务在跑）
 <VENV>/python.exe tools/smoke_test.py             # RC=0
-<VENV>/python.exe tools/check_*.py                # 21 个；19 RC=0 / 2 RC=1（2026-09-14 11:1x 实跑）
-                                                  #   红 = check_page_render / check_web_contract
+<VENV>/python.exe tools/check_*.py                # 22 个；20 RC=0 / 2 RC=1（2026-09-15 01:4x 实跑）
+                                                  #   红 = check_page_render / check_ws_compression
                                                   #   ⚠️ 第二个红会随服务/行情状态换身份：10:3x 是
                                                   #   check_ws_compression，11:1x 是 check_web_contract
                                                   #   —— 都是"需服务在跑"那一类，别把当时的红名
-                                                  #   当永久事实。
-<VENV>/python.exe tools/check_persistence.py      # RC=0（5/5）
+                                                  #   当永久事实。09-15 01:4x 复现的就是它：
+                                                  #   压缩比 70.7% < 80% 阈值。
+<VENV>/python.exe tools/check_persistence.py      # RC=0（7/7）
+<VENV>/python.exe tools/check_persistence_sessions.py # RC=0（7/7）一交易日一文件 + 历史归档（启动归档非当前会话；同名不覆盖）
 <VENV>/python.exe tools/check_window_tolerance.py # RC=0（8 项，含 T−1 / T 边界对照）
 <VENV>/python.exe tools/check_skew_viewport.py    # RC=0（21 项 + 7 变异）
 <VENV>/python.exe tools/check_skew_colors.py      # RC=0（6 项 + 3 变异）三条 IV 曲线配色

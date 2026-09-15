@@ -1,0 +1,225 @@
+# live-render-verify — 原始命令输出（2026-09-14 09:45–09:49 EDT）
+
+所有命令工作目录 = `E:/US.market/SPXW SWATCH/spxw_swatch`。
+解释器 = 项目 venv `./venv/Scripts/python.exe`（KAI 常驻进程所用解释器）。
+
+---
+
+## [0] 前置判据：交易日 + 0DTE
+
+```console
+$ date "+%Y-%m-%d %H:%M:%S %Z (%a)"
+2026-09-14 09:45:47 EDT (Mon)
+
+$ for p in 4001 4002 8060; do (echo > /dev/tcp/127.0.0.1/$p) 2>/dev/null && echo "$p OPEN" || echo "$p closed"; done
+4001 OPEN
+4002 OPEN
+8060 OPEN
+```
+
+`ws_probe` 帧内 `session.expiry = 20260914` ⇒ 当日到期 SPXW 存在。
+
+---
+
+## [1] 既有进程（未强杀，直接复用）
+
+```console
+$ powershell -c "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | Select ProcessId,ParentProcessId,CreationDate,CommandLine"
+ProcessId       : 17620     ParentProcessId : 18424
+CreationDate    : 9/14/2026 7:19:44 AM
+CmdLine         : "E:\US.market\SPXW SWATCH\spxw_swatch\venv\Scripts\python.exe" run.py
+
+ProcessId       : 17928     ParentProcessId : 17620
+CreationDate    : 9/14/2026 7:19:44 AM
+CmdLine         : "E:\US.market\SPXW SWATCH\spxw_swatch\venv\Scripts\python.exe" run.py
+```
+
+⇒ KAI 常驻 run.py（父子两进程），启动于 07:19:44，与日志
+`07:19:59 流水线已就绪` 一致。**未强杀，直接复用。**
+
+---
+
+## [2] (a) health.mode 与权限
+
+### health 块（帧内，`tmp/dump_health.py` 抓 1 帧原样打印）
+
+```json
+{
+  "mode": "delayed",
+  "connection": "connected",
+  "subscribed": 48,
+  "subscription_cap": 92,
+  "ticks_received": 1561223,
+  "ticks_dropped": 264,
+  "store_cells": 68,
+  "last_tick_age_s": 0.1,
+  "rate_limit": {"capacity": 45, "interval_s": 1.0, "events": 0,
+                 "throttling": false, "throttled_total_s": 0.0},
+  "sub_limit_backoff": false
+}
+```
+
+`config/ibkr.json::market_data_type = 3` ⇒ `health.mode = "delayed"` 是**推导值**，
+非观测值（该键的 `_market_data_comment` 已明写此语义）。
+
+### 单合约实测（`tmp/probe_mdt.py`，clientId=97 独立会话，`reqMarketDataType(3)`）
+
+```console
+$ NO_PROXY=127.0.0.1,localhost ./venv/Scripts/python.exe -u tmp/probe_mdt.py
+已连接 127.0.0.1:4002 clientId=97  reqMarketDataType(3)
+[SPX 指数 secType=IND conId=416904]
+  marketDataType               1
+  last/close                   (7611.27, 7656.98)
+  bid/ask                      (nan, nan)
+[链] SPXW 且含 20260914 到期的片：3
+[链] exchange=CBOE expirations 含当日 ✓ strikes=744
+[SPXW 20260914 C7610 conId=909967354]
+  marketDataType               1
+  modelGreeks                  OptionComputation(tickAttrib=0, impliedVol=0.144678881649558, delta=0.5208549397731626, optPrice=12.447025505869078, pvDividend=0.0, gamma=0.013589579301978549, vega=0.8071877386296364, theta=-10.507084099619078, undPrice=None)
+  bidGreeks                    OptionComputation(tickAttrib=0, impliedVol=0.1440036089352124, delta=0.5270926411444203, optPrice=12.199999809265137, pvDividend=0.0, gamma=0.013633018912894498, vega=0.8069538692221078, theta=-10.27201704917752, undPrice=None)
+  askGreeks                    OptionComputation(tickAttrib=0, impliedVol=0.14523882074625805, delta=0.5268756171019585, optPrice=12.300000190734863, pvDividend=0.0, gamma=0.01351757314953934, vega=0.8069836529007567, theta=-10.372017430647247, undPrice=None)
+  lastGreeks                   OptionComputation(tickAttrib=0, impliedVol=0.1588252588769436, delta=0.5247175724038504, optPrice=12.300000190734863, pvDividend=0.0, gamma=0.01236557186319692, vega=0.8072667638886638, theta=-10.372017430647247, undPrice=None)
+已断开
+```
+
+判据：
+- 期权 ticker `marketDataType = 1`（实时）✓
+- **SPX 指数 `marketDataType = 1`（实时），不是任务描述里预期的 3**
+- `modelGreeks` 非空，且与 `bidGreeks`/`askGreeks`/`lastGreeks` **并存且值不同**
+  （iv 0.14468 / 0.14400 / 0.14524 / 0.15883）⇒ 是独立 tick 通道，不是别名
+- 指数 `last=7611.27` 与 `close=7656.98`（周五收盘）不同 ⇒ 指数在 RTH 段是活的
+
+---
+
+## [3] (b) 订阅条数
+
+```console
+$ grep "pipeline" logs/spxw_swatch.log | tail -3
+09:46:02 INFO    pipeline   帧 18003 | 客户端 1 | 分片 68 | 现价 7607.59 | 订阅 48/92
+09:47:02 INFO    pipeline   帧 18109 | 客户端 1 | 分片 68 | 现价 7608.71 | 订阅 48/92
+09:48:02 INFO    pipeline   帧 18223 | 客户端 1 | 分片 68 | 现价 7612.68 | 订阅 48/92
+```
+
+`acquisition/chain_resolver.py:25-26,74-76`：
+`_RIGHTS_PER_STRIKE=2`、`_EXTRA_SUBSCRIPTIONS=1`、
+`projected_subscriptions() = 2*2*side + 1`；`config/subscription.json::num_strikes_each_side=12`
+⇒ **2×2×12 + 1 = 49**（48 option + 1 现价）。日志「订阅 48/92」= option 48 条 ✓
+
+---
+
+## [4] (c) 热力图出图
+
+```console
+$ NO_PROXY=127.0.0.1,localhost ./venv/Scripts/python.exe -u tools/ws_probe.py
+已连接 ws://127.0.0.1:8060/ws，抓取 10 帧 ...
+收到 10 帧，序号缺口 0 处
+  [ok] 帧序号单调递增  18059 → 18068
+  [ok] 会话块含到期日  20260914
+  [ok] 时间桶恰好铺满交易日网格  2370 桶 × 30s vs 网格 71100s
+  [ok] 会话块含网格区段表  3 个区段
+  [ok] 区段表首尾相接铺满网格  覆盖到第 2370 桶 / 共 2370 桶
+  [ok] 健康块含连接状态  connected / delayed
+  [ok] 订阅数未超 IBKR 上限 100  48/92
+  [ok] 热力图行数 > 0  24 档
+  [ok] 热力图列数随时间增长  1624 → 1624 桶
+  [ok] 色标量程为正  ±0.5
+  [ok] 位图置位数与 filled 一致  15420 格
+  [ok] 矩阵含有效数值  15420 格
+  [ok] Skew 序列有点  629 点
+  [ok] 25Δ Put 行权价低于现价  7586.13 < 7608.66
+  [ok] 25Δ Call 行权价高于现价  7627.33 > 7608.66
+  [ok] 网格点明细非空  23 条
+末帧摘要: spot=7608.66 | 载荷 145,502 字节
+  热力图 24 档 × 1624 桶
+  25Δ Skew = 2.618
+结果: 全部通过
+```
+
+行数 = **24 档** ✓（±12 档 ⇒ 上限 2×side = 24）。
+
+### HTTP 静态资源（11 条全 200）
+
+```console
+$ for p in / /app.js /period.js /matrix_codec.js /heatmap.js /skew.js /ws_client.js /config.js /style.css /vendor/echarts.min.js /health; do echo "$(curl -s -o /dev/null -w '%{http_code}' --noproxy '*' http://127.0.0.1:8060$p)  $p"; done
+200  /
+200  /app.js
+200  /period.js
+200  /matrix_codec.js
+200  /heatmap.js
+200  /skew.js
+200  /ws_client.js
+200  /config.js
+200  /style.css
+200  /vendor/echarts.min.js
+200  /health
+```
+
+### 真 Chrome 截图
+
+```console
+$ chrome.exe --headless=new --no-sandbox --no-proxy-server --hide-scrollbars \
+    --window-size=1680,1050 --virtual-time-budget=25000 \
+    --screenshot=tmp/live_render_094842.png http://127.0.0.1:8060/
+185973 bytes written to file .../tmp/live_render_094842.png
+```
+
+186 KB ≫ 25 KB「等待数据…」签名 ⇒ 截图抢在首帧之前的可能性排除。
+截图见 `artifacts/live_render_094842.png`：顶栏 `connected`、热力图（24 档 × 888 桶 /
+7,483 格 / 色标 28.5B）与 25Δ Skew 面板（4 条线 + 图例）均出图。
+
+---
+
+## [5] (d) 限速桶四要素 + 两条非空转证伪
+
+```console
+$ NO_PROXY=127.0.0.1,localhost ./venv/Scripts/python.exe -u tmp/probe_ratelimit.py
+========================================================================
+证伪 1 · 配置驱动桶（非默认值 12 / 0.5s）+ 回调真的挂在 ib.client 上
+========================================================================
+  库默认 (MaxRequests, Interval)        (45, 1)
+  apply 后 MaxRequests                12
+  apply 后 RequestsInterval           0.5
+  throttleStart 回调数                  1
+  throttleEnd 回调数                    1
+  IB 对象是否转发该属性                       False
+  => 证伪 1 通过：12/0.5 生效，两个节流回调各 1 个且挂在 client 上
+
+========================================================================
+证伪 2 · throttleStart/End 真的会触发（突发 200 条 reqMarketDataType）
+========================================================================
+  生效桶 (capacity, interval_s)         (45, 1.0)
+  突发前 events / throttling            (0, False)
+出站限速桶已满（45 条 / 1s），超出部分转入延迟队列；累计第 1 次
+  突发中 events                         1
+  突发中 throttling                     True
+  突发中 throttled_total_s              0.502
+  排空后 events                         1
+  排空后 throttling                     False
+  排空后 throttled_total_s              4.004
+  断开后 throttling                     False
+  => 证伪 2 结论： events 能翻真且能复位
+```
+
+- 四要素齐全（帧内 `health.rate_limit`）：`capacity=45` / `interval_s=1.0` /
+  `throttling` / `throttled_total_s`，另有 `events` 计数。
+- 运行期接线证据：日志 `07:19:50 INFO ibkr.rate_limit 出站限速桶显式设为 45 条 / 1s`
+  （`RateLimitWatch.apply()` 每次连接打一行）。
+- `IB` 对象不转发 `MaxRequests`（实测 `hasattr(ib, "MaxRequests") == False`）⇒ 必须取
+  `ib.client`，与 skill 记录一致。
+
+---
+
+## [6] 探针期间对既有进程的影响（自查）
+
+```console
+$ curl -s --noproxy '*' http://127.0.0.1:8060/health
+{"ts": 1789393716.65, "frames": 18287, "latest_seq": 18287, "payload_bytes": 137729,
+ "clients": {"clients": 1, "sent": 18568, "dropped": 0}, ...}
+$ grep "pipeline" logs/spxw_swatch.log | tail -1
+09:48:02 INFO    pipeline   帧 18223 | 客户端 1 | 分片 68 | 现价 7612.68 | 订阅 48/92
+```
+
+两次独立会话探针（clientId=97，均已 `disconnect`）之后，KAI 常驻进程
+帧数继续增长、订阅仍 48/92、现价持续更新 ⇒ 未被踢掉。
+`Error 10197 competing live session` 在本日志中累计 **324** 次、最早可追到
+**2026-09-11 14:30:41**，属既有环境现象（本机另有他方 IB 会话），非本轮引入。

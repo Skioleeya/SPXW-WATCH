@@ -37,8 +37,10 @@ from __future__ import annotations
 
 import math
 from datetime import date, datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from config import loader
 from core.clock import SessionClock
 
 
@@ -235,3 +237,44 @@ def display_window_strike(
             f"本回归将给出假红"
         )
     return float(spot + offset_strikes * step)
+
+
+def persist_cfg(
+    db_dir: Path,
+    queue_maxsize: int = 10,
+    write_interval_s: float = 0.01,
+    archive_dir: Path | None = None,
+) -> dict:
+    """按**真配置**派生一份持久化配置，只把落点指向测试目录。
+
+    为什么不在这里手写键表
+    ----------------------
+    ``config/persistence.json`` 每加一个必读键（``db_dir`` / ``db_filename`` /
+    ``archive_dir`` 就是这么加进来的），手写夹具就会漏，而 ``config.loader`` 按
+    「缺键即抛错」fail-fast ⇒ 整条回归变红。手写的测试夹具是**第二份真相**，
+    必然漂移 —— 与 ``check_persistence.py::_make_serial_cfg`` 同一手法：
+    真配置是唯一真相。
+
+    ``db_filename`` 一并从真配置取：分文件的命名模板本身就是要被回归覆盖的
+    对象（``check_persistence_sessions`` 用它做越界判据），夹具不能替它拍板。
+
+    ``archive_dir`` 的默认值
+    ------------------------
+    默认落在 db_dir 的**同级**、名字带 ``_archive`` 后缀。**不能**用固定的
+    ``db_dir.parent / "archive"``：多个用例的临时目录共用一个父目录，同名归档件
+    会跨用例互相撞见（第二个用例看到"归档目录已有同名"）⇒ 假红。
+    **凡是要走 ``start()``（会触发归档）的用例，都应显式传 ``archive_dir``**，
+    免得归档写到临时目录之外去。真配置里两者是 ``data/sessions`` 与
+    ``data/archive``。
+
+    返回**浅拷贝** —— ``loader.load`` 带缓存，直接改会污染其它检查。
+    """
+    cfg = dict(loader.load("persistence"))
+    cfg["db_dir"] = str(db_dir)
+    cfg["archive_dir"] = str(
+        archive_dir if archive_dir is not None
+        else db_dir.parent / f"{db_dir.name}_archive"
+    )
+    cfg["queue_maxsize"] = queue_maxsize
+    cfg["write_interval_s"] = write_interval_s
+    return cfg

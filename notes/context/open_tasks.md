@@ -4,19 +4,111 @@ Archive: notes/context/archive/open_tasks_2026-09.md
 
 ## Active
 
-- [ ] **[中] 假 0 带残留：bucket 0 本身仍被恢复**（2026-09-14）——
-  重启后实测：假 0 带已从 **1308 列缩到 20 列**（= `heatmap_max_ffill_buckets` 上限），
-  但 `features/persistence.py::recover()` 仍读 `heatmap_buckets` **全部行**
-  （无时间窗/运行期过滤）⇒ 那条带**没归零**，只是从 ~9 小时变成 ≤10 分钟。
-  彻底消除需在 `recover()` 只取**最后一段连续桶**；KAI 上一轮**未选**该方案
-  （理由与两条被否选项见 `notes/sessions/2026-09-14/heatmap-mirror-ffill-grid/project_state.md`）。
-  ⚠️ 判据不是"带上还有颜色"，而是活帧最低几档的**非空列分段**是否恰好等于上限桶数
-  （实测 `[(1,20),(449,554),(706,726),(1065,1331)]` ⇒ 20 ✓）。
+- [ ] **[中] 三条卡片是"欠账"：能机械守、但没写检查器**（2026-09-15 02:5x 审计；
+  判据见 `notes/memory/QUICKREF.md` 的"收录判据"节：**每条卡片必须能报出"谁守着它"
+  或"为什么守不住"**）。这三条两样都报不出 ⇒ 不是永久卡片，是欠账：
+
+  | 卡 | 现状（实测） | 该补的断言 |
+  |---|---|---|
+  | A | `grep inverse tools/*.py` **0 命中** | 帧行序降序 ↔ `web/heatmap.js::yAxis.inverse = true` 必须**成对**（静态可判） |
+  | E | `selfcheck_core` 只查 `market_data_type` **键在不在、不查值** | `config/ibkr.json::market_data_type` **必须 = 3**（写 1 会 fail-closed 退出，但没人拦） |
+  | L | `grep 'splitLine\|cellBorder' tools/*.py` **0 命中** | `cellBorderMinPx` 单位是 **CSS px** + 网格线走轴 `splitLine` 抽样 |
+
+  ⚠️ 目标不是"再加三张卡"，而是**把这三条降级**：细节归检查器 docstring，
+  卡片只留一行指针。⚠️ **本文件所在清单「只减不增」**（KAI 2026-09-15 明令
+  **"禁止新增速查卡"**，判据写在 `notes/memory/QUICKREF.md` 的"收录判据"节）
+  ⇒ 这三条补完是 **23 → 20 条，净减**，不是"持平"。
+
+- ~~**[中] 持久化落点：单库 → 一交易日一文件**~~ —— **已完成**（2026-09-15，
+  会话 `notes/sessions/2026-09-15/persistence-session-files/`）。
+  KAI 目标原话："第一天就写第一天的数据，重启后接着写第一天的；第二天新开一份，
+  第二天重启，继续写第二天的"。落地：`config/persistence.json` 的 `db_path` 改为
+  `db_dir: data/sessions` + `db_filename: {session_key}.db`；新增
+  `features/persistence_store.py` 承载"文件与表"，`features/persistence.py` 只留队列
+  与调度（384 → 310 行，改动前余 16 行放不下）。旧库当前会话 88+88 行已迁移。
+  回归 `check_persistence` 7/7 + 新增 `check_persistence_sessions` 4/4；
+  `run.py --check` `RC=0`；`ws_probe` 25/25；非空转两个变异各抓 2 条。
+  ⚠️ 两个坑已写进 README §5 与 `project_state.md`：
+  ① `_batch_write` 必须**逐条**按会话切文件（跨日批次里混着两个会话）；
+  ② `SessionFileStore.close()` **必须先提交再关闭** —— SQLite 的 `close()` 对未提交
+  事务是**回滚**，实测丢掉旧会话那一行。
+
+- ~~**[中] 旧会话文件的保留策略未定 —— 当前只增不删**~~ —— **已定并落地：归档不删**
+  （2026-09-15 02:2x 首版 → **03:1x 按 KAI 明令改为"归档"**，会话
+  `notes/sessions/2026-09-15/persistence-session-files/`）。
+
+  **KAI 2026-09-15 03:0x 两条明令**：
+  ① 原话 **"这就是历史数据，有用。"** ⇒ `data/sessions/<到期日>.db` **不是"残留垃圾"，
+  是逐交易日的 ΔIV / Skew 原始记录**（回看、对拍、做数据集的唯一来源）。
+  ② 原话 **"'不留档、不备份' 只针对旧单库 `data/session.db`"** ⇒ 我在 02:2x 把这句话
+  的适用范围**从旧单库扩大到了全部逐日文件**，是**误读**（已按此更正，见下）。
+
+  实现（**移动，不删除**）：`SessionFileStore.archive_other_sessions(keep_key)` 把 db_dir
+  内所有非当前会话的库文件 `rename()` 到 `archive_dir`（`persistence.json::archive_dir`，
+  默认 `data/archive`）；`AsyncPersistenceWriter.start()` 在打开本会话文件后调用它，并把
+  `(已归档, 未归档)` **两组**返回给调用方（`features/` 整层不写日志，由 `app/pipeline.py`
+  **各记一行** —— 动数据不允许静默，"没归档成功"更不允许）。
+  **三道闸门 + 一道构造期校验**：① 只在 `db_dir` 之内 glob；② 只匹配 `db_filename`
+  模板派生的名字；③ 归档目录**同名不覆盖**（跳过并上报，源文件留 db_dir 下次再试）；
+  ④ `archive_dir` 落在 `db_dir` 之内 ⇒ **构造时抛错**。
+  回归 `check_persistence_sessions` **6/6 → 7/7**；非空转 3 个变异（摘掉归档 / glob 越界
+  到上一级 / 同名无条件覆盖）各抓 1–3 条，还原后全绿。
+  ⚠️ **未做**：跨日那一刻产生的旧文件留到**下次启动**才归档（`features/` 无日志可记）
+  ⇒ **未归档数 = 自上次启动以来的交易日数**（实测 `tmp/probe_rollover_residue.py`：
+  不重启跨 5 个交易日 ⇒ 5 个文件 ≈ 9.4 MB；每天重启一次则最多 1 个文件 ≈ 2.35 MB）。
+  未归档文件**永不会被读到**，只是还没归位。
+  ✅ **实盘验证**（2026-09-15 03:18:42）：合成 `data/sessions/20990101.db` → 用新代码
+  重启 → 日志 `已归档 1 个历史会话文件到 data\archive（db_dir 只留当前会话）: 20990101.db`；
+  `data/sessions/` 只剩 `20260915.db`，`data/archive/20990101.db`（20,480 B）在。
+
+- ~~**[低] `data/session.db` 是否删除 —— 待 KAI 定**~~ —— **已删除**
+  （2026-09-15 02:2x，**KAI 明令：禁止备份，必须删**）。
+  删除前实况：1,064,960 B，`heatmap_buckets` / `skew_points` 各 88 行，
+  mtime 停在 01:22:07（已停写）。删除后 `data/` 只剩 `sessions/`，
+  `data/sessions/20260915.db` 未受影响（当刻 290,816 B 且在长）。
+  `data/` 在 `.gitignore` 里 ⇒ **不可恢复、无备份**（按明令执行）。
+  引用同步：`notes/context/handoff.md` 两处"留作迁移前存档"、
+  `tmp/migrate_session_files.py` 与 `tmp/repro_holes.py` 的横幅均已改口。
+
+- ~~**[低] `notes/memory/ARCHITECTURE.md §4` 目录约定系统性过期**~~ —— **已完成**
+  （2026-09-15 01:5x，会话 `notes/sessions/2026-09-15/persistence-session-files/`）。
+  按目录枚举重写 §4（列**全部实际模块**）；同批更正 §2 的 Python 版本
+  （3.13.12 → **3.13.14**，项目 `venv/`）、§5 的 `10 个 JSON` → **11** /
+  `关键配置项 40` → **50**、§6 四处类名（`SkewSeries`/`ImpulseTracker`/`FrameBuilder`/
+  `WSBroadcaster`）与 `TickStore (SQLite)` → **内存环 `RingBuffer`**、§7 的
+  "`run.py` 只剩 `--check`" → **不带参数即启动服务**。改后 `run.py --check` 仍 `RC=0`。
+
+- ~~**[低] `tmp/` 残留探针清理**~~ —— **已完成（改为加"已失效"横幅，未删）**
+  （2026-09-15 01:5x，同上会话）。实测校准横幅措辞：`tmp/repro_holes.py`
+  **rc=0、静默打印冻结值**（危险的一类）、`tmp/probe_mutation_cross_session.py`
+  **rc=1 `AttributeError`**（响的一类，首炸点是已消失的 `_fetch_session_rows`）。
+  不删的理由：`tmp/` 是 gitignore 的一次性脚本区，且 `tmp/migrate_session_files.py`
+  仍是本轮迁移的证据。
+
+- ~~**[中] 假 0 带残留：bucket 0 本身仍被恢复**~~ —— **已关闭**（2026-09-15，
+  会话 `notes/sessions/2026-09-15/persistence-session-identity/`）。
+  本条登记的根因（`features/persistence.py::recover()` 读 `heatmap_buckets` **全部行**、
+  无任何过滤）**就是**修复对象：`bucket_index` 是**日内坐标、每个交易日复用**，
+  而表里**没有会话身份** ⇒ 跨会话的行落进同一键空间。
+  修法：`session_key`（= 当日到期日）进主键 `(session_key, bucket_index)`，
+  `recover()` / `recover_skew()` 按会话过滤；**缺列的旧表整张丢弃并报出行数**
+  （实测 `丢弃 1830 行`）。重启后**假 0 带一并消失**（截图对照：
+  `tmp/startup_panel_20260915_0030.png` → `tmp/fixed_panel_0041.png`）。
+  回归 `tools/check_persistence.py` 8/8（含跨会话隔离 / 旧表迁移 / 空身份拒绝），
+  非空转：摘掉会话过滤 ⇒ 跨会话用例报 `今日会话应只有 1 个桶，实际 3`。
+  ⚠️ **本轮只关了上面这一条**：同一根因还有三种更严重的表现（帧的 `skew.latest`
+  取 `skew_series[-1]` ⇒ 报出**昨天**的点；`skew.series` 混入昨天的点、label 用今天的
+  网格算 ⇒ 曲线画到未来；热力图把昨天 RTH 的数据画在今天 GTH 的时刻上）——
+  它们由同一次修复一并消除，但**之前从未登记**，故记在这里而非当作"旧残留"。
+  ⚠️ "`recover()` 只取最后一段连续桶"这条**仍未被选**（KAI 2026-09-14 未选，
+  2026-09-15 仍未选）：会话身份修好后它**不再是错值来源**（别的交易日的行读不进来），
+  只剩"同一会话内孤桶被前向填充沿用 ≤ `heatmap_max_ffill_buckets`(20) 桶"这个形状，
+  由 `check_reconnect_gap.py::case_long_gap_is_blanked` 守着。
 
 - ~~**[中] 细档位纵线（自适应步长）未做高 dpi 实测**~~ —— **已作废**（2026-09-14）。
   热力图渲染器换回 ECharts 后，网格线改走轴 `splitLine`，`cellBorderMinPx` 的单位随之
   由**物理像素**变为 **CSS px**（ECharts 的坐标单位），"高 dpi 下 stride 翻倍"的问题**不再存在**。
-  新语义见速查卡 L。
+  新语义见 `notes/memory/QUICKREF.md` 卡 L。
 
 - [ ] **[高] 热力图换 ECharts 后宽档位持续占用 40–47% 单核**（2026-09-14，**KAI 已知情并接受**）——
   实测（headless + SwiftShader，1400×520、24 行）：ECharts 单次重绘 630 列 65.7ms /
@@ -60,20 +152,27 @@ Archive: notes/context/archive/open_tasks_2026-09.md
   机制缺口仍在（判新鲜只能看"值有没有变过"，`marketDataType` 无此语义），
   但当前**无已知受影响路径** ⇒ 降为低。**未获指令不改闸门判据。**
 
-- [ ] **[中] 交易日 RTH 段实盘验证（B2b 落地的最后一块）**（2026-09-14）——
-  GTH 段已由端到端冒烟证明（现货 = 合成值 7620.26，指数冻结 7656.98）。
-  待验：① 09:30 后指数是否真的恢复实时（而非继续冻结）；② 09:25 交班切源是否平滑、
-  窗口是否按预期重建；③ RTH 段是否确实走指数而非合成。
-  无自动化验收（承接 KAI 既有决策：**不设验收自动任务**，由 KAI 手动在盘中确认）。
+- ~~**[中] 交易日 RTH 段实盘验证（B2b 落地的最后一块）**~~ —— **已闭合**（2026-09-14 09:45 EDT，
+  会话 `notes/sessions/2026-09-14/live-render-verify/`）。三项全部实测通过：
+  ① 指数在 09:30 后确实恢复实时 —— 冻结值 7656.98（09:27 日志）→ 09:30 `现价 7611.44`，
+     独立探针实测 `last=7611.27 ≠ close=7656.98`；
+  ② 09:25 交班平滑 —— 帧内 messages 依次出现
+     `现货源切换：区段 rth → 指数直读` → `现价恢复更新，窗口跟随继续` →
+     `窗口跟随现价重建 ±12 档 (+22 / -22, 共 48)`，窗口按既有 `WindowFollower` 自动重建；
+  ③ RTH 段走**指数直读**而非合成（同上第 1 条 message）。
 
-- [ ] **[中] `check_period_aggregation.py` 既有失败 —— 根因已定位**（2026-09-14）——
-  `RC=1`，报 `TypeError: P.sliceZones is not a function`。根因：`sliceZones` 已在
-  2026-09-13 的前端拆分中从 `web/period.js` 挪到 `web/period_align.js`，
-  而该回归的 node 驱动仍只加载 `period.js`。
-  已用 `git worktree add -f tmp/head_tree HEAD` 复现 ⇒ **HEAD 上同样 RC=1，非本轮引入**。
-  修法明确（驱动补加载 `period_align.js`），但属"重构现有工具"，**未获指令不擅自动**。
-  同族：`check_page_render` / `check_skew_alignment` / `check_skew_viewport` /
-  `check_web_contract` / `check_ws_compression` 共 6 个既有失败，均已 HEAD 对照确认。
+- ~~**[中] `check_period_aggregation.py` 既有失败 —— 根因已定位**~~ —— **已关闭**
+  （2026-09-15 复扫，会话 `notes/sessions/2026-09-15/persistence-session-identity/`）。
+  本条列的 6 个"既有失败"（`check_period_aggregation` / `check_page_render` /
+  `check_skew_alignment` / `check_skew_viewport` / `check_web_contract` /
+  `check_ws_compression`）**现只剩 1 个**：2026-09-15 用 `venv/Scripts/python.exe`
+  全量复扫 **21 个 `tools/check_*.py` ⇒ 20 `RC=0` / 1 `RC=1`**，唯一红 =
+  **`check_page_render`**（其两处成因见下条，**本轮未动**）。
+  ⚠️ **判据必须用 venv 解释器**：裸 `python` 缺 `ib_async`/`aiohttp`，
+  `check_web_contract` 等会在 import 阶段崩成假红。
+  🆕 本轮另修一个**不在本清单里**的假红：`check_session_grid.py` 的"交易日推导"
+  用例隐含"锚点必须是周一"，只在周一通过、其余六天报 4 条红（详见会话记录
+  `handoff.md::第二个缺陷`）。**⇒ 这张清单本身漏了它，说明"按清单清点"不可靠。**
 
 - ~~**[中] B2b 实现待启动**~~ —— **已完成**（2026-09-14，会话
   `notes/sessions/2026-09-14/b2b-spot-synthesis/`）。5 条拍板全部落地：
@@ -95,37 +194,47 @@ Archive: notes/context/archive/open_tasks_2026-09.md
   教训保留：它跑的是已撤回构建（日志字段 `公允` 在 HEAD 代码中不存在），
   **实盘验证前必须先确认 8060 上没有别的进程**。
 
-- [ ] **[中] 实盘首次出图未验证** —— **部分验证完成**（2026-09-13）。
-  KAI 启动 IB Gateway，系统实际跑通：
-  - ✅ `mode=delayed`（周日正确）
-  - ✅ **48 条订阅**（±12 档 × Put/Call）
-  - ⚠️ SPX 现价 **7591.70** —— **该数字作废**（2026-09-14 更正：那是被驳回算法的产物）。
-    探针实测 IBKR 在 GTH 给的 SPX 指数 = **7656.98**（周五收盘，恒定）。
-  - ✅ WS 帧流正常（seq 1→5，0 缺口）
-  - ✅ `health.rate_limit` 四要素（桶 45/s）
-  - ✅ 网格 **2370 桶**，3 区段（GTH/空档/RTH），铺满无缝隙
-  - ⚠️ 热力图出图、Skew 数据、按钮切换、横轴对齐 —— **需浏览器肉眼确认**
-  - ⚠️ 周日市场关闭，`Skew=None` / 热力图 0 格 = **预期行为**，不是缺陷
-  ✅ **由 KAI 在 GTH 时段手动验证前端渲染**（2026-09-13 KAI 明确：不要设置自动任务）。
+- ~~**[中] 实盘首次出图未验证**~~ —— **已闭合**（2026-09-14 09:45 EDT RTH 段，
+  会话 `notes/sessions/2026-09-14/live-render-verify/`）。四项逐条取证：
+  - ✅ `health.mode = delayed`（推导值，非观测）；**期权与 SPX 指数实测 `marketDataType=1`**
+    （任务书预期的"指数 = 3"是过期预期，实测为准）；`modelGreeks` 与 bid/ask/last Greeks
+    并存且值不同
+  - ✅ **48 条订阅**（±12 档 × Put/Call），`projected_subscriptions()` = 49
+  - ✅ 热力图出图：`ws_probe` 全部通过（帧 18059→18068、**24 档**、1624 桶、15,420 格）；
+    真 Chrome 截图 185,973 字节，顶栏 `connected`，热力图 + Skew 双面板出图
+  - ✅ `health.rate_limit` 四要素（45 / 1.0s）+ 两条非空转证伪
+    （非默认 12/0.5s 生效 + 突发 200 条 ⇒ `events` 0→1、`throttling` 翻真后复位）
+  - 2026-09-13 遗留的 ⚠️「SPX 现价 7591.70」仍**作废**（那是被驳回算法的产物，非 IBKR 值）。
 
-- [ ] **[中] 4 个需服务的检查 — 1/4 已跑通** —— 
-  - ✅ `ws_probe`（2026-09-13）：23/27 通过，4 项失败全部是周日市场关闭预期行为
-  - ❌ `check_web_contract` / `check_page_render` / `check_ws_compression` —— 仍需盘中复跑
-  ⚠️ 2026-09-13 `multi-session-grid` 会话中，`check_web_contract` 的**三段**都已用
-  **离线等价物**补验（第 1、2 段用桩模块绕过顶层 `import aiohttp`：
-  DOM id 22 个 / CFG 路径 32 条全存在；第 3 段用真实流水线造帧：
-  **61/61** 载荷路径命中，含新增的 `session.zones` 及其 5 个子路径）。
-  ⇒ 三段都覆盖过，**但走的都不是它自己的入口**（被顶层 `import aiohttp` 挡住）。
-  盘中仍应用它本身的入口复跑一次。
+- ~~**[中] 4 个需服务的检查 — 1/4 已跑通**~~ —— **已关闭**（2026-09-15 盘中，
+  会话 `notes/sessions/2026-09-15/persistence-session-identity/`）。
+  服务在跑（GTH 段，`connected` / `last_tick_age_s 0.0` / 80-92 订阅）时全量复扫：
+  - ✅ `ws_probe` —— **25/25 全部通过**（修复前 26/27；唯一 FAIL 是跨会话持久化污染，
+    已修）。24 档 × 532 桶、Skew 5 点。
+  - ✅ `check_web_contract` —— **`RC=0`**（**用 venv 解释器走它自己的入口**，
+    不再是"离线等价物"）。此前它红是**裸 `python` 缺 `aiohttp`**，不是产品问题。
+  - ✅ `check_ws_compression` —— **`RC=0`**（压缩比阈值不再漂红）。
+  - ❌ `check_page_render` —— 仍 `RC=1`，**既有缺陷、本轮未动**：
+    ① 断言「有且仅有一个周期处于选中态」把页面上**所有** `<button>` 收成一个列表，
+    而页面有**两组**独立按钮（会话 `全时段/GTH/RTH` + 周期 `30秒/1分/…`）各有一个 `on`
+    ⇒ `len(chosen) == 1` **恒不成立**；② 虚拟时间窗口随首帧体积漂移
+    （`--budget 14000` 无 canvas / `20000` 报数据陈旧 / `120000` 报数据中断）。
+    要修得先改断言语义、再换掉虚拟时间方案，**不是调个数**。
 
 - [ ] **[低] `check_web_contract.py` 顶层 `import aiohttp`** 使第 1、2 段
   （纯静态对照）也无法在无 aiohttp 的环境运行。是否把 import 挪进函数内
   **待 KAI 定** —— 改动小，但属"重构现有工具"，未获指令不擅自动。
 
-- [ ] **[低] `~/.workbuddy-ai/tmp/` 下约 40 个历史探针未迁移** ——
+- [ ] **[低] `~/.workbuddy-ai/tmp/` 历史探针 —— 清单已列，待 KAI 拍"全迁 / 部分迁 / 只登记不动"**
+  （2026-09-15，会话 `notes/sessions/2026-09-15/persistence-session-identity/`）——
   新约定落点已是 `<项目根>/tmp/`，但历史文件仍在用户级目录（被所有项目共用）。
-  KAI 2026-09-13 拍板：**下一个会话做**（"代办"）。本轮不动用户目录。
-  ⇒ 开始前先列清单（按 mtime / 大小 / 是否含 `import`），让 KAI 一眼能拍"全迁/部分迁/只登记不动"。
+  KAI 2026-09-13 拍板：**下一个会话做**，且"开始前先列清单"。
+  🆕 **清单已出**：`notes/sessions/2026-09-15/persistence-session-identity/artifacts/user-tmp-probes.md`
+  —— 共 **72** 项（13 目录 / 35 个带 `import` 的脚本 / 24 个非脚本产物），
+  其中 **38 项**与 SPXW 相关（判据：文件名或内容含 `spxw`/`8060`/`4002`）。
+  本轮**未移动、未删除任何文件**（动用户目录需 KAI 明令）。
+  ⚠️ 清单的 `proj` 列是**关键词判定，未逐一人工确认归属** —— 拍板前若要更准，
+  可按 mtime 分段人工过一遍。
 
 - ~~**[中] 热力图格子边框（"网格线"）在 WebGL 重写时丢失**~~ —— **已修**（2026-09-14）——
   根因：旧版 ECharts `heatmap.js` 有 `itemStyle: { borderWidth: 1, borderColor: CFG.theme.grid }`
@@ -184,7 +293,7 @@ Archive: notes/context/archive/open_tasks_2026-09.md
   `web/config.js::heatmap.cellBorderMinPx = 5`（**物理像素**），`web/heatmap.js` 透传。
   实测 1 分档：**653 条纵线、间距中位 5.0 px**（`tmp/grid_final.png`）。
   非空转：`cellBorderMinPx = 0` ⇒ `stride = 1` ⇒ 纵线塌成密纹、四条扫描线仅检出 0–9 条、无周期。
-  单位坑见速查卡 L；高 dpi 实测仍是待办。
+  单位坑见 `notes/memory/QUICKREF.md` 卡 L；高 dpi 实测仍是待办。
 
 - ~~**[中] Skew 图例色与曲线色系统性不符**~~ —— **已修**（2026-09-14）——
   根因：5 条 series 只设 `lineStyle.color`，而 ECharts 的 legend 图标**不读**它，

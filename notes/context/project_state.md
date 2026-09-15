@@ -1,11 +1,14 @@
 # Project State
 
-ACTIVE_SESSION: 2026-09-14/webgl-to-echarts
-LAST_UPDATED: 2026-09-14（**热力图渲染器由原生 WebGL 换成 ECharts**：根因是调色板纹理被数据纹理
-顶掉 ⇒ "换任何色都不生效"；换栈后 `--check` `RC=0`、页面取色 `nearBlackPixels: 0` / 516 色桶、
-变异测试抓到。代价：宽档位 40–47% 单核，KAI 知情接受。⚠️ 过程中 `web/` 目录曾整体消失，
-未提交的 `config.js`/`skew.js` 为按记录重建。改动未提交）
+ACTIVE_SESSION: 2026-09-15/persistence-session-files
+LAST_UPDATED: 2026-09-15 03:5x —— **持久化落点改为一交易日一文件 + 历史归档不删**，
+已提交并推送（`HEAD = 53da940`，工作区干净）。见
+`notes/sessions/2026-09-15/persistence-session-files/handoff.md`。
+⚠️ **本文件正文（§10 之前）仍是 2026-09-14 的快照**，其中"改动未提交"等陈述
+指的是当时那一刻，**不是现状**；现状以上面这行与 `notes/context/handoff.md` 为准。
 ARCHIVE: notes/context/archive/project_state_2026-09.md
+
+<!-- ↓↓↓ 以下为 2026-09-14 webgl-to-echarts 会话的历史快照，不 retro-fit ↓↓↓ -->
 
 **本会话（webgl-to-echarts，2026-09-14）**：热力图渲染器换栈。
 ① **根因**（KAI 报"绿色周围黑色色块"）：`web/gl_heatmap.js:157-165` 把调色板绑在 TEXTURE1；

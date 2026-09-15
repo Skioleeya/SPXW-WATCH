@@ -516,8 +516,18 @@ notes/context/handoff.md
 - **`db_filename` 模板改了之后旧文件读不到** —— 模板是配置项，改了等于换命名空间；
   已存在的文件不会被自动发现。这是设计选择（宁可读不到，不可读错），但**没有门禁
   拦"改了模板没迁数据"**。
-- **本轮改动未提交**（`HEAD = 9ec4fb9`）。工作区同时含上一轮
-  `persistence-session-identity` 的未提交改动 ⇒ **三轮改动无法用 `git diff` 区分**。
+- ~~**本轮改动未提交**（`HEAD = 9ec4fb9`）。工作区同时含上一轮
+  `persistence-session-identity` 的未提交改动 ⇒ **三轮改动无法用 `git diff` 区分**。~~ ——
+  **03:5x 已提交并推送**：`9ec4fb9` → **`53da940`**（31 文件 / +3210 −272），
+  工作区**干净**（`git status --porcelain` 空），`git ls-remote origin refs/heads/main`
+  = 本地 `HEAD`。三轮改动在同一批文件里交错 ⇒ **合并为一个提交**（文件级拆不开，
+  硬拆会产生"commit 说第一轮、内容含第三轮"的假历史）。
+  推送过程两个坑（已补进 skill `pitfalls.md §6`）：
+  ① **别从管道取 `git push` 的 RC** —— `git push ... | tail; echo "RC=$?"` 取的是
+  `tail` 的状态，实测推送**失败**却打印 `RC=0`（假绿）；
+  ② **沙箱拦 `~/.ssh`** ⇒ 推送必须**前台 + 显式授权**，`run_in_background` 的任务
+  拿不到审批、必 `rc=128`（`Host key verification failed`）。
+  另：首次推送是网络层 `Connection reset by peer`（授权已放行），加 SSH keepalive 重试成功。
 - `check_page_render` 仍 `RC=1`（既有缺陷：断言把页面上两组按钮收成一个列表，
   会话按钮与周期按钮各有一个 `on` ⇒ `len(chosen) == 1` 恒不成立）。**本轮未动**。
 - ~~`notes/memory/ARCHITECTURE.md §4 目录约定` 系统性过期~~ —— **01:5x 已修**。按目录枚举

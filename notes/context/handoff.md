@@ -2,8 +2,9 @@
 - Latest session: 2026-09-15/persistence-session-files
 - Current session handoff: notes/sessions/2026-09-15/persistence-session-files/handoff.md
 - Archive: notes/context/archive/handoff_2026-09.md
-- Status: **持久化落点改为一交易日一文件（改动未提交，`HEAD = 9ec4fb9`）** ——
-  2026-09-15 01:0x–01:2x EDT，GTH 段。KAI 的目标："第一天就写第一天的数据，重启后
+- Status: **已提交并推送（`HEAD = 53da940`，工作区干净）** ——
+  持久化落点改为一交易日一文件 + 历史**归档不删**（三轮改动合并提交）。
+  2026-09-15 01:0x–03:5x EDT，GTH 段。KAI 的目标："第一天就写第一天的数据，重启后
   接着写第一天的；第二天新开一份，第二天重启，继续写第二天的"。
   ① **落点**：`config/persistence.json` 的 `db_path` 改为 `db_dir: data/sessions` +
   `db_filename: {session_key}.db`（`session_key` = 当日到期日）。
@@ -94,6 +95,12 @@
   `persistence_store.py` **398** / `persistence.py` **329** / `pipeline.py` **381** /
   `check_persistence_sessions.py` **397**（全部 < 400）；`data/sessions/20260915.db` 430,080 B
   在长、`data/archive/20990101.db` 20,480 B 在；8060 `LISTENING`（PID 3900）。
+  ⓗ **03:5x 已提交并推送**：`9ec4fb9` → **`53da940`**（31 文件 / +3210 −272），
+  工作区**干净**（`git status --porcelain` 空），`ls-remote` 远端真值 = 本地 HEAD。
+  三轮改动（identity / session-files / 归档）在同一批文件里交错 ⇒ **合并为一个提交**
+  （文件级无法拆分，拆分会产生假历史）。推送过程两个坑已补进 skill `pitfalls.md §6`：
+  **别从管道取 `git push` 的 RC**（`| tail; echo $?` 是 `tail` 的，实测假绿 `RC=0`）；
+  **沙箱拦 `~/.ssh` ⇒ 必须前台 + 显式授权**（后台任务拿不到审批，必 `rc=128`）。
 - Previous: 2026-09-15/persistence-session-identity
 - Previous handoff: notes/sessions/2026-09-15/persistence-session-identity/handoff.md
 - Previous status: **启动成功 + 跨会话持久化污染已结构性修复（改动未提交，`HEAD = 9ec4fb9`）** ——

@@ -159,16 +159,81 @@ Bug 3 的实测证据：`47/45=1.0444`、`46/45=1.0222`、`45/45=1.0` ⇒ 全部
 
 ## 6. 未验证 / 已知边界
 
-- ⚠️ **未做浏览器取像素** ⇒ Top-N 黑边的**实际视觉宽度**、以及滚轮缩放的**手感**（步长
-  `step=1.15`、`minSpan=0.05`、`maxSpan=500`）**待 KAI 盘中肉眼确认**。
+### 6.1 ⚠️ **实测发现的真问题：细档位下 Top-3 黑边是亚像素，等于看不见**
+
+提交后我用**实盘完整帧**（`seq 10167`，`spot=7610.64`，`vol_filled=3656`）跑了端到端
+校验，Top-3 选取与"非 Top3 无描边"全部正确，但**宽度**暴露出配置问题。实测：
+
+| 档位 | 列数 | 格短边 | 最细 `loPx` | 最粗 `hiPx` | 1px 可见? |
+|---|---|---|---|---|---|
+| 30 秒 | 1332 | 0.788px | 0.079px | **0.236px** | ✗ |
+| **60 秒（默认）** | 666 | 1.577px | 0.158px | **0.473px** | ✗ |
+| 3 分 | 333 | 3.153px | 0.315px | 0.946px | ✗（临界） |
+| 5 分 | 111 | 9.459px | 0.946px | 2.838px | ✓ |
+| 15 分 | 56 | 18.75px | 1.875px | 5.625px | ✓ |
+
+窗口 1920×900 时默认档仍是 **0.797px**，2560×1000 才勉强到 1.086px。
+
+**根因**：`heatmap.volumeTop` 的宽度是**格短边的比例**（`maxRatio=0.30` / `minRatio=0.10`），
+这两个比值是从上一版"**逐格按成交量分级描边**"直接搬过来的 —— 那一版的语义是
+**连续编码**（满屏都有边，细一点没关系），而现在 KAI 定的语义是
+**"只标记 Top-3"**（只有 3 格，看不见就完全失效）。**语义变了，量纲没跟着变。**
+
+**为什么回归没抓到**：`check_heatmap_topn_skew_zoom.py` 用的是 6×8 合成矩阵
+（`cellShort ≈ 130px`），比值派生出来的宽度当然够粗 ⇒ 判据全绿。
+**合成夹具的几何与真实档位差了两个数量级**，这正是"判据全绿但不代表实盘可用"的典型。
+
+**我没有自行改配置** —— 这属于视觉规格，按 KAI 的规则（改视觉/规格先问）留给 KAI 裁定。
+候选方向（待选，均可复现）：
+
+- **A**：`minPx` / `maxPx` 给**绝对像素**（配置已支持显式像素值，`>0` 时优先于比值）
+  ⇒ 与格宽解耦，任何档位都可见。代价：极密档位下 1px 边可能糊住格子。
+- **B**：比值上调（如 `maxRatio=1.0`）⇒ 最粗 ≈ 格短边，但 30 秒档仍只有 0.79px。
+- **C**：档位相关 —— 细档位禁用 Top-3 描边（或改用别的标记手法，如中心点/图标）。
+
+⚠️ 另：本问题**未做浏览器取像素**，全部数字来自 node 沙箱 + 真实帧的几何计算；
+`getBoundingClientRect` 用的是探针注入的 1200×600，**真实窗口尺寸由 KAI 的浏览器决定**。
+
+### 6.2 其它未验证项
+
+- ⚠️ **未做浏览器取像素** ⇒ 滚轮缩放的**手感**（`step=1.15`、`minSpan=0.05`、`maxSpan=500`）
+  **待 KAI 盘中肉眼确认**。
 - ⚠️ "缩放过程保持曲线渲染流畅"**未做帧率实测** —— 只保证了不整图重建
-  （原地 patch `axisLabel` + `formatter` 身份缓存）。
+  （原地 patch `axisLabel` + `formatter` 身份缓存，见 §2.2）。
 - ⚠️ 系统服务为后台进程对，shell 结束后是否存活未验证（前序会话遗留状态）。
+- ℹ️ `tmp/` 下 `frame_live.json` / `frame_now.json` 是**前序会话遗留**（`tmp/` 已 gitignore），
+  其中 `frame_live.json` 只有 15 字节、是失效残留；`frame_now.json` 是摘要非完整帧。
+  本轮自己产生的探针与帧文件**已全部删除**。
+
+### 6.3 已验证（提交后复核，非引用旧结论）
+
+- **服务下发的就是提交版本**：`curl` 6 个前端脚本全 **HTTP 200**，且
+  **`http_md5` 与磁盘 `md5` 逐字节相同**（`config.js` `5f120738` / `heatmap.js` `14e860ec` /
+  `skew.js` `0755d17b` / `skew_helpers.js` `b8d40430` / `skew_option.js` `af40985d` /
+  `matrix_codec.js` `69426ab4`）。
+  ⚠️ 资源路由是**根相对**（`/heatmap.js`），不是 `/web/heatmap.js` —— 后者 404。
+- `run.py --check` 提交后复跑 **`RC=0`**，`[13]` 走真实联通：订阅 80/92、
+  热力图 **24 档 × 1326 桶**、Skew **652 点**。
+- `tools/ws_probe.py` **`RC=0`**：`spot=7610.75`、24 档 × 1328 桶、`25Δ=3.114`、
+  `7579.48 < 7610.75 < 7632.24`（Put/Call 定位正确）、载荷 132,473 字节。
+- **Top-3 逻辑对实盘数据正确**（探针实测）：被描边格数 **= 3**；
+  其余格**全为裸数组**（`nonStyledObjectCount = 0`）；**零成交量格被描边 = 0**；
+  Top3 确实是成交量最大的三格（`[66, 66, 66]`）。
+  ⚠️ 该帧 Top3 **成交量并列**（都是 66）⇒ 宽度全等是 `borderWidthFor` 对
+  `hi == lo` 的**明确定义行为**（全部给最粗值），**不是 Bug**。
+  实测 `0.24px ≈ hiPx 0.2365`，与定义一致。
 
 ---
 
 ## 7. 提交
 
-- 提交范围：`web/` 6 文件 + `tools/skew_reference.py` + `tools/check_heatmap_topn_skew_zoom.py`（新）
-  + `tools/topn_zoom_driver.py`（新）+ 本会话 `notes/context/handoff.md` 与本文件。
-- 见 `notes/context/handoff.md` 顶栏的实际 commit hash 与推送结果。
+- 提交 **`c0cfa8f`**（12 文件 / +1159 −85），已推送 `origin/main`：`0d30943..c0cfa8f`。
+- **远端真值核对**：`git ls-remote origin refs/heads/main` = `c0cfa8facad9…e57b`
+  = 本地 `HEAD`；`git status --porcelain` **空**（工作区干净）。
+- 提交范围：`web/` 6 文件（`config.js` / `heatmap.js` / `skew.js` / `skew_helpers.js` /
+  `skew_option.js` / `matrix_codec.js`）+ `tools/skew_reference.py`
+  + `tools/check_heatmap_topn_skew_zoom.py`（新）+ `tools/topn_zoom_driver.py`（新）
+  + `notes/context/handoff.md` + 本文件 + 上一会话 `period-file-split/handoff.md` 的收尾补齐。
+- 本仓库**禁用 `git rm` / `git mv`**（见 2026-09-14/webgl-to-echarts 事故），全程用 `git add`。
+- 推送本次**一次成功**（`RC=0`）；上一会话遇到过的瞬时断连
+  （`Connection closed by 198.18.1.93 port 22`，`RC=128`）本次未复现。

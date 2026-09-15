@@ -1,14 +1,15 @@
 ---
 task: period-file-split
 date: 2026-09-15
-time: 05:4x EDT
+time: 06:0x EDT
 phase: GTH
 head_at_start: 0261177
-status: 未提交（改动 + 新文件均在工作区）
-tests: "check_period_aggregation --selftest RC=0（6 项全抓）；selfcheck.py RC=0；结构检查器 [1]/[2] ok"
+head_at_end: 0d30943
+status: 已提交并推送（0d30943）；系统服务已启动并实盘验证
+tests: "run.py --check RC=0（[13] 走真实联通）；ws_probe RC=0；period --selftest RC=0；selfcheck [1]/[2] ok"
 ---
 
-# 拆 period 回归的超限文件 + 修 2 条失效变异锚点
+# 拆 period 回归的超限文件 + 修 2 条失效变异锚点（并入上一会话的成交量边框功能提交）
 
 ## 起因
 
@@ -76,13 +77,57 @@ IO 职责与"造数 + 参考实现"（纯计算）分离。`period_reference.py`
   **`[FAIL] ...变异点已失效` + `结果: 1 项失败` + `RC=1`**；
   还原后立刻回 `RC=0`。⇒ 锚点校验本身不是装饰。
 
-## 未做 / 未验证
+## 提交与启动（05:57–06:04）
 
-- **改动未提交**（`git status` 含上轮遗留的多文件脏态，非本会话全部）。
-- 本仓库**禁用 `git rm` / `git mv`**（见 2026-09-14/webgl-to-echarts 事故），
-  拆分产生的两个新文件尚未 `git add`。
-- 未跑全量 `tools/check_*.py` 回归矩阵（本会话只动了 `tools/` 三个文件，
-  且已由结构检查器与目标回归覆盖）。
+### 提交推送
+
+- 提交 **`0d30943`**（15 文件 / +662 −210），已推送到 `origin/main`。
+- 远端真值核对：`git ls-remote origin refs/heads/main` = `0d3094388eeb…6a4d`
+  = 本地 `HEAD`；`git status --porcelain` 空。
+- ⚠️ **本批改动不是单一需求**：`web/config.js` 的 `heatmap.volumeBorder`、
+  `web/period*.js` 的 volumes 聚合、4 个文件的注释同步，属**上一会话未提交**的
+  "成交量驱动边框"功能；本会话只做了 `tools/` 三个文件的拆分 + 变异锚点修复。
+  两者在同一批文件里交错（`period.js` / `period_align.js` 两轮都动过），
+  **文件级无法拆分** ⇒ 合并为一个提交，与 2026-09-15/persistence-session-files
+  的 ③ 同理。提交信息已分别记录两部分。
+- 推送首跑 `RC=128`（`Connection closed by 198.18.1.93 port 22`）——
+  瞬时断连，非权限问题：`ssh -T git@github.com` 返回 `Hi Skioleeya!` 认证正常，
+  重试即 `RC=0`（`0261177..0d30943`）。
+- 本仓库**禁用 `git rm` / `git mv`**，全程用 `git add -A`。
+
+### 启动系统服务
+
+前置：8060 无监听（新起）；IB Gateway **4002 LISTENING**（PID 7764，KAI 已启动）。
+
+- `./venv/Scripts/python.exe run.py`，后台运行，控制台输出转 `logs/run_console.log`。
+- `05:57:54 启动 delayed | 到期 20260915`、`05:58:10 流水线已就绪`；
+  8060 `LISTENING`（PID 6572），页面 + 6 个前端资源 `curl` 全 **200**。
+- 恢复：`已从 SQLite 恢复 492 个历史桶 + 492 个 Skew 点（会话 20260915）`。
+
+### 实盘验证（全部实测）
+
+- `tools/ws_probe.py` ⇒ **RC=0 全部通过**：24 档 × 1171→1172 桶（在长）、
+  12,778 格、Skew 498 点、`25Δ = 2.842`、现货 7597.09、
+  `7563.25 < 7597.09 < 7620.88`（Put/Call 定位正确）。
+- `run.py --check` ⇒ **RC=0 全部通过**，且 **`[13]` 走真实联通路径**
+  （有服务时不再 warning）：`connected / mode=delayed`、订阅 **80/92**、
+  热力图 **24 档 × 1176 桶**、Skew **502 点**。
+- **成交量链路由端到端确认**（本轮提交的核心）：WS 帧含
+  `vol_bm` / `vol_i16` / `vol_filled`；`unpack(..., scale=1)` 解码
+  **215 格非空、`vol_filled` 声明值 = 解码值 215（逐格对齐）**、min 19 / max 66、
+  非零格 215。⇒ 新边框的数据源在实盘上确实有货。
+- 持久化在写：`data/sessions/20260915.db` 700,416 → **704,512 B**、
+  桶数 **505 → 506**（30 秒窗口内增长），表为 `heatmap_buckets` + `skew_points`。
+
+### 未验证
+
+- **未做浏览器取像素**（不生成/不截图 ⇒ 无多模态校验）：逐格边框的**实际视觉宽度**
+  与 `maxRatio=0.35` 的观感未确认。数据源（vol_*）与前端消费点（`buildOption`
+  逐格 `itemStyle.borderWidth`）已各自验证，但"边框看起来对不对"仍需 KAI 盘中肉眼确认。
+- 未跑全量 `tools/check_*.py` 回归矩阵（本会话只动 `tools/` 三个文件 + 前端注释，
+  已由结构检查器与目标回归覆盖）。
+- 服务为**后台进程对**（23000 父 / 6572 工作），本会话的 shell 生命周期结束后
+  是否存活未验证 —— 若被回收，需 KAI 用 `tools/start_detached.py` 或手动重启。
 
 ## 归属
 

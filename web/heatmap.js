@@ -21,22 +21,23 @@
  *
  * 网格线（两套，各司其职）
  * ------------------------
- * 1) **成交量驱动的逐格边框**（`config.heatmap.volumeBorder`）——
- *    该格成交量越大，黑色边框越粗；颜色恒定，粗细是唯一编码维度。
- *    走逐格 `itemStyle.borderWidth`，这是唯一能表达"逐格不同粗细"的画法。
- *    代价：2370 列 = 给 5.7 万个矩形各描一次边。但细档位下格子本身只有亚像素
- *    宽，`borderWidth` 按格子短边等比缩放后趋近 0，自然退化为"看不见"，
- *    不会像固定宽度那样糊成一片。
+ * 1) **成交量 Top-N 高亮**（`config.heatmap.volumeTop`）——
+ *    只给整个可视区域内成交量最大的 N 格（默认 3）描黑边，其余格子**完全不描边**。
+ *    这是"标记"而不是"连续编码"：逐格按成交量变粗会让满屏都是黑边、反而看不出
+ *    谁最活跃（2026-09-15 KAI 定的语义）。
+ *    Top-N **内部**的粗细仍是无极的：按"本格量 / 第 N 名量"线性插值落在
+ *    `[minPx, maxPx]`，所以同属 Top-N 也分得出强弱。
+ *    代价可忽略：只给 N 个矩形加 itemStyle，不是给 5.7 万个各描一次边。
  * 2) **轴 splitLine 抽样网格**（`cellBorderMinPx` / `cellBorderMix`）——
- *    细档位（30 秒档 2360 列 ⇒ 格宽约 0.44px）下逐格边框不可见，靠它提供
- *    间距 ≥ `cellBorderMinPx` 的可读网格：
+ *    细档位（30 秒档 2360 列 ⇒ 格宽约 0.44px）下靠它提供间距 ≥ `cellBorderMinPx`
+ *    的可读网格：
  *      stride = ceil(cellBorderMinPx / cellPx)，每 stride 个分类画一条 1px 线。
  *    `cellBorderMix` 映射为线的 opacity —— `opacity m` 的线叠在数据色上
  *    ≡ 旧 shader 的 `mix(color, border, m)`，两者数学等价。
  *
- * 为什么保留 2)：**不能只留逐格边框** —— 细档位下它必然不可见，而"数据密集区
+ * 为什么保留 2)：Top-N 只描 3 格，提供不了任何"格子"的观感；而"数据密集区
  * 完全看不见网格"正是 2026-09-14 修过的缺陷（见 notes/context/open_tasks.md）。
- * 两套颜色都落在深色端，粗档位下逐格边框（上层）盖住 splitLine，不冲突。
+ * 两套都是深色，Top-N 的黑边画在上层，不冲突。
  * ------------------------------------------------------------------ */
 (function (global) {
   "use strict";
@@ -82,6 +83,61 @@
   }
 
   /* ------------------------------------------------------------------ */
+  /* 成交量 Top-N 选中                                                   */
+  /* ------------------------------------------------------------------ */
+
+  /* 选出整个可视区域内成交量最大的 N 个格子。
+     返回 { cells: {键→条目}, hi: 选中集最大成交量, lo: 选中集最小成交量 }；
+     无成交量数据时返回 null。
+
+     为什么要记 hi / lo：描边宽度在**选中集内部**按 hi→lo 线性插值，
+     这样同属 Top-N 也分得出强弱（第 1 名最粗、第 N 名最细）。
+
+     ⚠️ 不能拿"第 N 名的成交量"当分母 —— 那样选中集里每个成员的比值都 ≥ 1，
+     夹取后宽度**全部相等**，Top-N 内部完全失去区分度（2026-09-15 实测抓到的错）。
+
+     同值排序口径：成交量相同则"先列后行"（列号小者优先，同列则行号小者优先）。
+     必须稳定 —— 否则每帧同值格子的相对次序会变，高亮在黑边之间跳动。 */
+  function pickTopCells(volumes, rows, cols, topN) {
+    if (!volumes || !(topN > 0)) { return null; }
+
+    var list = [];
+    for (var r = 0; r < rows; r++) {
+      var row = volumes[r] || [];
+      for (var c = 0; c < cols; c++) {
+        var v = row[c];
+        if (v === null || v === undefined || !(v > 0)) { continue; }
+        list.push({ c: c, r: r, v: v });
+      }
+    }
+    if (!list.length) { return null; }
+
+    list.sort(function (a, b) {
+      if (b.v !== a.v) { return b.v - a.v; }
+      if (a.c !== b.c) { return a.c - b.c; }
+      return a.r - b.r;
+    });
+
+    var n = Math.min(topN, list.length);
+    var cells = {};
+    var hi = list[0].v;
+    var lo = list[n - 1].v;
+    for (var i = 0; i < n; i++) { cells[list[i].c + "," + list[i].r] = list[i]; }
+    return { cells: cells, hi: hi, lo: lo };
+  }
+
+  /* 每格描边宽度（CSS px）：选中集内部按 hi→lo 线性插值，非选中格返回 0。
+     hi == lo（选中集成交量全等）时全部给最粗值 —— 此时本就无从区分，
+     给最粗至少保证"被标记"这件事在图上看得见。 */
+  function borderWidthFor(vol, hi, lo, loPx, hiPx) {
+    if (!(vol > 0) || !(hi > 0)) { return 0; }
+    var t = hi > lo ? (vol - lo) / (hi - lo) : 1;
+    if (t > 1) { t = 1; }
+    if (t < 0) { t = 0; }
+    return loPx + (hiPx - loPx) * t;
+  }
+
+  /* ------------------------------------------------------------------ */
   /* Option 构建                                                         */
   /* ------------------------------------------------------------------ */
 
@@ -101,48 +157,39 @@
     var mix = CFG.heatmap.cellBorderMix > 0 ? CFG.heatmap.cellBorderMix : 0;
     var line = { color: CFG.theme.grid, width: 1, opacity: mix };
 
-    /* ---- 成交量驱动的逐格边框 ------------------------------------------
-       该格成交量越大，黑色边框越粗；颜色恒定，粗细是唯一的编码维度。
-       数据源是 30 秒桶的 tick 计数（`block.volumes`，由 matrix_codec 解码、
-       period.js 在更粗周期上按组求和），这里只做归一化。
+    /* ---- 成交量 Top-N 高亮 ----------------------------------------------
+       只给**整个可视区域内成交量最大的 N 格**描黑边，其余格子完全不描边。
+       这是"标记"不是"连续编码" —— 逐格按成交量变粗会让满屏都是黑边，
+       反而看不出谁最活跃（2026-09-15 KAI 定的语义）。
 
-       volMax 取**本视口内**的最大值而不是全局最大值：滚动到低量时段后，
-       用全局最大值会让整屏边框都细到看不见。 */
-    var vb = CFG.heatmap.volumeBorder || {};
-    var vbOn = vb.enabled !== false;
+       本图即"整个可视区域"：矩阵没有滚动条，一次画满全部行列。
+       volMax 取本视口内的最大值（而非全局），与排序口径一致。 */
+    var vt = CFG.heatmap.volumeTop || {};
+    var vtOn = vt.enabled !== false;
     var volumes = block.volumes || null;
-    var volMax = 0;
-    if (vbOn && volumes) {
-      for (var vr = 0; vr < rows; vr++) {
-        var vrow = volumes[vr] || [];
-        for (var vc = 0; vc < cols; vc++) {
-          var vv = vrow[vc];
-          if (vv !== null && vv !== undefined && vv > volMax) { volMax = vv; }
-        }
-      }
-    }
-    /* 最粗边框锚在格子**短边**上：锚长边时窄行的上下边框会互相吃穿。 */
+
+    /* 描边宽度区间锚在格子**短边**上：锚长边时窄行的上下边框会互相吃穿。
+       配置显式给了像素值就用像素值，否则按短边的比例派生。 */
     var cellShort = Math.min(gridW / Math.max(cols, 1), gridH / Math.max(rows, 1));
-    var vbMaxPx = cellShort * (vb.maxRatio > 0 ? vb.maxRatio : 0);
-    var vbMinPx = vb.minPx > 0 ? vb.minPx : 0;
+    var pick = vtOn ? pickTopCells(volumes, rows, cols, vt.topN) : null;
+    var vtHiPx = vt.maxPx > 0 ? vt.maxPx : cellShort * (vt.maxRatio > 0 ? vt.maxRatio : 0);
+    var vtLoPx = vt.minPx > 0 ? vt.minPx : cellShort * (vt.minRatio > 0 ? vt.minRatio : 0);
+    if (vtLoPx > vtHiPx) { vtLoPx = vtHiPx; }
 
     var data = [];
     for (var r = 0; r < rows; r++) {
       var row = values[r] || [];
-      var vrowSrc = (vbOn && volumes) ? (volumes[r] || []) : null;
       for (var c = 0; c < cols; c++) {
         var v = row[c];
         if (v === null || v === undefined) { continue; }
-        if (!vrowSrc || !(volMax > 0)) { data.push([c, r, v]); continue; }
-        var vol = vrowSrc[c];
-        var bw = 0;
-        if (vol !== null && vol !== undefined) {
-          bw = (vol / volMax) * vbMaxPx;
-          if (bw < vbMinPx) { bw = vbMinPx; }
-        }
+        var hit = pick && pick.cells[c + "," + r];
+        if (!hit) { data.push([c, r, v]); continue; }
         data.push({
           value: [c, r, v],
-          itemStyle: { borderWidth: bw, borderColor: vb.color }
+          itemStyle: {
+            borderWidth: borderWidthFor(hit.v, pick.hi, pick.lo, vtLoPx, vtHiPx),
+            borderColor: vt.color
+          }
         });
       }
     }

@@ -1,8 +1,45 @@
 # Handoff Index
-- Latest session: 2026-09-15/period-file-split
-- Current session handoff: notes/sessions/2026-09-15/period-file-split/handoff.md
-- Status: **`tools/` 两个超限文件拆分完成 + 修掉 2 条失效变异锚点（未提交）** ——
-  2026-09-15 05:4x EDT，GTH 段。
+- Latest session: 2026-09-15/heatmap-topn-skew-yzoom
+- Current session handoff: notes/sessions/2026-09-15/heatmap-topn-skew-yzoom/handoff.md
+- Status: **热力图"成交量 Top-3 无级黑边" + Skew Y 轴滚轮无限制自由缩放（锁定 / 双击复位）
+  落地，新增常驻回归并全绿 —— 见下节。**
+  ⓐ **热力图**：`heatmap.volumeBorder` → **`heatmap.volumeTop`**（`topN:3`、`minPx/maxPx:null`、
+  `maxRatio:0.30`/`minRatio:0.10`，宽度锚在格子**短边**）。**只有 Top-3 命中格**带 `itemStyle`，
+  其余保持裸数组 ⇒ **普通样式、无描边**（KAI 最终裁定："只留 Top3 黑边，其余普通" = 无黑边）。
+  ⓑ **Skew Y 轴**：`skew.yZoom`（`step:1.15` / `minSpan:0.05` / `maxSpan:500` /
+  `anchorAtPointer:true`）。滚轮在**绘图区内**才 `preventDefault()` 并缩 Y（区外直接放行
+  给既有 `dataZoom` 管 X）⇒ **X 轴时间范围不变**。锚点用
+  `convertFromPixel({yAxisIndex:0})`；缩放后**锁定**，**双击复位**（X 与 Y 同复）。
+  小数位随量程动态增加（封顶 6 位）；`formatter` 带 `_fmtCache` 避免函数身份变化引发整图重建。
+  ⓒ **三个真 Bug（都是实测数字逼出来的）**：① `zoomRange` 在极小 span 上放大 ⇒
+  **返回零宽 `[0,0]`**（修：放大时基线 span 先抬到 floor）；② 锚点落在量程外 ⇒
+  **视口被平移到指针处**（`[2.50,2.53]` + 锚点 99 ⇒ `[98.975,99.025]`；修：`t` 出界即退中心）；
+  ③ **最要命** —— Top-N 各格边框**宽度全等**（分母用了第 N 名成交量 ⇒ 比值全 ≥1 ⇒ 全钳到 1.0；
+  实测 `47/45=1.044`/`46/45=1.022`/`45/45=1.0`）⇒ 改分母为**选中集极差** ⇒ 修后
+  `成交量 [45,46,47] → 宽度 [9.37,18.73,28.10]`。
+  ⓓ **新增常驻回归**：`tools/check_heatmap_topn_skew_zoom.py`（**315 行**）+ 驱动
+  `tools/topn_zoom_driver.py`（**179 行**）。分组 `[T1]`/`[Y1]`/`[Y2]`/`[Y3]`，
+  `group_guard.py` 校验期望前缀为**独立常量**，**5 条变异**各落回其应落的前缀。
+  ⚠️ **拆分是被自己规则逼的**：检查器一次写到 **469 行** ⇒ `run.py --check [1]` **真判红**
+  （`>= MAX_LINES=400`）⇒ 拆出驱动器，这正是本仓库自己的规则，我自踩后修。
+  ⓔ `tools/skew_reference.py::WEB_SCRIPTS` 补入 `"heatmap.js"`（单一真相）——
+  修 `TypeError: S.HeatmapPanel is not a constructor`（缺它时驱动器直接崩）。
+  ⓕ **验证全绿**（`venv/Scripts/python.exe`）：`run.py --check` **`RC=0`**（`[1]` 99 Py + 13 JS
+  全合规，最长 399）；`check_web_syntax` **`RC=0`**（13 文件）；`check_web_contract` **`RC=0`**
+  （59 条载荷路径）；`check_heatmap_topn_skew_zoom --selftest` **`RC=0`**（24 判据 + 守卫 2 用例
+  + 5 变异全抓）；`check_period_aggregation --selftest` **`RC=0`**。随机 4000 组输入 ⇒
+  **异常 0 组**；锚点 `t: 0.500000 → 0.500000`（不动）。
+  ⓖ **证伪自己的假设一次**：原以为变异"`(0,1)` 改回 `[0,1]`"能抓住，数值分析显示
+  **闭区间版本同样合法**（只是贴边非居中）⇒ 该变异本就抓不住，已换掉并在会话记录里留痕。
+  ⓗ **工作区清理**：删掉一次性探针 `tmp/probe_topn_yzoom.js` / `tmp/probe_topn_render.js`
+  （常驻回归已覆盖）；`console.log`/`debugger`/`TODO`/`FIXME` 于 `web/*.js` + 两个新 tools
+  文件 **0 命中**。
+  ⚠️ **未验证**：**未做浏览器取像素** ⇒ Top-3 黑边**实际视觉宽度**与滚轮缩放**手感**
+  （`step=1.15`）待 KAI 盘中肉眼确认；"渲染流畅"**未做帧率实测**（只保证不整图重建）。
+- Previous: 2026-09-15/period-file-split
+- Previous handoff: notes/sessions/2026-09-15/period-file-split/handoff.md
+- Previous status: **`tools/` 两个超限文件拆分完成 + 修掉 2 条失效变异锚点 —— 已提交推送
+  `0d30943`；系统服务已启动并实盘验证** —— 2026-09-15 06:0x EDT，GTH 段。
   ① **超限事实**：`period_reference.py` **441**（改动前 398 ⇒ 上轮改超）/
   `check_period_aggregation.py` **416**，均 `> MAX_LINES=400` ⇒ `selfcheck.py [1]`
   **确会判红**（`check_file_sizes` 判据是 `>=`；该文件无 `__main__`，由统一入口调用）。
@@ -13,14 +50,27 @@
   **不反向 import 检查器**，无循环依赖。
   ④ **顺带真缺陷**：`--selftest` 变异表 **2 条锚点早已失效** —— `sliceZones` / `alignSkew`
   已从 `period.js` 拆到 `period_align.js`，旧表却写死"锚点都在 period.js"⇒
-  那两条**长期打印"变异点已失效"**。按 `check_skew_alignment.py` 写法改为
-  **5 元组** `(名称, 目标文件, 原文, 替换, 期望前缀)`，`WEB_FILES` 每轮两个文件都重写。
-  ⑤ **验证**：`selfcheck.py` **`RC=0`**（`[1]` 97 py + 13 js 全合规，最长
-  `check_session_grid.py` 399）；`check_period_aggregation` **`RC=0`**；
-  `--selftest` **`RC=0`**（守卫 2 条 + 注入缺陷 **5 条全抓且全落期望前缀**）。
-  **非空转反向验证**：故意写坏 `alignSkew` 锚点 ⇒ **`[FAIL] 变异点已失效` + `RC=1`**，
-  还原即回 `RC=0`。
-  ⑥ **未提交**；新文件未 `git add`（本仓库**禁用 `git rm` / `git mv`**）。
+  那两条**长期打印"变异点已失效"**。改为 **5 元组**带目标文件，每轮两个文件都重写。
+  ⑤ **本次提交 15 文件 / +662 −210，已推送**：远端 `ls-remote` = 本地 `HEAD`
+  = `0d30943`，工作区干净。⚠️ **该提交混合两部分** —— 上一会话未提交的
+  "**成交量驱动逐格边框**"功能（`web/config.js::heatmap.volumeBorder` +
+  `web/period*.js` 的 volumes 同步聚合/裁列/取列 + 4 文件注释）与本会话的 `tools/`
+  拆分；`period.js`/`period_align.js` 两轮都动过 ⇒ 文件级无法拆，合并为一提交。
+  推送首跑 `RC=128`（`Connection closed by 198.18.1.93 port 22`）是**瞬时断连**，
+  非权限（`ssh -T git@github.com` = `Hi Skioleeya!`），重试即 `RC=0`。
+  ⑥ **启动系统服务**（IB Gateway 4002 由 KAI 预启）：`run.py` 后台，日志
+  `logs/run_console.log`；`05:58:10 流水线已就绪`，8060 `LISTENING`（PID 6572），
+  页面 + 6 个前端资源全 **200**；恢复 492 桶 + 492 Skew 点。
+  ⑦ **实盘验证**：`ws_probe` **`RC=0`**（24 档 × 1171→1172 桶在长 / 12,778 格 /
+  Skew 498 点 / `25Δ=2.842` / `7563.25 < 7597.09 < 7620.88` Put-Call 定位正确）；
+  `run.py --check` **`RC=0`** 且 **`[13]` 走真实联通路径**（`connected / mode=delayed`、
+  订阅 80/92、24 档 × 1176 桶、Skew 502 点）。
+  **成交量链路端到端确认**：帧含 `vol_bm`/`vol_i16`/`vol_filled`，`unpack(scale=1)`
+  解码 **215 格非空且声明值 = 解码值**、min 19 / max 66 ⇒ 新边框数据源实盘有货。
+  持久化在写：`data/sessions/20260915.db` 700,416 → **704,512 B**、桶数 505 → 506。
+  ⚠️ **未验证**：**未做浏览器取像素** ⇒ 逐格边框**实际视觉宽度**与 `maxRatio=0.35`
+  的观感待 KAI 盘中肉眼确认；服务为后台进程对（23000 / 6572），shell 结束后
+  是否存活未验证。
 - Previous: 2026-09-15/persistence-session-files
 - Previous handoff: notes/sessions/2026-09-15/persistence-session-files/handoff.md
 - Archive: notes/context/archive/handoff_2026-09.md

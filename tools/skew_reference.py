@@ -79,7 +79,7 @@ SPIKE_VALUE = 9.0
 #: 双份清单造成的。
 WEB_SCRIPTS: tuple[str, ...] = (
     "config.js", "matrix_codec.js", "period.js", "period_align.js",
-    "skew_helpers.js", "skew_option.js", "skew.js",
+    "heatmap.js", "skew_helpers.js", "skew_option.js", "skew.js",
 )
 
 #: node 侧沙箱：装好 window / atob / ECharts 垫片，按 ``app.js::render()`` 的真实

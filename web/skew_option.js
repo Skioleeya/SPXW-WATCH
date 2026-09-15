@@ -16,6 +16,12 @@
       if (legendNames.indexOf(g.name) < 0) { legendNames.push(g.name); }
     });
 
+    /* 纵轴刻度位随量程变（放大到很窄时要加位，见 skew_helpers.axisDecimalsFor）。
+       首次渲染同样按需取，不要写死 CFG.skew.axisDecimals —— 否则
+       "缩过一次 Y 轴之后"与"刚打开页面"两个状态的小数位会不一致。 */
+    var yDecimals = H.axisDecimalsFor(range);
+    var yFmt = function (v) { return Number(v).toFixed(yDecimals); };
+
     return {
       animation: false,
       backgroundColor: "transparent",
@@ -90,7 +96,7 @@
           axisLine: { lineStyle: { color: CFG.theme.border } },
           axisLabel: {
             color: CFG.theme.textDim, fontSize: 10,
-            formatter: function (v) { return v.toFixed(CFG.skew.axisDecimals); }
+            formatter: yFmt
           },
           splitLine: { lineStyle: { color: CFG.theme.border, opacity: .45 } }
         },
@@ -102,7 +108,7 @@
           axisLine: { lineStyle: { color: CFG.theme.border } },
           axisLabel: {
             color: CFG.theme.textFaint, fontSize: 10,
-            formatter: function (v) { return v.toFixed(CFG.skew.axisDecimals); }
+            formatter: yFmt
           },
           splitLine: { show: false }
         }

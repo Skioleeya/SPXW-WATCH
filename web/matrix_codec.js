@@ -100,8 +100,9 @@
     block.values = values;
 
     /* volume 视觉层 —— tick 计数，scale=1，可选（旧帧没有则不描边）。
-       消费点：web/heatmap.js::buildOption 逐格 itemStyle.borderWidth，
-       参数在 web/config.js::heatmap.volumeBorder（黑色，越粗 = 成交量越大）。 */
+       消费点：web/heatmap.js::buildOption 给成交量 Top-N 的格子加
+       itemStyle.borderWidth（其余格子不描边），参数在
+       web/config.js::heatmap.volumeTop。 */
     if (block.vol_bm !== undefined && block.vol_i16 !== undefined) {
       try {
         var volBits = b64ToBytes(block.vol_bm);

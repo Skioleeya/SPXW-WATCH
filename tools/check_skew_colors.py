@@ -77,7 +77,7 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
 #: 收到的 option 上把三条 IV 曲线（``yAxisIndex===1``）的颜色读出来。
 DRIVER_BODY = r"""
 let lastOption = null;
-const panel = new S.SkewPanel({});
+const panel = new S.SkewPanel(S.SWATCH_DOM_STUB);
 panel._chart.setOption = function (opt) { lastOption = opt; };
 
 const full = P.aggregate(F.heatmap, 1);

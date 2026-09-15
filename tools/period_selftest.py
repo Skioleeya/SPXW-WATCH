@@ -34,8 +34,18 @@ MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
     ("聚合系数偏移", "period.js", "sum += v;", "sum += v + 0.001;", "aggregate"),
     ("色标漏掉下限保护", "period.js", "return Math.max(picked, floor);",
      "return picked;", "bound"),
-    ("组数取整方向反了", "period.js", "var outCols = Math.ceil(cols / g);",
-     "var outCols = Math.floor(cols / g);", "aggregate"),
+    # 下面两条针对 2026-09-15 定稿的「**周期走满才出列**」语义。
+    # 改回旧行为（把未走满的末组也输出）必须被抓住 —— 那正是 KAI 报的
+    # 「周期内 IV 仍在变 / 跨周期先渲染 +0」的根因。
+    ("未走满的末组也出列（回到旧语义）", "period.js",
+     "    var outCols = Math.floor(cols / g);",
+     "    var outCols = Math.ceil(cols / g);", "aggregate"),
+    # 末组被丢弃后，其起点标签不该再出现在结果里（少一列就是少一列）。
+    # 把「整除」改成「+1 列」可以骗过列数以外的字段，但它必须被标签判据抓住。
+    ("末组丢弃后标签序列未同步（多报一列的位置）", "period.js",
+     "    for (var i = 0; i < outCols; i++) {\n      labels.push(groupLabel(block.labels[i * g], g * baseSeconds));",
+     "    for (var i = 0; i <= outCols; i++) {\n      labels.push(groupLabel(block.labels[i * g], g * baseSeconds));",
+     "aggregate"),
     ("切列忽略区段过滤（空档被留下）", "period_align.js",
      "      if (keep[zones[z].id]) { order.push(zones[z]); }",
      "      order.push(zones[z]);", "sliceZones"),

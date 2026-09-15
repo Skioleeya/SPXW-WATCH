@@ -1,8 +1,41 @@
 # Handoff Index
-- Latest session: 2026-09-15/heatmap-topn-skew-yzoom
-- Current session handoff: notes/sessions/2026-09-15/heatmap-topn-skew-yzoom/handoff.md
-- Status: **热力图"成交量 Top-3 无级黑边" + Skew Y 轴滚轮无限制自由缩放（锁定 / 双击复位）
-  落地，新增常驻回归并全绿 —— 见下节。**
+- Latest session: 2026-09-15/period-wallclock-semantics
+- Current session handoff: notes/sessions/2026-09-15/period-wallclock-semantics/handoff.md
+- Status: **周期分组的「桶 vs 挂钟时间」议题结案 —— 两者数值等价，"按挂钟整点分对齐"
+  已经成立，本会话未改任何业务逻辑（只在 `web/period.js` 加一节论证注释）。**
+  ⓐ **裁定来源**：KAI 原话"必须基于时间，时间是系统最重要的，21:00 21:03 21:06……
+  时间周期才是第一，桶无效，必须删除这个错误逻辑"。查证后结论是**无需删任何逻辑**。
+  ⓑ **两级依据（均可复现）**：① 网格起点 `20:15:00` = **72900 秒**，而
+  `72900 % {30,60,180,300,900}` **全为 0** ⇒ 第 c 组的起点恒落在挂钟整点
+  （20:15 / 20:18 / … / 21:00 / 21:03）；② `core/session_grid.py::_make_zone`
+  （71-76 行）**强校验**区段边界落在桶边界上（不满足直接抛错），`parse_hm` 又只接受
+  `HH:MM` ⇒ "整分钟 ∪ 桶宽整除"必然成立。故 `floor(cols/g)` ≡
+  `floor((t−20:15)/period秒)` —— **改成按时间分组是恒等变换，不会动一个像素**。
+  ⓒ **两条作废的方案**：KAI 先选"后端算周期值"、"档位告诉后端"，**两者均已作废** ——
+  不是 KAI 选错，而是**提方案时我们还不知道边界已经对齐**；事实澄清后方案失去对象。
+  **将来不得照着去实现那个双向通道 / 后端预计算。**
+  ⓓ **一条被 KAI 裁定"不用"的真缺陷**（备将来）：空档桶 1580–1589 被切进两组 ——
+  组 263 = 桶 1578–1583（09:24–09:27，混算 GTH 尾 + 空档）、组 264 = 桶 1584–1589
+  （09:27–09:30，整组在空档内 ⇒ **该列永远无颜色**）。修法是"每会话从自己起点起算分组"，
+  **已明确否决，勿自作主张**。
+  ⓔ **上一会话遗留缺口已闭环（方法学）**：所谓"旧语义漂移复现不出来"是**采样位置问题** ——
+  旧语义（`ceil`）的漂移触发条件是 **`cols % g == 1`**（末组恰 1 桶 = 刚跨周期那一帧），
+  而非"末组不满"。按 3s 抽间隔帧而帧间隔 400ms ⇒ 必然跳过边界帧。实测 60 帧连续采样
+  （`seq 18200 bi=1461 cols=1462 → 旧末 −0.223`；`seq 18201 bi=1462 cols=1463 → 旧末 −0.223`）
+  显示 `1462 = 6×243+4`，末组已有 4 个桶且**早已走满** ⇒ 此刻两语义同值、本就不漂移。
+  ⓕ **验证全绿**（`venv/Scripts/python.exe`）：`check_period_aggregation --selftest`
+  **`RC=0`**（24 判据 + 守卫 2 + **6 变异全抓**，含"未走满的末组也出列"抓 24 项、
+  "标签序列未同步"抓 5 项）；`run.py --check` **`RC=0`**（`[13]` 真实联通：24 档 × 1489 桶、
+  Skew 815 点）；`tools/check_*.py` 矩阵 **21 绿 / 2 红**，两红经 `git stash -u`
+  **证明为既存**（`check_page_render` 周期选中态、`check_ws_compression` 71.2%）；
+  `web/period.js` **391 行**（< 400）。
+  ⓖ **清理**：删 `tmp/` 12 个一次性探针 + `frames_seq.jsonl`(4.7MB) + `edge_cross*.log`。
+  ⚠️ **风险**：`period.js` 余量仅 **9 行**，再加内容必须拆分；
+  两个既存红灯未修，**引用"21/2"时必须带既存性证据**；未做浏览器取像素。
+- Previous: 2026-09-15/heatmap-topn-skew-yzoom
+- Previous handoff: notes/sessions/2026-09-15/heatmap-topn-skew-yzoom/handoff.md
+- Previous status: **热力图"成交量 Top-3 无级黑边" + Skew Y 轴滚轮无限制自由缩放
+  落地，新增常驻回归并全绿。**
   ⓐ **热力图**：`heatmap.volumeBorder` → **`heatmap.volumeTop`**（`topN:3`、`minPx/maxPx:null`、
   `maxRatio:0.30`/`minRatio:0.10`，宽度锚在格子**短边**）。**只有 Top-3 命中格**带 `itemStyle`，
   其余保持裸数组 ⇒ **普通样式、无描边**（KAI 最终裁定："只留 Top3 黑边，其余普通" = 无黑边）。

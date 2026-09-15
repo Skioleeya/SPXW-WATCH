@@ -112,7 +112,7 @@ const aligned = P.alignSkew(F.skew.series, 1, { labels: full.labels, drop: 0 });
    都从它上面读。面板本身只暴露这一条通路，不需要额外接口。 */
 let lastOption = null;
 function newPanel() {
-  const panel = new S.SkewPanel({});
+  const panel = new S.SkewPanel(S.SWATCH_DOM_STUB);
   panel._chart.setOption = function (opt) { lastOption = opt; };
   return panel;
 }

@@ -211,18 +211,44 @@ def ref_group_label(label: str, group_seconds: int) -> str:
 
 
 def ref_aggregate(base: dict, group: int) -> dict[str, Any]:
-    """按 group 个基线桶并成一列：组内 ΔIV 相加；组内有一格为 null 则整组 null。"""
+    """按 group 个基线桶并成一列：组内 ΔIV 相加；组内有一格为 null 则整组 null。
+
+    **只输出已走满的组（2026-09-15 修）** —— 末尾凑不满 group 个基线桶的那一组
+    整组丢弃。旧版用 ``ceil`` 把它也输出，于是"周期变化量"在周期还没结束时就
+    随每个 tick 变化（右端点是未走完的当前桶），跨周期那一刻还会先渲染 +0。
+    语义定稿：周期走满才出列，出列即定稿 ``IV(T+period) − IV(T)``。
+
+    与 ``web/period.js::aggregate`` 逐值对拍 —— 两处必须同步改，漂移即 FAIL。
+    """
     labels, values = base["labels"], base["values"]
     cols, rows = len(labels), len(values)
     span = base["bucket_seconds"]
-    out_cols = -(-cols // group)          # 整数向上取整
+    out_cols = cols // group                 # 整除，丢掉不完整的末组
+
+    # 连一个完整周期都没走满（周期比整个交易日网格还长）：给空矩阵。
+    # 元字段与正常分支同口径 —— bucket_index 一律除以 group，vmax 由聚合后的
+    # 数值重算；此刻无量程可算，退到 scale_policy.floor。与前端逐字段对齐。
+    if out_cols < 1:
+        policy = base.get("scale_policy") or {}
+        floor = policy.get("floor")
+        return {
+            "labels": [],
+            "values": [[] for _ in range(rows)],
+            "volumes": ([[] for _ in range(rows)]
+                        if base.get("volumes") else None),
+            "vmax": float(floor) if isinstance(floor, (int, float)) and floor > 0 else 0.0,
+            "cols": 0,
+            "rows": rows,
+            "bucket_seconds": span * group,
+            "bucket_index": base["bucket_index"] // group,
+        }
 
     out_values: list[list[float | None]] = []
     flat: list[float] = []
     for r in range(rows):
         row: list[float | None] = []
         for c in range(out_cols):
-            chunk = values[r][c * group:min(c * group + group, cols)]
+            chunk = values[r][c * group:(c + 1) * group]
             if any(v is None for v in chunk):
                 row.append(None)
                 continue
@@ -243,7 +269,7 @@ def ref_aggregate(base: dict, group: int) -> dict[str, Any]:
             src = src_volumes[r] if r < len(src_volumes) else []
             row_v: list[int | None] = []
             for c in range(out_cols):
-                chunk = src[c * group:min(c * group + group, cols)]
+                chunk = src[c * group:(c + 1) * group]
                 known = [v for v in chunk if v is not None]
                 row_v.append(sum(known) if known else None)
             out_volumes.append(row_v)

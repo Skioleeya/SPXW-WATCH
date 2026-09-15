@@ -113,9 +113,47 @@
    * 组内只要有一格是 null（该行那一段还没有数据），整组就是 null：少加了一段
    * 却仍报一个数，等于拿一个偏小的值冒充完整值 —— 那正是这张图最不该做的事。
    *
-   * 末组不满时照样输出。它是"正在成形"的那一列，和 K 线最后一根未收盘的柱子
-   * 是同一件事；丢掉它会让最新一列永远滞后整整一个周期（15 分钟周期下就是
-   * 滞后 15 分钟，对盯盘等于没有这一列）。
+   * **只输出已走满的周期（2026-09-15 修）**
+   * ---------------------------------------
+   * 末组不满时**不再输出**。旧版把它当成"正在成形的那一列"照画，类比 K 线
+   * 最后一根未收盘的柱子 —— 那个类比是错的，两者语义根本不同：
+   *
+   *   - K 线未收盘柱画的是**当前价**，它本来就该随行情跳动；
+   *   - 这里每一列画的是**一个周期内的 IV 变化量**（ΔIV 之和，望远镜相消后
+   *     = IV[b] − IV[a−1]）。右端点 b 是**还没走完的当前桶**，而同一个桶内的
+   *     IV 每 400ms 就被后来的 tick 覆盖一次（`heatmap_engine.observe` 同桶
+   *     只保留最后一次）。于是一个"周期变化量"在周期还没结束时就一直变 ——
+   *     它根本不是周期变化量，只是**相邻两个基线桶的差**。
+   *
+   * 实盘症状（2026-09-15 探针，3 分钟周期）：
+   *   - 跨周期那一刻组内只有 1 个桶 ⇒ 聚合值 = IV[新桶] − IV[上一桶] ≈ **+0**；
+   *   - 同一周期内该值持续变化（实测 0.000 → −0.072）。
+   *
+   * 语义定稿（KAI 2026-09-15）：**周期走满才出列，出列即定稿**。
+   * 3 分钟周期下，T→T+3 这段期间该列在图上**不存在**；到 T+3 走满时一次性
+   * 落图，值恒为 IV(T+3) − IV(T)，此后再不变化。
+   *
+   * 代价是最新一列会滞后最多一个周期（15 分钟周期下就是 15 分钟）。这是
+   * **刻意的**：滞后一列是"看得见的等待"，而拿未定稿的数当定稿数展示是
+   * "看不见的错值" —— 后者正是本项目的头号禁忌（见 QUICKREF 静默错值型）。
+   *
+   * 为什么"按桶数分组"就等于"按挂钟整点分分组"（2026-09-15 KAI 质问后核准）
+   * -----------------------------------------------------------------------
+   * KAI 的裁定是"时间周期第一，必须按挂钟整点分对齐"。查证结论：**本项目的
+   * 桶分组已经满足该裁定，两者数值等价，不是两种方案。** 依据有两级：
+   *
+   *   1. 网格起点是 `20:15:00`，即相对当日 00:00 偏移 **72900 秒**；
+   *      而 `72900 % 30/60/180/300/900` **全部为 0** ⇒ 第 c 个组的起点必然落在
+   *      挂钟整点上（20:15、20:18、20:21 … 21:00、21:03）。这是
+   *      `core/session_grid.py::build_zones` 的既有前提：它**强校验**每个区段
+   *      边界落在桶边界上（`begin_s % bucket_seconds` 不为 0 直接抛错），
+   *      而会话时刻又必须落在整分钟（`parse_hm` 只接受 `HH:MM`）。
+   *   2. 因此 `floor(cols / g)` 与 `floor((t − 20:15) / period秒)` 给出同一个组号。
+   *
+   * **反过来说：想"改成按时间分组"在这里是恒等变换，改了也不会动一个像素。**
+   * 真要动的是别的东西（例如把周期档位改成不整除 300s 的值、或让会话起点不再是
+   * 整分钟），那时这条等价性才会破，**届时必须改的是本注释而不是这段代码** ——
+   * 代码按桶分组是对的，因为桶序号的唯一真相在后端 `SessionClock`。
    */
   function aggregate(block, group) {
     if (!block || !block.values) { return block; }
@@ -127,11 +165,39 @@
     var rows = block.values.length;
     if (!cols || !rows) { return block; }
 
-    var outCols = Math.ceil(cols / g);
     var baseSeconds = Number(block.bucket_seconds);
     if (!(baseSeconds > 0)) {
       error("帧里没有 heatmap.bucket_seconds，已按基线原样返回（不聚合）");
       return block;
+    }
+
+    /* 只保留**完整**组：末尾凑不满 g 个基线桶的那一组整组丢弃。
+       cols 不是 g 的整数倍时，outCols 比 ceil 少 1 —— 这一列正是未定稿的那列。 */
+    var outCols = Math.floor(cols / g);
+    if (outCols < 1) {
+      /* 连一个完整周期都还没走满（极端：周期比整个交易日网格还长）。
+         返回**空**矩阵，让前端画出带正确坐标轴的空网格。
+
+         元字段必须与正常分支同口径，否则同一个函数两条路径给出两套语义：
+         `bucket_index` 一律除以 g（周期编号），`vmax` 一律由聚合后的数值重算。
+         代价是此刻没有可算的量程，退到 floor —— 空矩阵本就不画任何颜色，
+         量程取什么都不影响显示。 */
+      var emptyPolicy = block.scale_policy || {};
+      var emptyVmax = Number(emptyPolicy.floor);
+      return {
+        labels: [],
+        values: block.values.map(function () { return []; }),
+        volumes: block.volumes ? block.volumes.map(function () { return []; }) : undefined,
+        vmax: isFinite(emptyVmax) && emptyVmax > 0 ? emptyVmax : 0,
+        strikes: block.strikes,
+        rights: block.rights,
+        rows: rows,
+        cols: 0,
+        bucket_index: Math.floor(block.bucket_index / g),
+        bucket_seconds: baseSeconds * g,
+        scale_policy: block.scale_policy,
+        spot: block.spot
+      };
     }
 
     var values = [];
@@ -141,7 +207,7 @@
       var dst = new Array(outCols);
       for (var c = 0; c < outCols; c++) {
         var start = c * g;
-        var end = Math.min(start + g, cols);
+        var end = start + g;          /* 完整组 ⇒ 不必再夹到 cols */
         var sum = 0;
         var known = true;
         for (var k = start; k < end; k++) {

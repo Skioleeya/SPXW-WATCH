@@ -112,7 +112,10 @@ const sandbox = {
     };
   } },
   addEventListener: function () {},
-  document: { getElementById: function () { return {}; } }
+  document: { getElementById: function () { return __DOM_STUB__; } },
+  /* 驱动里 ``new S.SkewPanel(...)`` 要一个带 DOM 接口的元素；挂在沙箱全局上，
+     免得每个驱动各写一份、写法一漂移就又崩（实测三个回归一起崩过）。 */
+  SWATCH_DOM_STUB: __DOM_STUB__
 };
 sandbox.window = sandbox;
 const ctx = vm.createContext(sandbox);
@@ -138,9 +141,25 @@ const out = {
 };
 """
 
+#: DOM 元素替身：``SkewPanel`` 构造时会 ``_bindWheel()``（滚轮 Y 缩放，2026-09-15 加），
+#: 需要 ``addEventListener``；``_inGrid()`` 需要 ``getBoundingClientRect``。
+#: 少了任一方法，**驱动阶段就崩**，回归红得与它要验的逻辑毫无关系（实测踩过：
+#: ``check_skew_viewport`` / ``check_skew_alignment`` / ``check_skew_colors`` 三个
+#: 一起 ``TypeError: this._el.addEventListener is not a function``）。
+#: 与上面的 ECharts 替身同理：只提供接口、不实现行为。
+DOM_STUB_JS = """({
+  addEventListener: function () {},
+  removeEventListener: function () {},
+  getBoundingClientRect: function () {
+    return { left: 0, top: 0, width: 1200, height: 600,
+             right: 1200, bottom: 600, x: 0, y: 0 };
+  }
+})"""
+
 #: 把 ``__WEB_SCRIPTS__`` 占位符换成真实列表。只做一次，之后 ``SANDBOX_JS`` 即成品；
 #: 所有驱动（``NODE_DRIVER`` 与各回归自带的 ``*_BODY``）拿到的都是替换后的版本。
 SANDBOX_JS = SANDBOX_JS.replace("__WEB_SCRIPTS__", json.dumps(list(WEB_SCRIPTS)))
+SANDBOX_JS = SANDBOX_JS.replace("__DOM_STUB__", DOM_STUB_JS)
 
 #: 对齐回归的驱动体：``decodeFrame → aggregate → clipTail → alignSkew →
 #: SkewPanel.update``，逐周期吐出落列结果，外加三档视口下的纵轴量程。
@@ -150,7 +169,7 @@ for (const opt of P.options(out.base)) {
   const view = P.clipTail(P.aggregate(F.heatmap, group), MAX_COLS);
   const drop = view.clipped || 0;
   const a = P.alignSkew(F.skew.series, group, { labels: view.labels, drop: drop });
-  const info = new S.SkewPanel({}).update(a);
+  const info = new S.SkewPanel(S.SWATCH_DOM_STUB).update(a);
   out.periods[String(opt.seconds)] = {
     group: group,
     cols: view.labels.length,
@@ -171,7 +190,7 @@ for (const opt of P.options(out.base)) {
    用**不裁剪**的全序列网格，否则尖峰会被 clipTail 裁掉、判据空转。 */
 const full = P.aggregate(F.heatmap, 1);
 const aFull = P.alignSkew(F.skew.series, 1, { labels: full.labels, drop: 0 });
-const panel = new S.SkewPanel({});
+const panel = new S.SkewPanel(S.SWATCH_DOM_STUB);
 const spikeCol = aFull.skew.indexOf(9);
 const fullRange = panel.update(aFull).range;
 panel.setViewport({ start: spikeCol + 20, end: spikeCol + 120, tail: false });

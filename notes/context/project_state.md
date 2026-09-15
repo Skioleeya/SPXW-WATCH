@@ -1,9 +1,12 @@
 # Project State
 
-ACTIVE_SESSION: 2026-09-15/persistence-session-files
-LAST_UPDATED: 2026-09-15 03:5x —— **持久化落点改为一交易日一文件 + 历史归档不删**，
-已提交并推送（`HEAD = 53da940`，工作区干净）。见
-`notes/sessions/2026-09-15/persistence-session-files/handoff.md`。
+ACTIVE_SESSION: 2026-09-15/period-wallclock-semantics
+LAST_UPDATED: 2026-09-15 08:4x —— **周期分组的"桶 vs 挂钟时间"议题结案：两者在本项目
+**数值等价**，KAI 裁定的"按挂钟整点分对齐"**已经成立**（网格起点 20:15:00 = 72900s，
+被 30/60/180/300/900 全整除；且 `session_grid` 强校验区段边界落在桶边界上）。
+本会话**未改任何业务逻辑**，只把等价性钉进 `web/period.js` 注释。
+KAI 另裁定"跨空档那两列不修"。见
+`notes/sessions/2026-09-15/period-wallclock-semantics/handoff.md`。
 ⚠️ **本文件正文（§10 之前）仍是 2026-09-14 的快照**，其中"改动未提交"等陈述
 指的是当时那一刻，**不是现状**；现状以上面这行与 `notes/context/handoff.md` 为准。
 ARCHIVE: notes/context/archive/project_state_2026-09.md

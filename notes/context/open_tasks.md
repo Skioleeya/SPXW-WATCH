@@ -4,6 +4,32 @@ Archive: notes/context/archive/open_tasks_2026-09.md
 
 ## Active
 
+- [ ] **[中] ΔIV 公式缺一个"端到端逐格对拍"的检查器**（2026-09-15 04:5x 审计，
+  探针已写在 `tmp/verify_delta_iv.py`，**未落成常驻回归**）。
+
+  **审计结论（全部实测，无一处是"看代码觉得对"）**：
+
+  | 环节 | 结论 | 证据 |
+  |---|---|---|
+  | `ImpulseEngine` ΔIV(N) = `(IV_now − IV_{now−N}) × 100` | ✅ 正确 | 同一个合约的 buffer 内做差，`OptionRef` 带方向 ⇒ 结构上不可能串边 |
+  | `HeatmapEngine` ΔIV = `(value − previous) × 100` | ✅ 正确 | 端到端逐格对拍 **1272/1272 格一致** |
+  | 热力图按**行权价**分键（不带方向）是否引入 Put/Call 混淆 | ✅ 不引入 | 实测两侧 model IV **逐位相同**（4 档 × 8 采样 = 32 次比对，`|ΔIV|` 全 0.0000；两侧 conId 不同，确属两张合约） |
+  | `SkewEngine` | ✅ 正确 | `put_samples`/`call_samples` 按 `cell.right` 分开；`skew = (put25.iv − call25.iv) × 100` |
+  | `_atm_iv` / `_straddle` | ✅ 正确 | 是回 `store.latest_option()` 取**另一侧**，不是从单侧的 `cells` 里凑 |
+  | `use_model_greeks=true` 这个**前置条件** | ✅ **已有守卫且非空转** | `tools/selfcheck_config.py::_check_model_greeks_prerequisite`（`--check` 的 `[6]`）：正常态 `[ok]`+`RC=0`；**变异为 false ⇒ `[FAIL]` + `RC=1`**，还原后两次输出完全一致（54 ok / 0 fail / 0 warn） |
+
+  **缺口**：以上第 2 行那条"逐格对拍"目前**只在 `tmp/` 里、是一次性的**。现有
+  `tools/check_matrix_codec.py` 只做 **pack/unpack 往返**（编解码自洽），
+  `check_persistence.py` 只管键序 —— **没有任何常驻检查器断言"帧里那个数 = 库原始
+  IV 差分 × 100"**。少乘/多乘 100、行序反了、单位换成百分数，三者都会让图**照常
+  渲染**（典型的静默错值）。
+
+  - [ ] 把 `tmp/verify_delta_iv.py` 提为 `tools/check_heatmap_delta.py`
+    （形态参考已有的 `tools/period_reference.py` / `skew_reference.py` 的"参考实现
+    对拍"族），并登记进 `--check` 矩阵与 `NON_SOURCE_DIRS`。
+    ⚠️ 它需要**在线的 8060 + 当日库**，属"需服务"类检查 ⇒ 盘中才能跑，
+    盘前/盘后应记 `N/A`，不要判成回归破坏。
+
 - [ ] **[高] 空图真根因已定性：IBKR `modelGreeks` **间歇缺失**，不是"GTH 结构性"**
   （2026-09-15 04:3x 查清，KAI 提供两条网关日志后收口）。
 

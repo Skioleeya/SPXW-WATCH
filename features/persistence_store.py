@@ -1,17 +1,16 @@
 """
-L3 — 按交易日分文件的 SQLite 存储。
+L5 — 按交易日分文件的 SQLite 存储。
 =====================================
 把"哪个交易日的数据放在哪个文件里"变成**文件系统上的事实**。
 
 为什么分文件
 ------------
-``bucket_index`` 是**日内坐标**（0..2369），**每个交易日复用同一段序号**。多个
-交易日塞进同一张表就只能靠一列 ``session_key`` 去区分；那列丢了或某次查询忘了带
-过滤，昨天的桶就会落到今天的时刻上 —— 2026-09-15 实测到的正是这个形状：昨天 RTH
-的桶（index 448..2183）被画在今天 GTH 的时刻上，帧的 ``skew.latest``（取
-``skew_series[-1]``）报出昨天 14:26:48 的点。分文件把这条不变量抬到**文件边界**：
-``data/sessions/20260915.db`` 里只可能有 20260915 的桶 —— 读错都读不到，不依赖
-任何一列，也不依赖任何一次 WHERE。
+``bucket_index`` 是**日内坐标**（0..2369），**每个交易日复用同一段序号**。多个交易日塞进
+同一张表就只能靠一列 ``session_key`` 去区分；那列丢了或某次查询忘了带过滤，昨天的桶就会
+落到今天的时刻上 —— 2026-09-15 实测到的正是这个形状：昨天 RTH 的桶被画在今天 GTH 的时刻
+上，帧的 ``skew.latest``（取 ``skew_series[-1]``）报出昨天 14:26:48 的点。分文件把这条
+不变量抬到**文件边界**：``data/sessions/20260915.db`` 里只可能有 20260915 的桶 ——
+读错都读不到，不依赖任何一列，也不依赖任何一次 WHERE。
 
 会话身份在运行期会变（``_sync_session()`` 翻篇时改 ``_session_key`` 并 ``reset()``），
 所以跨日那一刻必须**换文件**，否则新会话的桶继续写进旧日期的文件，下次启动从新日期
@@ -19,21 +18,26 @@ L3 — 按交易日分文件的 SQLite 存储。
 **同一个文件**；跨日 ⇒ 换**新文件**（会话身份由调用方提供，本模块**不自行推算**）；
 旧结构文件 ⇒ 整张丢弃并**报出行数**。宁可丢，不可错。
 
+**库文件用 WAL**（在 ``open_session`` 里设；它是写在库文件头的**持久属性**，设一次即可）。
+``-wal`` / ``-shm`` 是 SQLite 的**附属文件**，不是"另一个交易日的库"：正常关闭时由 SQLite
+自行归并清除；被硬杀则残留，由 ``archive_other_sessions`` **随库文件一起搬走** ——
+漏搬就是把 WAL 里那部分数据永久丢掉。
+
 保留策略：db_dir 只留当前会话，历史**归档不删**
 ------------------------------------------------
-别的交易日的文件对本会话既不能读也不该读（读了就是把别天的桶画到今天），所以不该
-留在 db_dir 里。但它们**不是垃圾** —— 那是逐交易日的 ΔIV / Skew **原始记录**，回看、
-对拍、做数据集只有这一份来源（KAI 2026-09-15：**"这就是历史数据，有用"**）。⇒ 启动时
-把非当前会话的库文件**移动**到 ``archive_dir``（``archive_other_sessions``）：范围严格
-限制在 db_dir 之内，归档目录里**同名一律不覆盖**（跳过并上报，宁可留着也不毁历史）。
-（2026-09-15 02:2x 曾实现为 ``unlink()`` 删除 —— 那是把 KAI "不留档、不备份"的适用范围
-从旧单库 ``data/session.db`` 误扩到全部逐日文件；同日改回归档，别"简化"回去。）
+别的交易日的文件对本会话既不能读也不该读（读了就是把别天的桶画到今天），所以不该留在
+db_dir 里；但它们**不是垃圾** —— 那是逐交易日的 ΔIV / Skew **原始记录**，回看、对拍、
+做数据集只有这一份来源（KAI 2026-09-15：**"这就是历史数据，有用"**）。⇒ 启动时把非当前
+会话的库文件（**连同 WAL 附属文件**）**移动**到 ``archive_dir``（``archive_other_sessions``）：
+范围严格限制在 db_dir 之内，归档目录里**同名一律不覆盖**（跳过并上报，宁可留着也不毁历史）。
+2026-09-15 02:2x 曾实现为 ``unlink()`` 删除（把 KAI "不留档、不备份"的适用范围从旧单库
+``data/session.db`` 误扩到全部逐日文件）；同日改回归档，别"简化"回去。
 
 本模块只管"文件与表"：路径派生、连接的开/切/关、建表、写入、只读取行、归档
 非当前会话的文件。队列、批量调度与序列化（dict ↔ JSON、SkewPoint ↔ dict）都在
 ``features/persistence.py``。
 
-依赖：L0。
+依赖：L0（config）。
 """
 from __future__ import annotations
 
@@ -41,6 +45,7 @@ import sqlite3
 from pathlib import Path
 
 from config import loader
+from features.persistence_archive import SessionArchiver
 
 _PERSIST = "persistence"
 
@@ -76,21 +81,21 @@ class SessionFileStore:
     不可能对不上。
     """
 
-    __slots__ = (
-        "_enabled", "_db_dir", "_archive_dir", "_filename", "_conn", "_open_key",
-        "_legacy_dropped",
-    )
+    __slots__ = ("_enabled", "_db_dir", "_filename", "_archiver", "_conn",
+                 "_open_key", "_legacy_dropped")
 
     def __init__(self, persist_cfg: dict) -> None:
         self._enabled = loader.as_bool(persist_cfg, "enabled", module=_PERSIST)
         self._db_dir = Path(loader.as_str(persist_cfg, "db_dir", module=_PERSIST))
-        self._archive_dir = Path(
-            loader.as_str(persist_cfg, "archive_dir", module=_PERSIST))
         self._filename = loader.as_str(persist_cfg, "db_filename", module=_PERSIST)
+        self._archiver = SessionArchiver(
+            self._db_dir,
+            Path(loader.as_str(persist_cfg, "archive_dir", module=_PERSIST)),
+            self._filename,
+        )
         self._conn: sqlite3.Connection | None = None
         self._open_key: str | None = None
         self._legacy_dropped = 0
-        self._require_archive_outside_db_dir()
 
     # ------------------------------------------------------------------ #
     # 只读属性
@@ -118,23 +123,7 @@ class SessionFileStore:
     @property
     def archive_dir(self) -> Path:
         """历史会话库的归档目录（``persistence.json::archive_dir``）。"""
-        return self._archive_dir
-
-    def _require_archive_outside_db_dir(self) -> None:
-        """
-        归档目录必须落在 db_dir **之外** —— 写错了就在构造时炸，不静默降级。
-
-        归档目录若等于或位于 db_dir 之内，归档件下次启动又会被 glob 扫到、当成
-        "待归档的旧会话"，每次启动在同一批文件上打转；这种配置错**不报任何异常**，
-        只让"db_dir 里只有当前会话"这条不变量悄悄失效 —— 属静默错值。
-        """
-        db_dir = self._db_dir.resolve()
-        archive = self._archive_dir.resolve()
-        if archive == db_dir or db_dir in archive.parents:
-            raise ValueError(
-                f"archive_dir {self._archive_dir} 位于 db_dir {self._db_dir} 之内 —— "
-                f"归档件会被下次启动当成待归档项"
-            )
+        return self._archiver.archive_dir
 
     # ------------------------------------------------------------------ #
     # 路径
@@ -162,45 +151,19 @@ class SessionFileStore:
         """
         把 db_dir 里**非当前会话**的库文件**移动**到 ``archive_dir``。
 
+        实现见 ``features/persistence_archive.py::SessionArchiver`` —— 那段逻辑
+        （范围闸门、WAL 附属文件、同名不覆盖）只在启动时跑一次、与运行期的"开/写/读"
+        无关，故按单一职能拆出；本方法只做**会话身份 → 文件名**的翻译与开关判断。
+
         返回 ``(已归档, 未归档)``：已归档 = 真正搬走的；未归档 = 归档目录已有同名
-        （**不覆盖**，源文件留在 db_dir）或移动失败（例如另一进程占着句柄）。分成
-        两组是因为调用方要分别记 INFO 与 WARNING —— "没归档成功"必须比"归档成功"
-        更显眼。保留策略与调用时机见模块 docstring（本模块不自行触发：它不知道
-        "什么时候算旧"，只知道"哪个不是当前"）。
-
-        范围是**两道闸门**，不是一句 ``mv *.db``：① 只在 ``db_dir`` **之内** glob
-        —— 上一级放着别的东西（曾有旧单库 ``data/session.db``），越界就会把不属于
-        本模块的文件搬走，由 ``_case_archive_leaves_parent_dir_alone`` 钉住；
-        ② 只匹配 ``db_filename`` 模板派生的名字，当前会话那一份按**文件名**跳过。
-
-        失败**跳过、不抛错**：本模块是旁路，不得因为归档失败中断行情主流程；
-        没搬走的会在下次启动时再试。源文件宁可留在 db_dir，也**不删**。
+        （**不覆盖**，源文件留在 db_dir）或移动失败。两组都要记日志（调用方负责）：
+        "没归档成功"必须比"归档成功"更显眼。本模块**不自行触发**归档 —— 它不知道
+        "什么时候算旧"，只知道"哪个不是当前"。
         """
         key = require_session_key(keep_key)
-        if not self._enabled or not self._db_dir.is_dir():
+        if not self._enabled:
             return [], []
-        keep_name = self.path_for(key).name  # 顺带做一次模板越界校验
-        candidates = [
-            p for p in sorted(self._db_dir.glob(self._filename.format(session_key="*")))
-            if p.name != keep_name and p.is_file()
-        ]
-        if not candidates:
-            return [], []
-        self._archive_dir.mkdir(parents=True, exist_ok=True)
-        archived: list[str] = []
-        held_back: list[str] = []
-        for path in candidates:
-            target = self._archive_dir / path.name
-            if target.exists():
-                held_back.append(path.name)  # 同名不覆盖：宁可留着也不毁一份历史
-                continue
-            try:
-                path.rename(target)  # 同卷移动；Windows 上目标已存在会抛错，再兜一层
-            except OSError:
-                held_back.append(path.name)
-                continue
-            archived.append(path.name)
-        return archived, held_back
+        return self._archiver.archive_other_sessions(self.path_for(key).name)
 
     # ------------------------------------------------------------------ #
     # 连接
@@ -213,6 +176,7 @@ class SessionFileStore:
         **已打开同一会话时是空操作** —— 热路径（批量写入）会对每条载荷调用它，
         换文件只在会话真的变了时才发生。关闭旧文件再开新文件，不做"两个文件同时
         开着"的优化：那会让 fd 随交易日累积，而本进程一次只服务一个会话。
+        WAL 设不上时**抛错**：PRAGMA 对不支持的模式不报错、只沿用旧模式（见模块 docstring）。
         """
         key = require_session_key(session_key)
         if not self._enabled or key == self._open_key:
@@ -221,6 +185,9 @@ class SessionFileStore:
         path = self.path_for(key)
         path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(path), timeout=5.0)
+        mode = self._conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+        if str(mode).lower() != "wal":
+            raise RuntimeError(f"{path} 无法切到 WAL 模式（PRAGMA 返回 {mode!r}）")
         self._open_key = key
         self.ensure_tables()
 

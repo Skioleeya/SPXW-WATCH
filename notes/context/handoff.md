@@ -1,4 +1,73 @@
 # Handoff Index
+
+## 最新：2026-09-16 / runtime-monitors（完成）
+
+- **会话交接**：`notes/sessions/2026-09-16/runtime-monitors/handoff.md`
+- **一句话**：KAI 要四件验证 —— ① 写独立前后端监听脚本；② 新网格出列后数值不再变；
+  ③ 每周期按 ET 挂钟推进出列；④ 各周期 ΔIV 独立互不干扰；写完再启动整个系统。
+  ⇒ 新增**两只只读探针**：`tmp/monitor_backend.py`（读 WS 原始帧）、
+  `tmp/monitor_frontend.js`（Playwright 读**页面上真正渲染出来的矩阵**）。
+- **四项结论全部成立**：
+  - ② 后端 7133 格指纹 / **0 改写**；前端显示 3385 格 + 基线 6796 格 / **0 改写**
+  - ③ 后端 3 列 + 前端 2 列新列，**全部**落在挂钟整 30s / 60s
+  - ④ 后端组和可加性 24 行 0 违反；前端跨档位对拍 144 列 / 3405 格全部吻合
+- **证据**：`run.py --check` **16/16 RC=0**；两只探针重启前后各跑一轮，**四次全 PASS**。
+- **非空转验证（摘掉修复要能报 FAIL）**：后端解码器改坏 ⇒
+  `RC=1`「逐格指纹 0 个 … ✗ 帧 #17775 的矩阵解不开 —— **逐格判据在这帧上是空转的**」
+  （没把"什么都没看"报成 PASS）；前端指纹键改回行号 ⇒ `RC=1`「改写 67870 处」。
+- **本轮挖出的三个"假绿"陷阱**（都是探针自己的 bug，产品代码无缺陷）：
+  ① 帧里**没有** `values` 字段（线上是 `bm16` 位图+int16）⇒ 直接读它永远空、
+     "0 改写"看着像通过；② 指纹键**不能用行号**（±12 档窗口随现价平移，
+     行号集体换身份 ⇒ 实测 50827 条假改写）；③ 列身份**不能用轴标签或行长**
+     （`view.labels` 是裁尾切片；行长与 `view.cols` 会差一 ⇒ 稳键是"距右端偏移"）。
+- **一处真契约边界（非缺陷）**：`heatmap.cols` 与 `session.bucket_index` 偶发差 1
+  （529 帧里 1 次，桶内秒 29.998、方向恒为矩阵落后、次帧即恢复）
+  —— 成因是两处独立读钟跨了 30s 边界。**判据：允许差 1 且落后；差 >1 或超前一律 FAIL。**
+- **已按要求重启后端**：旧 PID 1228 → 新 PID 20636，`08:59:41 流水线已就绪`，
+  恢复 278 个历史桶；前端列数 **767（未归零）** ⇒ 历史跨重启保全。
+- ⚠️ **两个变异未激活**（诚实标注）：后端 T3 恒真 / 前端 T4 不标记 ——
+  本轮观测期内确实不存在真违例，变异体没被执行到 ⇒ **未验证，不冒充通过**。
+- ⚠️ **两只探针停在 `tmp/`**（按 KAI 明令不建常驻检查器）⇒ **无回归保护**。
+- **清理**：22 个 `tmp/_*` 一次性脚手架已删（`_diag_*` / `_repro_*` / `_probe_*` / `_mutant_*`）。
+- ⚠️ **本轮未提交任何东西**；工作区仍是大面积未提交的重写中间态（`HEAD = bedbf11`）。
+
+---
+## 最新：2026-09-15 / gate-tools-rewrite（完成）
+
+- **会话交接**：`notes/sessions/2026-09-15/gate-tools-rewrite/handoff.md`
+- **一句话**：KAI 明令「**必须重写，禁止移植失败品**」+「**README.md 必须重写**」
+  ⇒ `#15 tools/` 门禁从**覆盖 5/16 重写到 16/16**（按 9 层新架构，未从 `HEAD` 移植一行），
+  `README.md` 按 9 层架构重写（10 节），并完成全量复扫取证。
+- **证据**：`run.py --check` **16/16 RC=0** · `selfcheck.py --selftest` **16/16 全抓 RC=0** ·
+  四个冒烟 + web 对拍 **172 条判据全绿**（`l2l3` 37 / `l5` 32 / `l6` 39 / `l8` 30 / `web_e2e` 34）·
+  `check_web_contract --offline --selftest` RC=0。
+- **顺带抓到的真缺陷**：① `config/transport.json::bucket_seconds_s` 是**真死键 + 描述
+  不存在机制的注释**（上一轮移植时凭空补的，旧项目 `HEAD` 里根本没有）⇒ 删键；
+  ② `[7]` 的**键转发器覆盖盲区**（`_param_pairs(cfg, key, ...)` 把键名当参数转发 ⇒
+  5 个活键被误报死键）⇒ 新建 `selfcheck_reads.py` 两遍 AST 扫描（当轮假红消失；
+  ⚠️ 读取点计数随代码变化，**不抄写**，要引用实跑 `[7]`）；
+  ③ 配置注释里 **6 处引用不存在的检查器** ⇒ 逐条标注"**待建**"。
+- **下一步**：`tools/` 下 **8 个独立检查器仍待建**（`check_matrix_codec` /
+  `check_grid_contract` / `check_period_aggregation` / `check_session_grid` /
+  `check_surface_payload` / `check_reconnect_gap` / `check_window_tolerance` /
+  `check_ws_compression` / `ws_probe`）。⚠️ **`check_grid_contract.py` 尚未建 =
+  当前最大的门禁缺口**。状态表见 `README.md §6`。
+- ⚠️ **KAI 明示待定、本会话未做**：① 在线验证；② 曲面残差无方向字段。
+- ⚠️ **工作区脏态大**（`git status --short` = **133 项**，含 43 个 `D`）—— **未提交**。
+
+---
+
+## 上一轮：2026-09-15 / rebuild-from-original（L0–L8 + web/ 重写）
+
+- **会话交接**：`notes/sessions/2026-09-15/rebuild-from-original/handoff.md`
+- **一句话**：源码被清空，改为**基于原版 `live-volatility-surface` 重写**。
+  完成 **L0–L8 全部九层 + `web/` 前端**落盘（#8–#14），`#15 tools/` 起步到 5/16。
+- **`notes/` 已从 `HEAD = bedbf11` 恢复**（131 文件 / 2.3 MB）。
+
+---
+
+## 历史索引（重写前）
+
 - Latest session: 2026-09-15/period-wallclock-semantics
 - Current session handoff: notes/sessions/2026-09-15/period-wallclock-semantics/handoff.md
 - Status: **周期分组的「桶 vs 挂钟时间」议题结案 —— 两者数值等价，"按挂钟整点分对齐"

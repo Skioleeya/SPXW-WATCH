@@ -1,5 +1,5 @@
 """
-L2 — Tick 存储。
+L3 — Tick 存储。
 ================
 唯一职责：把采集层推来的 tick 按"数据分片"保存成可回溯的时间序列，并对外
 提供**只读**查询。
@@ -16,7 +16,7 @@ asyncio 事件循环上。理论上同线程无竞争，但 IBKR 客户端库在
 把回调放到独立线程，因此这里仍然用 ``RLock`` 保护——一把锁的代价远小于
 偶发的数据结构撕裂。
 
-依赖：L0。
+依赖：L0（config / contracts）与 L1（core）。
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ class TickStore(TickSink):
 
     def __init__(self, state_cfg: dict, clock: Any = None) -> None:
         self._lock = threading.RLock()
-        # 时间源必须可注入：模拟模式下会话时间被加速，用墙钟算 tick 年龄会得到
+        # 时间源必须可注入：夹具注入的时间源可以把会话时间加速，用墙钟算 tick 年龄会得到
         # 负值（tick 时间戳在"未来"），健康块就永远显示不出陈旧。
         self._clock = clock if clock is not None else WallClock()
 
@@ -59,7 +59,7 @@ class TickStore(TickSink):
         self._option_maxlen = loader.as_int(state_cfg, "option_buffer_max_points", module=_CFG)
         self._spot_age = loader.as_float(state_cfg, "spot_buffer_seconds", module=_CFG)
         self._spot_maxlen = loader.as_int(state_cfg, "spot_buffer_max_points", module=_CFG)
-        # 裁剪节奏属于本层的配置：L6 只负责按这个节奏驱动循环，不决定"多久裁一次"。
+        # 裁剪节奏属于本层的配置：L8 只负责按这个节奏驱动循环，不决定"多久裁一次"。
         # 这个值曾经只写在 config/pipeline.json 里，导致 state.json 的同名键是死的
         # （改了没有任何效果）——由自检项 [7] 兜住这类"未接线键"。
         self._prune_interval_s = loader.as_float(state_cfg, "prune_interval_s", module=_CFG)
@@ -195,7 +195,7 @@ class TickStore(TickSink):
         """
         本层期望的裁剪节奏（秒）。
 
-        L6 的维护循环按它驱动 ``prune()``。节奏由本层配置决定，
+        L8 的维护循环按它驱动 ``prune()``。节奏由本层配置决定，
         组装层只负责"照着跑"，不替本层选参数。
         """
         return self._prune_interval_s
@@ -204,7 +204,7 @@ class TickStore(TickSink):
         """
         按时间窗裁剪所有分片，返回被丢弃的样本总数。
 
-        由 L6 的维护循环驱动——L2 不自己起线程，保持"谁组装谁负责生命周期"；
+        由 L8 的维护循环驱动——L3 不自己起线程，保持"谁组装谁负责生命周期"；
         但**多久裁一次**由本层的 ``prune_interval_s`` 决定（见同名属性）。
         """
         moment = now if now is not None else self._clock.now()

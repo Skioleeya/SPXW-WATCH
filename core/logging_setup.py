@@ -1,10 +1,10 @@
 """
-L0 — 日志初始化。
+L1 — 日志初始化。
 ==================
 唯一职责：按传入的配置字典装配 root logger。
 
 **本模块不读配置文件** —— ``logging.json`` 由 app 层读取后作为参数注入。
-这样 ``core/`` 与 ``config/`` 之间没有任何 import 关系，L0 内部保持零耦合。
+这样 ``core/`` 与 ``config/`` 之间没有任何 import 关系，L1 内部保持零耦合。
 """
 
 from __future__ import annotations

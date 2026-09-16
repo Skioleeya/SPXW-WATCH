@@ -34,7 +34,6 @@ from typing import Any
 CONFIG_DIR = Path(__file__).resolve().parent
 SUFFIX = ".json"
 
-_MISSING = object()
 _lock = threading.RLock()
 _cache: dict[str, dict] = {}
 
@@ -173,6 +172,18 @@ def as_float_list(cfg: dict, key: str, *, module: str = "") -> list[float]:
                 f"{_label(cfg, module, key)} 的元素应全为数值，收到 {item!r}"
             )
         out.append(float(item))
+    return out
+
+
+def as_str_list(cfg: dict, key: str, *, module: str = "") -> list[str]:
+    value = as_list(cfg, key, module=module)
+    out: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise ConfigError(
+                f"{_label(cfg, module, key)} 的元素应全为字符串，收到 {item!r}"
+            )
+        out.append(item)
     return out
 
 

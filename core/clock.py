@@ -1,8 +1,8 @@
 """
-L0 — 时间与会话时钟。
+L1 — 时间与会话时钟。
 ======================
 唯一职责：把"当前时间"和"交易日坐标"（第几个时间桶、当日到期日、当前落在哪个
-会话区段）算清楚。**不读配置** —— 参数由调用方注入，本模块因此可以放在 L0。
+会话区段）算清楚。**不读配置** —— 参数由调用方注入，本模块因此可以放在 L1。
 
 **为什么要有时间源抽象**：生产下"现在"就是墙上时钟，但离线回归要把一整个交易日
 压进几秒钟跑完。两条路径必须共用同一套分桶逻辑，否则热力图横轴对不齐。所以本模块
@@ -100,7 +100,7 @@ class SessionClock:
     def now(self) -> float:
         """当前时间（epoch 秒）—— **实现 ``ClockPort``**。
 
-        本类会被当作时间源注入 L2 / L3，因此必须和 ``WallClock`` 一样满足
+        本类会被当作时间源注入 L3 / L5，因此必须和 ``WallClock`` 一样满足
         ``contracts.ports.ClockPort``。这个接口曾经缺失，后果是 ``TickStore.prune()``
         每 10 秒抛一次异常、被维护循环吞成一行警告 —— 表现是"裁剪从未真正发生"，
         而任何探针都看不见。回归见 ``tools/check_clock_protocol.py``。
@@ -256,7 +256,7 @@ class SessionClock:
         （周末等）``bucket_index()`` 会钳到边界桶，返回的就是边界那一段的 id。
 
         找不到时返回空串 —— 调用方据此走 fail-closed，而不是猜一个区段。
-        本方法是"按区段选数据来源"这类决策的唯一落点：把区段判定留在 L0，
+        本方法是"按区段选数据来源"这类决策的唯一落点：把区段判定留在 L1，
         上层就不必自己拿桶序号去比区间（那样等于把网格几何抄了第二份）。
         """
         index = self.bucket_index()
@@ -273,7 +273,12 @@ class SessionClock:
         return self._bucket_count
 
     def bucket_index(self) -> int:
-        """当前时间落在第几个桶，钳制到 ``[0, bucket_count - 1]``。"""
+        """当前时间落在第几个桶，钳制到 ``[0, bucket_count - 1]``。
+
+        ⚠️ 这是**时间读数**：它指向"正在走的那个桶"。矩阵列数与之相等
+        （``cols() == bucket_index``），因为矩阵只含**已走满**的桶（列取
+        ``0 .. bucket_index-1``）。见 `notes/memory/ARCHITECTURE.md §8`。
+        """
         raw = int(self.elapsed_s() // self._bucket_s)
         return min(max(raw, 0), self._bucket_count - 1)
 

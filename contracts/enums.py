@@ -2,7 +2,7 @@
 L0 — 枚举与常量字面量。
 ========================
 全部使用 ``StrEnum``，保证序列化成 JSON 时得到的是裸字符串（``"P"``）
-而不是 ``"OptionRight.PUT"``，避免 L4 层再做一次翻译。
+而不是 ``"OptionRight.PUT"``，避免 L6 层再做一次翻译。
 """
 
 from __future__ import annotations
@@ -67,7 +67,7 @@ class Quality(StrEnum):
 #: 允许写入热力图与参与 Skew 计算的质量标签。
 #:
 #: 这个判断**必须只有一处定义**。曾经它在特征编排器、热力图引擎、Skew 引擎里
-#: 各写了一遍，结果后两者漏掉了 ``GLITCH``——毛刺过滤器辛苦拦下来的分母效应
+#: 各写了一遍，结果后两者漏掉了 ``GLITCH`` —— 毛刺过滤器辛苦拦下来的分母效应
 #: 尖峰，转头就被写进了矩阵（实测能到 32 个波动率点）。语义上：
 #:
 #: * ``OK``      —— 正常，照写。
@@ -91,3 +91,25 @@ class SubscriptionAction(StrEnum):
     KEEP = "keep"
     ADD = "add"
     DROP = "drop"
+
+
+class SurfaceModelName(StrEnum):
+    """可用曲面模型。
+
+    值与 ``config/surface.json::active_model`` 一致 —— 配置里写字符串，
+    本层负责把它翻译成枚举并 fail fast（写错名字要立刻报错，不能静默退回 Raw）。
+    """
+
+    RAW = "RawSurface"
+    SVI = "SVI"
+    SSVI = "SSVI"
+
+    @staticmethod
+    def parse(value: str) -> "SurfaceModelName":
+        try:
+            return SurfaceModelName(value)
+        except ValueError as exc:
+            allowed = ", ".join(m.value for m in SurfaceModelName)
+            raise ValueError(
+                f"未知曲面模型 {value!r}，可选：{allowed}"
+            ) from exc

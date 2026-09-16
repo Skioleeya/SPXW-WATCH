@@ -1,5 +1,5 @@
 {
-  "_comment": "L3 特征层 — IV 冲量、毛刺过滤、25Δ Skew 定位。全部为纯计算参数，不涉及连接。",
+  "_comment": "L5 特征层 — IV 冲量、毛刺过滤、25Δ Skew 定位、曲面拟合节拍。全部为纯计算参数，不涉及连接。",
   "impulse_windows_seconds": [60, 300],
   "impulse_min_span_ratio": 0.6,
   "impulse_min_abs_iv": 0.01,
@@ -13,5 +13,8 @@
   "skew_target_delta": 0.25,
   "skew_delta_tolerance": 0.12,
   "skew_min_points": 3,
-  "heatmap_rows_each_side": 12
+  "heatmap_rows_each_side": 12,
+
+  "_surface_comment": "曲面拟合的节拍。⚠️ 曲面拟合是 **CPU 密集**的：实测单次 SVI 拟合（48 个点、5 个多起点）中位 618 ms、最坏 1439 ms，而推送节拍只有 400 ms。所以它**绝不能每轮 compute 都跑** —— 必须按本键限流，且 L8 调用时应当把它放到线程里（否则每 interval 秒会吞掉约 1.5 个推送周期）。曲面残差是慢变量诊断量，30 s 一次足够。",
+  "surface_refit_interval_s": 30.0
 }

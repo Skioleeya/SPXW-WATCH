@@ -1,5 +1,5 @@
 """
-L4 — 推送帧编码器。
+L6 — 推送帧编码器。
 ===================
 唯一职责：把 ``Frame``（L0 契约对象）编码成可以直接 ``json.dumps`` 的字典，
 以及最终的 JSON 文本。
@@ -16,7 +16,7 @@ L4 — 推送帧编码器。
 浏览器 ``JSON.parse`` 会直接抛错、整条推送链路静默死掉。关掉之后，一旦有
 漏网的 NaN 会在服务端立刻炸出来，而不是在前端变成一片空白。
 
-依赖：L0、L4（各编码器 / numeric）。
+依赖：L0、L6（各编码器 / numeric）。
 """
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ from serialization.cell_encoder import CellSerializer
 from serialization.heatmap_matrix import HeatmapSerializer
 from serialization.numeric import round_opt
 from serialization.skew_series import SkewSerializer
+from serialization.surface_encoder import SurfaceSerializer
 
 _CFG = "serialization"
 
@@ -40,12 +41,13 @@ _CFG = "serialization"
 class FrameEncoder:
     """Frame → dict / JSON 文本。"""
 
-    __slots__ = ("_heatmap", "_skew", "_cells", "_price_decimals")
+    __slots__ = ("_heatmap", "_skew", "_cells", "_surface", "_price_decimals")
 
     def __init__(self, serial_cfg: dict, clock) -> None:
         self._heatmap = HeatmapSerializer(serial_cfg)
         self._skew = SkewSerializer(serial_cfg, clock)
         self._cells = CellSerializer(serial_cfg)
+        self._surface = SurfaceSerializer(serial_cfg)
         self._price_decimals = loader.as_int(serial_cfg, "price_decimals", module=_CFG)
 
     # ------------------------------------------------------------------ #
@@ -64,10 +66,13 @@ class FrameEncoder:
             "heatmap": self._heatmap.encode(frame.heatmap),
             "skew": {
                 "series": self._skew.encode_series(frame.skew_series),
-                "latest": self._skew.encode_latest(
-                    frame.skew_series[-1] if frame.skew_series else None
-                ),
+                # ⚠️ 用 frame.skew（实时点），**不是** skew_series[-1]。
+                # 序列只含已走满的桶，末项最多比实时读数旧一整个桶（30 s）；
+                # 顶部读数用序列末项会滞后半分钟才跟上现价。两者语义不同，
+                # 见 contracts/frame.py::Frame 的 docstring。
+                "latest": self._skew.encode_latest(frame.skew),
             },
+            "surface": self._surface.encode(frame.surface),
             "cells": self._cells.encode(frame.cells),
         }
 

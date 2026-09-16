@@ -1,5 +1,5 @@
 """
-L3 — 旁路异步持久化。
+L5 — 旁路异步持久化。
 ========================
 把 HeatmapEngine 的原始 IV 桶异步写入 SQLite，服务重启时可恢复。
 
@@ -34,9 +34,9 @@ WebSocket 推送。队列满时新桶被静默丢弃（计数可见），主循�
 静默发生**。跨日那一刻产生的旧文件不在此处归档（本层无日志可记），留到下次启动。
 
 本模块只负责**队列、批量调度与序列化**；文件与表在
-``features/persistence_store.py``。
+``features/persistence_store.py``，历史归档在 ``features/persistence_archive.py``。
 
-依赖：L0。
+依赖：L0（config / contracts）与 L5 内部。
 """
 from __future__ import annotations
 

@@ -1,16 +1,16 @@
 """
-L1 — IBKR 行情服务编排器。
+L2 — IBKR 行情服务编排器。
 ===========================
 唯一职责：把网关、合约工厂、链解析、订阅协调、tick 路由串成一条"启动即出数据"
 的流水线，并实现 L0 的 ``FeedPort``。
 
-它是 L1 的对外门面：L6 组装层只认识 ``FeedPort``，完全不知道底下有 ``ib_async``。
+它是 L2 的对外门面：L8 组装层只认识 ``FeedPort``，完全不知道底下有 ``ib_async``。
 
-本模块**不 import 任何 L2 及以上的东西**。它需要知道现价才能算 ATM 窗口，
+本模块**不 import 任何 L3 及以上的东西**。它需要知道现价才能算 ATM 窗口，
 但这个现价由 ``acquisition.spot_tap.SpotTap`` 就地留存，而不是去读状态层的
-存储——否则就构成了 L1 → L2 的反向依赖。
+存储——否则就构成了 L2 → L3 的反向依赖。
 
-依赖：L0。
+依赖：L0（config / contracts）与 L1（core）。
 """
 from __future__ import annotations
 
@@ -340,8 +340,8 @@ class IbkrFeed:
     def _on_reconnect(self) -> None:
         self._note("IBKR 已重连，正在重建行情", StatusLevel.WARN)
         self._trigger_resubscribe()
-        # 通知组装层"连接已重建"。L1 不认识 L3，所以这里只报告事件；
-        # 要不要据此清空特征累积状态由 L6 按配置决定。
+        # 通知组装层"连接已重建"。L2 不认识 L5，所以这里只报告事件；
+        # 要不要据此清空特征累积状态由 L8 按配置决定。
         if self._reconnect_hook is not None:
             try:
                 self._reconnect_hook()

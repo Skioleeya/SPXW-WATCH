@@ -1,15 +1,85 @@
 # Project State
 
-ACTIVE_SESSION: 2026-09-15/period-wallclock-semantics
-LAST_UPDATED: 2026-09-15 08:4x —— **周期分组的"桶 vs 挂钟时间"议题结案：两者在本项目
-**数值等价**，KAI 裁定的"按挂钟整点分对齐"**已经成立**（网格起点 20:15:00 = 72900s，
-被 30/60/180/300/900 全整除；且 `session_grid` 强校验区段边界落在桶边界上）。
-本会话**未改任何业务逻辑**，只把等价性钉进 `web/period.js` 注释。
-KAI 另裁定"跨空档那两列不修"。见
-`notes/sessions/2026-09-15/period-wallclock-semantics/handoff.md`。
-⚠️ **本文件正文（§10 之前）仍是 2026-09-14 的快照**，其中"改动未提交"等陈述
-指的是当时那一刻，**不是现状**；现状以上面这行与 `notes/context/handoff.md` 为准。
+ACTIVE_SESSION: 2026-09-16/runtime-monitors
+LAST_UPDATED: 2026-09-16 09:0x —— **两只只读探针落地，四项要求全部验证成立；
+后端已按要求重启生效。**
+
+探针：`tmp/monitor_backend.py`（读 WS 原始帧判 T2/T3/T4）、
+`tmp/monitor_frontend.js`（Playwright 读**页面真实渲染的矩阵**判 T1–T4）。
+**后端全绿 ≠ 前端不抖** —— 帧到屏幕要过 5 道变换，故两者不可互替。
+
+**实测**（重启前后各一轮，四次全 PASS）：门禁 `16/16 RC=0`；
+出列即定稿 —— 后端 7133 格指纹 / 0 改写，前端显示 3385 + 基线 6796 格 / 0 改写；
+挂钟推进 —— 后端 3 列 + 前端 2 列新列**全部**落在整 30s / 60s；
+周期独立 —— 后端组和可加性 24 行 0 违反，前端跨档位对拍 144 列 / 3405 格吻合。
+
+**非空转**：后端解码器改坏 ⇒ RC=1 且明确报「**逐格判据在这帧上是空转的**」
+（没把"什么都没看"报成 PASS）；前端指纹键改回行号 ⇒ RC=1「改写 67870 处」。
+
+**重启**：旧 PID 1228 → 新 PID 20636，`08:59:41 流水线已就绪`，恢复 278 个历史桶；
+前端列数 **767（未归零）** ⇒ 历史跨重启保全。
+
+⚠️ **两个变异未激活**：后端 T3 恒真 / 前端 T4 不标记 —— 观测期内无真违例，
+变异体没被执行到 ⇒ **未验证，不冒充通过**。
+⚠️ **探针停在 `tmp/`**（按 KAI 明令不建常驻检查器）⇒ **无回归保护**。
+⚠️ **曲面残差前端仍未消费**（`web/` 读不到 `surface` 段）—— 另一件未开始的任务。
+⚠️ **本轮未提交**；工作区仍是大面积未提交的重写中间态（`HEAD = bedbf11`）。
+
+ACTIVE_SESSION_PREV: 2026-09-16/surface-residual-right
+LAST_UPDATED_PREV: 2026-09-16 05:xx —— **曲面残差方向字段落地（KAI 选方案 B）**。
+`SurfaceResidual` 新增 `right` 字段，`SurfaceInputPort.id_map` 改**三元组**
+`(expiry, strike, right)` 把方向透传到帧。**原版数值口径全部未变**
+（`pivot_table` 仍对同档两侧取 mean；残差仍报单侧 IV 与它的差）。
+
+**实测**：门禁 **16/16 RC=0**；`l2l3` 37/0 · `l5` 32/0 · `l6` **41/0**（新增 2 条）·
+`l8` 30/0 · `web_e2e` 34/0 · **新建** `tmp/verify_residual_right.py` **15/0**
+（夹具喂 Put IV ≠ Call IV ⇒ 同档两条残差最小差 **1.0 波动率点**，
+`model_iv` 两侧仍 **25/25 完全一致** ⇒ 拟合确实未受影响）。
+**非空转**：`id_map` 改回二元组 ⇒ 4 条 FAIL；编码器删 `"right"` ⇒ 1 条 FAIL；
+两者还原后**逐字节**回原状。
+
+⚠️ **前端尚未消费**（`web/` 完全不读 `surface` 段）—— 残差图是另一件未开始的任务。
+
+ACTIVE_SESSION_PREV: 2026-09-15/gate-tools-rewrite
+LAST_UPDATED_PREV: 2026-09-15 14:4x —— **`#15 tools/` 门禁重写完成（覆盖 5/16 → 16/16）+
+`README.md` 按 9 层架构重写。** KAI 明令「**必须重写，禁止移植失败品**」——
+旧项目 `tools/` 的 43 个文件虽在 `HEAD` 里完好，但**层号口径不同**
+（旧 `serialization` = **L4**、新 = **L6**），机械移植会让 `[2]` 的层号判据整体错位
+且**不报错**（门禁自己静默失效）⇒ 16 项全部按新架构重写，未从 `HEAD` 移植一行。
+
+**实测结论（可复现，全部用 `venv/Scripts/python.exe`）**：
+`run.py --check` **16/16 RC=0** · `selfcheck.py --selftest` **16/16 全抓 RC=0**（2m06s）·
+四个冒烟 + web 对拍 **172 条判据全绿**（`l2l3` 37 / `l5` 32 / `l6` 39 / `l8` 30 /
+`web_e2e` 34）· `check_web_contract --offline --selftest` RC=0。
+
+**本轮抓到的真缺陷**：① `config/transport.json::bucket_seconds_s` 是**真死键 +
+描述不存在机制的注释**（上一轮移植时凭空补的，旧项目 `HEAD` 里根本没有）⇒ 删键；
+② `[7]` 的**键转发器覆盖盲区**（`_param_pairs(cfg, key, ...)` 把键名当参数转发 ⇒
+5 个活键被误报死键）⇒ 新建 `selfcheck_reads.py` 两遍 AST 扫描（当轮假红消失；
+⚠️ 读取点计数随代码变化，**不抄写**，要引用实跑 `[7]`）；
+③ 配置注释里 **6 处引用不存在的检查器** ⇒ 逐条标注"**待建**"。
+
+**待做**：`tools/` 下 **8 个独立检查器仍待建**（`check_matrix_codec` /
+`check_grid_contract` / `check_period_aggregation` / `check_session_grid` /
+`check_surface_payload` / `check_reconnect_gap` / `check_window_tolerance` /
+`check_ws_compression` / `ws_probe`）。⚠️ **`check_grid_contract.py` 尚未建 =
+当前最大的门禁缺口**。状态表见 `README.md §6`。
+⚠️ **KAI 明示待定、本轮未做**：在线验证；曲面残差无方向字段。
+⚠️ **工作区脏态大**（`git status --short` = **133 项**，含 43 个 `D`）—— **未提交**。
+
+见 `notes/sessions/2026-09-15/gate-tools-rewrite/handoff.md`（上一轮 `#8–#14` 见
+`notes/sessions/2026-09-15/rebuild-from-original/handoff.md`）。
+新架构：`notes/memory/ARCHITECTURE.md`（§16 已重写为 16/16）。
+**`notes/` 已从 `HEAD = bedbf11` 恢复**；旧 `ARCHITECTURE.md` 归档为
+`notes/context/archive/ARCHITECTURE_pre_rewrite.md`；`QUICKREF/RULES/TROUBLESHOOTING`
+仍带"待按新实现复核"横幅。
 ARCHIVE: notes/context/archive/project_state_2026-09.md
+
+⚠️ **2026-09-15 白纸重写 —— 以下正文是重写前的记录。**
+`spxw_swatch` 源码已被清空，基于 `live-volatility-surface`（原版）重写。
+本文件正文（旧实现的状态/待办/交接）**保留作历史**：其中的纪律与教训继续有效，
+但文件路径、检查器名、模块名可能已变。**重写进度以本文件顶部的新块为准。**
+
 
 <!-- ↓↓↓ 以下为 2026-09-14 webgl-to-echarts 会话的历史快照，不 retro-fit ↓↓↓ -->
 

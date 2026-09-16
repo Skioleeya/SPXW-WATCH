@@ -1,12 +1,12 @@
 """
-L1 — IBKR 错误码翻译器。
+L2 — IBKR 错误码翻译器。
 ========================
 把网关层抛来的原始 (reqId, code, message) 翻译成项目内部的状态动作
 （退避、重建订阅、记录日志等）。
 
 本模块是纯逻辑，不持有任何网络连接或异步状态。
 
-依赖：L0。
+依赖：L0（config / contracts）与 L1（core）。
 """
 from __future__ import annotations
 

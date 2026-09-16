@@ -1,5 +1,5 @@
 """
-L4 — 25Δ 偏度与平值读数编码。
+L6 — 25Δ 偏度与平值读数编码。
 ==============================
 唯一职责：把 ``SkewPoint`` 序列与 ``AtmSnapshot`` 编码成前端折线图与顶部读数
 所需的 JSON。
@@ -13,7 +13,7 @@ ECharts 的 ``dataset`` 原生支持列式输入。
 时间轴同时给 ``ts``（epoch 秒）与 ``label``（市场时区 HH:MM）——只用 epoch
 的话，前端拿浏览器本地时区去格式化，非美东的用户会看到错位的时间轴。
 
-依赖：L0、L4（numeric）。
+依赖：L0、L6（numeric）。
 """
 
 from __future__ import annotations

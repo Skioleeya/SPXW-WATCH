@@ -6,9 +6,9 @@ L0 — 层间契约层。
 
 分层的核心思想
 --------------
-* ``tick.py``     L1 → L2 的载荷
-* ``feature.py``  L3 → L4 的载荷
-* ``frame.py``    L4 → L5 的载荷
+* ``tick.py``     L2 → L3 的载荷
+* ``feature.py``  L5 → L6 的载荷（含曲面模型的输出契约）
+* ``frame.py``    L6 → L7 的载荷
 * ``ports.py``    各层之间互相通信所用的接口
 
 只要层与层之间只通过本包通信，依赖方向就永远是单向的，也不可能出现循环引用。
@@ -22,6 +22,7 @@ from contracts.enums import (
     Quality,
     StatusLevel,
     SubscriptionAction,
+    SurfaceModelName,
 )
 from contracts.feature import (
     AtmSnapshot,
@@ -29,20 +30,25 @@ from contracts.feature import (
     HeatmapMatrix,
     ImpulseCell,
     SkewPoint,
+    SurfaceResidual,
+    SurfaceSummary,
     WindowDelta,
 )
-from contracts.frame import Frame, HealthBlock, SessionBlock
+from contracts.frame import Frame, HealthBlock, SessionBlock, SessionZone
 from contracts.ports import (
     ClockPort,
     FeedPort,
     FrameSink,
     FrameSource,
     PayloadSource,
+    SurfaceInputPort,
+    SurfaceModelPort,
     TickSink,
 )
 from contracts.tick import (
     ChainSlice,
     FeedStatus,
+    FutureTick,
     OptionRef,
     OptionTick,
     QuoteTick,
@@ -63,6 +69,7 @@ __all__ = [
     "Frame",
     "FrameSink",
     "FrameSource",
+    "FutureTick",
     "HealthBlock",
     "HeatmapMatrix",
     "ImpulseCell",
@@ -74,11 +81,17 @@ __all__ = [
     "QuoteTick",
     "RateLimitStatus",
     "SessionBlock",
+    "SessionZone",
     "SkewPoint",
     "SpotTick",
     "StatusEvent",
     "StatusLevel",
     "SubscriptionAction",
+    "SurfaceInputPort",
+    "SurfaceModelName",
+    "SurfaceModelPort",
+    "SurfaceResidual",
+    "SurfaceSummary",
     "TRUSTWORTHY_QUALITIES",
     "TickSink",
     "WindowDelta",

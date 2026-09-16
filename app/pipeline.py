@@ -1,8 +1,8 @@
 """
-L6 — 组装根（Composition Root）。
+L8 — 组装根（Composition Root）。
 ==================================
-唯一职责：读配置、按 L0 → L5 的顺序把各层实例化并接线，然后驱动两条循环
-（特征计算、内存裁剪）。
+唯一职责：读配置、按 L0 → L7 的顺序把各层实例化并接线，然后驱动三条循环
+（特征计算、内存裁剪、统计日志）。
 
 本文件是整个工程里**唯一**允许同时 import 所有层的模块。其它任何文件出现
 "跨层 import" 都是架构违规。它本身不含业务逻辑：所有决策（窗口多大、几秒
@@ -12,11 +12,11 @@ L6 — 组装根（Composition Root）。
 ------------------
 ::
 
-    feed (L1)  ──tick──▶  store (L2)  ──series──▶  engine (L3)
+    feed (L2)  ──tick──▶  store (L3)  ──series──▶  engine (L5)
                                                         │
                                                       bundle
                                                         ▼
-                              server (L5)  ◀──json──  builder (L4)
+                              server (L7)  ◀──json──  builder (L6)
 
 反向没有任何一条路径：传输层拿不到 store，特征层拿不到 socket，行情层不知道
 特征层的存在。这正是"前端卡顿不影响行情连接"的结构保证。
@@ -31,15 +31,19 @@ from pathlib import Path
 from typing import Any
 
 from config import loader
+from contracts.enums import FeedMode
 from core.clock import SessionClock, WallClock
 from core.logging_setup import configure, get_logger
 
+from models.surface_adapter import SurfaceModelAdapter
 from state.market_state import MarketState
 from state.tick_store import TickStore
 from features.feature_engine import FeatureEngine
 from features.persistence import AsyncPersistenceWriter
 from serialization.payload_builder import PayloadBuilder
 from transport.server import TransportServer
+
+from app.persistence_boot import boot_persistence
 
 _APP = "app"
 _PIPE = "pipeline"
@@ -69,9 +73,23 @@ class Pipeline:
         self._store = TickStore(self._cfg["state"], self._clock)
         self._market = MarketState(self._store, self._cfg["state"], self._clock)
         self._writer = AsyncPersistenceWriter(self._cfg["persistence"])
+        # 曲面模型（L4）。无参构造 ⇒ 模型名由 ``config/surface.json::active_model``
+        # 决定；写错立刻抛错（``SurfaceModelName.parse`` 是 fail-fast，
+        # 原版"未知模型名就静默退回 SVI"那条路径已删除）。
+        self._surface_model = SurfaceModelAdapter()
+        # ``is_delayed`` 必须是 **callable**：``SurfaceEngine`` 在每次重拟合时才求值，
+        # 而不是构造时取一次快照（行情模式在运行期可能变）。
+        # 口径取 ``IbkrFeed.mode``，不在这里重读 ``market_data_type`` ——
+        # 那份推导的唯一归属是 ``IbkrFeed``（``FeedMode.from_market_data_type``），
+        # 再抄一遍就是第二份真相。
+        # 只有明确 LIVE 才算实时，其余（delayed / frozen / delayed_frozen / unknown）
+        # 一律按延迟处理 ⇒ 用更宽的 ``delayed_max_iv_age_s``（300s vs 45s）：
+        # 宁可多收几个稍旧的 IV，也不要静默丢数据。
+        self._is_delayed = lambda: self._feed.mode != FeedMode.LIVE
         self._engine = FeatureEngine(
             self._store, self._clock, self._cfg["features"],
-            self._cfg["serialization"], self._writer,
+            self._cfg["serialization"], self._surface_model, self._is_delayed,
+            self._writer,
         )
         self._builder = PayloadBuilder(self._market, self._cfg["serialization"], self._clock)
         self._server = TransportServer(
@@ -97,7 +115,7 @@ class Pipeline:
         用 ``app.sessions`` 建会话时钟。
 
         ``sessions`` 是**唯一的会话真相**（GTH 20:15→09:25、RTH 09:30→16:00），
-        网格锚在首个会话开盘、可跨午夜。桶宽来自 L4 的配置：热力图横轴的时间
+        网格锚在首个会话开盘、可跨午夜。桶宽来自 L6 的配置：热力图横轴的时间
         粒度是序列化层的形状参数，时钟只是按它铺格。
 
         ``SessionClock`` 自己校验"会话时长 + 空档能否被桶宽整除"，铺不满就
@@ -129,7 +147,7 @@ class Pipeline:
 
     def _on_feed_reconnect(self) -> None:
         """
-        行情源重连成功后的回调（L1 通过 ``FeedPort.set_reconnect_hook`` 触发）。
+        行情源重连成功后的回调（L2 通过 ``FeedPort.set_reconnect_hook`` 触发）。
 
         为什么要清空特征状态
         --------------------
@@ -140,7 +158,7 @@ class Pipeline:
 
         为什么这条链路要绕组装层
         ------------------------
-        L1 不认识 L3，直接调用就是反向依赖。所以 L1 只报告"我重连了"，由组装层
+        L2 不认识 L5，直接调用就是反向依赖。所以 L2 只报告"我重连了"，由组装层
         决定要不要清状态 —— 这是本项目唯一允许同时看见两层的角色。
 
         默认不清（``reset_feature_state_on_reconnect=false``）。清空的代价是
@@ -171,45 +189,10 @@ class Pipeline:
             )
         self._log.info("界面地址 %s | 行情通道 %s", self._server.url, self._server.ws_url)
 
-        # 会话身份（当日到期日）是持久化的**落点**：它同时决定这一轮写进哪个
-        # 文件、以及重启时从哪个文件恢复。网格跨午夜而到期日不跨，所以 0DTE 的
-        # 到期日就是会话身份（见 core/session_grid.py）。
-        session_key = self._clock.expiry_str()
-        archived, held_back = await self._writer.start(session_key)
-        if archived:
-            # 保留策略 = db_dir 只留当前会话，历史**归档不删**。归档必须留痕：
-            # features/ 整层不写日志，这行是唯一能看到"搬了哪几个文件"的地方。
-            self._log.info(
-                "已归档 %d 个历史会话文件到 %s（db_dir 只留当前会话）: %s",
-                len(archived), self._writer.archive_dir, "、".join(archived),
-            )
-        if held_back:
-            # 冲突比成功更显眼：归档目录同名**不覆盖** ⇒ 源文件仍留在 db_dir，
-            # "db_dir 只留当前会话"这条不变量此刻**不成立**，必须看得见。
-            self._log.warning(
-                "有 %d 个历史会话文件未归档（归档目录已有同名，不覆盖）: %s",
-                len(held_back), "、".join(held_back),
-            )
-        if self._writer.legacy_dropped_count:
-            self._log.warning(
-                "丢弃 %d 行无会话身份的旧持久化数据（旧表缺 session_key 列，"
-                "无法判断归属哪个交易日）", self._writer.legacy_dropped_count,
-            )
-        self._log.info("持久化落点 %s（会话 %s，同日内重启续写同一文件）",
-                       self._writer.session_path, session_key)
-        # 恢复必须限定在**本会话**：桶序号是日内坐标、每个交易日复用，
-        # 不带会话身份就会把别的交易日的数据当成今天的（见 persistence 模块）。
-        recovered = self._writer.recover(session_key)
-        if recovered:
-            self._engine.restore_heatmap(recovered)
-            self._log.info("已从 SQLite 恢复 %d 个历史桶（会话 %s）",
-                           len(recovered), session_key)
-
-        recovered_skew = self._writer.recover_skew(session_key)
-        if recovered_skew:
-            self._engine.restore_skew(recovered_skew)
-            self._log.info("已从 SQLite 恢复 %d 个历史 Skew 点（会话 %s）",
-                           len(recovered_skew), session_key)
+        # 启动期的持久化接回：打开本会话文件、归档别的会话、恢复历史桶与 Skew。
+        # 拆在 ``app/persistence_boot.py`` —— 它只在启动时跑一次、与运行期循环无关，
+        # 单独一个文件才能守住 400 行门禁（组装根要容纳装配 + 生命周期 + 三条循环）。
+        await boot_persistence(self._writer, self._engine, self._clock, self._log)
 
         self._feed.set_sink(self._store)
         self._running = True
@@ -303,7 +286,7 @@ class Pipeline:
         """
         特征计算循环。
 
-        它是"生产者"，只做一件事：算一轮 → 交给 L4 编码。传输层是否有人在听、
+        它是"生产者"，只做一件事：算一轮 → 交给 L6 编码。传输层是否有人在听、
         前端是否卡住，在这里完全不可见。
         """
         interval = (
@@ -322,7 +305,7 @@ class Pipeline:
                 self._log.exception("特征计算异常: %s", exc)
 
     async def _prune_loop(self) -> None:
-        # 节奏取自 L2 自己的配置，而不是 pipeline.json —— 裁剪间隔是状态层的
+        # 节奏取自 L3 自己的配置，而不是 pipeline.json —— 裁剪间隔是状态层的
         # 参数，组装层只负责按它驱动循环。
         interval = self._store.prune_interval_s
         while self._running:

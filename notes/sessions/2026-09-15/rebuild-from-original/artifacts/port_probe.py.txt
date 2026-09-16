@@ -1,0 +1,197 @@
+"""
+tmp/port_probe.py —— 曲面模型移植对拍探针（一次性工具，不进 400 行门禁）
+=====================================================================
+
+用途
+----
+把「同一个合成行情喂给两套 models/」的结果规范化成 JSON，供对拍：
+
+    原版   E:/US.market/SPXW SWATCH/live-volatility-surface/models/
+    移植版 E:/US.market/SPXW SWATCH/spxw_swatch/models/
+
+为什么必须冻结时钟
+------------------
+两条时间依赖会让结果随"跑的那一天"变：
+
+1. ``raw_cleaning.build_clean_surface()`` 用 ``time.time()`` 算 tick 年龄；
+2. ``svi_fit.year_fraction_from_expiry()`` 用 ``pd.Timestamp.now()`` 算 TTE。
+
+不冻结的话，今天生成的金标准明天就对不上 —— 那不是移植有差异，是探针自己漂移。
+所以这里把 ``time.time`` 与 ``pd.Timestamp.now`` 都钉死在 ``_FIXED_NOW``。
+
+用法
+----
+    python tmp/port_probe.py --root <仓库根> --out <输出.json>
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import time as _time
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+# ── 冻结时钟（必须在 import models 之前生效） ───────────────────────────────
+_FIXED_NOW = 1_789_400_000.0          # 2026-09-15T12:13:20Z 附近，固定值
+_FIXED_STAMP = pd.Timestamp("2026-09-15 12:00:00")
+
+_time.time = lambda: _FIXED_NOW        # type: ignore[assignment]
+pd.Timestamp.now = classmethod(       # type: ignore[assignment]
+    lambda cls, tz=None: _FIXED_STAMP
+)
+
+# 固定到期日（不依赖 date.today()，否则金标准隔天失效）
+EXPIRIES = ["20261218", "20270115", "20270219", "20270618"]
+SPOT = 480.0
+
+
+def make_app():
+    """
+    构造与 ``LiveSurfaceApp`` 同形的合成行情。
+
+    只暴露曲面模型真正读的 5 个属性（iv_dict / id_map / quote_dict /
+    spot_price / is_delayed）—— 这正是 ``contracts.ports.SurfaceInputPort``
+    逐字核出的耦合面。
+    """
+    import datetime
+
+    rng = np.random.default_rng(seed=20260915)
+
+    app = type("MockApp", (), {})()
+    app.spot_price = SPOT
+    app.is_delayed = False
+    app.iv_dict = {}
+    app.id_map = {}
+    app.quote_dict = {}
+
+    strikes = np.round(np.linspace(SPOT * 0.88, SPOT * 1.12, 24), 1)
+    req_id = 5000
+
+    for expiry in EXPIRIES:
+        exp_dt = datetime.datetime.strptime(expiry, "%Y%m%d")
+        T = max((exp_dt - datetime.datetime(2026, 9, 15)).days, 1) / 365.25
+
+        atm = 0.18 + 0.35 * T
+        for strike in strikes:
+            k = np.log(strike / SPOT)
+            iv = atm - 0.55 * k + 2.4 * k * k          # 负偏 + 微笑
+            iv += rng.normal(0.0, 0.0006)              # 可复现的观测噪声
+            iv = max(iv, 0.02)
+
+            app.iv_dict[req_id] = {
+                "iv": float(iv),
+                "time": _FIXED_NOW - 2.0,
+                "optPrice": float(max(strike * 0.01, 0.5)),
+                "undPrice": SPOT,
+                "tickType": 106,
+            }
+            app.id_map[req_id] = (expiry, float(strike))
+            app.quote_dict[req_id] = {
+                "bid": float(max(strike * 0.0095, 0.4)),
+                "ask": float(max(strike * 0.0105, 0.6)),
+                "last": None,
+                "close": None,
+                "bidSize": 10,
+                "askSize": 10,
+                "lastSize": None,
+                "quote_time": _FIXED_NOW - 1.0,
+            }
+            req_id += 1
+
+    return app
+
+
+def _jsonable(value):
+    """把 DataFrame / ndarray / numpy 标量递归转成可 JSON 化的结构。"""
+    if isinstance(value, pd.DataFrame):
+        return {
+            "index": [str(x) for x in value.index.tolist()],
+            "columns": [str(x) for x in value.columns.tolist()],
+            "values": [[_jsonable(v) for v in row] for row in value.to_numpy().tolist()],
+        }
+    if isinstance(value, np.ndarray):
+        return [_jsonable(v) for v in value.tolist()]
+    if isinstance(value, (np.floating, float)):
+        f = float(value)
+        return None if f != f else round(f, 9)
+    if isinstance(value, (np.integer, int)):
+        return int(value)
+    if isinstance(value, (np.bool_, bool)):
+        return bool(value)
+    if isinstance(value, dict):
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v) for v in value]
+    if value is None or isinstance(value, str):
+        return value
+    return repr(value)
+
+
+# diagnostics() 里这些键是"模型内部细节"，原版与移植版形状不同也不该对拍：
+#   svi_params / fit_details / fit_summary 承载 ndarray 与 DataFrame，
+#   它们是模型内部状态，不属于跨层契约（L0 SurfaceSummary 也不带它们）。
+_DIAG_DROP = {"svi_params", "fit_details", "fit_summary"}
+
+
+def probe_model(cls, app, label):
+    model = cls()
+    model.fit(app)
+
+    diag = {k: v for k, v in model.diagnostics().items() if k not in _DIAG_DROP}
+
+    probes = []
+    for expiry in EXPIRIES:
+        for strike in (SPOT * 0.95, SPOT, SPOT * 1.05):
+            probes.append([expiry, round(strike, 4), _jsonable(model.iv(expiry, strike))])
+
+    return {
+        "stats": _jsonable(model.stats()),
+        "diagnostics": _jsonable(diag),
+        "surface": _jsonable(model.surface()),
+        "clean_df": _jsonable(model.clean_df()),
+        "residuals": _jsonable(model.residuals()),
+        "iv_probes": probes,
+    }
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--root", required=True, help="仓库根（其下应有 models/ 包）")
+    ap.add_argument("--out", required=True)
+    args = ap.parse_args()
+
+    root = str(Path(args.root).resolve())
+    # 只保留标准库路径 + 目标仓库根：确保 import models 命中指定那一套
+    sys.path[:] = [root] + [p for p in sys.path if p and Path(p).resolve() != Path.cwd()]
+
+    from models.raw_surface_model import RawSurfaceModel
+    from models.ssvi_surface_model import SSVISurfaceModel
+    from models.svi_surface_model import SVISurfaceModel
+
+    print(f"[probe] models 来自: {Path(__import__('models').__file__).resolve()}")
+
+    app = make_app()
+    result = {
+        "root": root,
+        "expiries": EXPIRIES,
+        "spot": SPOT,
+        "models": {
+            "RawSurface": probe_model(RawSurfaceModel, app, "RawSurface"),
+            "SVI": probe_model(SVISurfaceModel, app, "SVI"),
+            "SSVI": probe_model(SSVISurfaceModel, app, "SSVI"),
+        },
+    }
+
+    Path(args.out).write_text(
+        json.dumps(result, ensure_ascii=False, indent=1, sort_keys=True),
+        encoding="utf-8",
+    )
+    print(f"[probe] 已写出 {args.out}")
+
+
+if __name__ == "__main__":
+    main()

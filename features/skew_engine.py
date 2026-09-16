@@ -1,5 +1,5 @@
 """
-L3 — 25Δ Skew 引擎。
+L5 — 25Δ Skew 引擎。
 ====================
 唯一职责：从一批网格点里算出 25Δ 偏度，并维护一条按时间桶去重的折线序列。
 
@@ -17,7 +17,7 @@ L3 — 25Δ Skew 引擎。
 前端折线会被噪声糊死。这里以热力图的时间桶（默认 60 秒）为粒度，同一桶内只
 保留最后一次读数，序列长度天然被会话长度封顶。
 
-依赖：L0、L3（DeltaLocator）。
+依赖：L0（config / contracts）与 L5（``DeltaLocator``）。
 """
 
 from __future__ import annotations
@@ -131,9 +131,18 @@ class SkewEngine:
             for key in [k for k in self._series if k < cutoff]:
                 del self._series[key]
 
-    def series(self) -> tuple[SkewPoint, ...]:
-        """按时间升序返回折线序列。"""
-        return tuple(self._series[k] for k in sorted(self._series))
+    def series(self, moment: float) -> tuple[SkewPoint, ...]:
+        """
+        按时间升序返回折线序列，**只含已走满的桶**。
+
+        与热力图矩阵同一条契约（见 ``heatmap_engine`` 模块 docstring 的核心契约）：
+        正在走的那个桶里的 Skew 点还会被覆盖 ⇒ 出了线就会让曲线末端持续跳动。
+        所以这里按 ``last_done = bucket_index_of_ts(moment) - 1`` 过滤。
+
+        ``latest()`` **不受影响** —— 顶栏那个实时读数要的就是最新值，它不是网格。
+        """
+        last_done = self._clock.bucket_index_of_ts(moment) - 1
+        return tuple(self._series[k] for k in sorted(self._series) if k <= last_done)
 
     def latest(self) -> SkewPoint | None:
         return self._latest

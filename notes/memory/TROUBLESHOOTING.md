@@ -1,5 +1,13 @@
 # 核心避坑指南（已踩坑记录）
 
+> ⚠️ **2026-09-15 白纸重写 —— 本文件尚未按新实现复核。**
+> `spxw_swatch` 源码已被清空，正在基于 `live-volatility-surface`（原版）重写
+> （见 `notes/sessions/2026-09-15/rebuild-from-original/`）。本文件是从 `HEAD = bedbf11`
+> 恢复的**旧实现记录**：其中的**工程纪律、根因分析、教训**继续有效，
+> 但提到的**文件路径 / 检查器名 / 模块名可能已变**。重写推进到对应层时逐条复核，
+> 复核过的条目请在行尾标 `[已复核 2026-09-15]`。
+> 新旧架构对照：新 → `notes/memory/ARCHITECTURE.md`；旧 → `notes/context/archive/ARCHITECTURE_pre_rewrite.md`。
+
 > 本文件 = T1 层：已验证的陷阱、已证伪的假设、踩过的坑。
 > **分工**：错了**会立刻报错**的放本文件；错了**只出错值、不报错**的放 `QUICKREF.md`（速查卡）。
 > 更新时同步改 `MEMORY.md` §3 的时间戳。

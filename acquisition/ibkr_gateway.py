@@ -1,11 +1,12 @@
 """
-L1 — IBKR 连接网关。
+L2 — IBKR 连接网关。
 ====================
 唯一职责：管理 ``ib_async.IB`` 实例的生命周期——连接、断线重连、行情订阅原语、
 以及把 IBKR 的三类事件（行情更新 / 错误 / 断连）转成回调。
 
-本模块是 L1 中仅有的两个 import ``ib_async`` 的文件之一。上层拿到的永远是
-原始 ``Ticker`` / 错误码，**不含任何业务判断**——错误码语义（哪些是限流、
+本模块是 L2 中**直接** import ``ib_async`` 的两个文件之一（另一个是
+``contract_factory``；层内依赖边界见本包 ``__init__`` docstring）。上层拿到的
+永远是原始 ``Ticker`` / 错误码，**不含任何业务判断**——错误码语义（哪些是限流、
 哪些需要重订阅）由 ``feed_service`` 翻译。
 
 安全设计
@@ -18,7 +19,7 @@ L1 — IBKR 连接网关。
 ``acquisition.rate_limit_watch.RateLimitWatch`` 负责 —— 那是库层概念，与本模块的
 "连接生命周期"不是同一个职能。这里只调用它的 ``apply()`` / ``snapshot()``。
 
-依赖：L0、L1（``rate_limit_watch``）。
+依赖：L0、L1（core）、L2（``rate_limit_watch``）。
 """
 
 from __future__ import annotations

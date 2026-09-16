@@ -1,5 +1,5 @@
 """
-L1 — Tick 归一化路由。
+L2 — Tick 归一化路由。
 ======================
 唯一职责：把 IBKR 推来的 ticker 对象翻译成 L0 契约里的不可变 DTO，并推给
 ``TickSink``。
@@ -11,16 +11,16 @@ L1 — Tick 归一化路由。
 只有当 ``use_model_greeks`` 为假时，才退一步使用 last / bid / ask 三档
 greeks（``tickType`` 12/10/11）作为补充。
 
-本模块不 import ``ib_async``：全部按鸭子类型访问属性。好处是离线模拟器可以
-复用同一套归一化规则，且 L1 对第三方库的依赖面被压缩到两个文件。
+本模块不 import ``ib_async``：全部按鸭子类型访问属性。好处是离线夹具可以
+复用同一套归一化规则，且 L2 对第三方库的依赖面被压缩到两个文件。
 
 三类 ticker 的分流
 ------------------
-指数（标的）/ 期货 / 期权。期货那一支**不进** ``TickSink``：它只服务 L1 内部的
+指数（标的）/ 期货 / 期权。期货那一支**不进** ``TickSink``：它只服务 L2 内部的
 现货合成（GTH 时段），出口是**显式注入**的 ``future_sink`` —— 理由见
 ``contracts.tick.FutureTick`` 的说明。
 
-依赖：L0。
+依赖：L0（config / contracts）与 L1（core）。
 """
 
 from __future__ import annotations

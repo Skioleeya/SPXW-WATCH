@@ -2,7 +2,278 @@
 
 Archive: notes/context/archive/open_tasks_2026-09.md
 
-## Active
+## Active —— 重写（2026-09-15 起，唯一现行待办）
+
+- [ ] **[高] 按 L0→L8 顺序完成白纸重写**（会话：`rebuild-from-original`）
+  - [x] **#8 设计定稿** → `notes/memory/ARCHITECTURE.md`
+  - [x] **#9 L0/L1** `config/` + `contracts/` + `core/`（已实测：import 自检 + fail-fast 7/7）
+  - [x] **#11 L4** `models/`（原版移植，差分对拍零差异；拆 12 文件；33 常量进 `config/surface.json`）
+  - [x] **#10 L3 `state/` + L2 `acquisition/`（`ib_async`）** —— 整目录移植，逐行 diff
+        归类确认**零内容改动**（57 条全是层号/措辞）；冒烟 **37/37** + 变异反证
+        （`max_iv` 3.0→0.05 ⇒ 4 条 FAIL）；`ib_async` 边界实测 **14 个模块里 3 个拉起**；
+        行数门禁全库复扫 **0 违规**（详见 `ARCHITECTURE.md §12`）
+  - [x] **#12 L5 `features/`** —— 整目录移植（只改层号引用，脚本化 `tmp/port_features_layer_refs.py`
+        全部命中）+ 三个入口约束全部落地：
+        ① `features/surface_engine.py`（273 行）把 L3 存储翻译成 `SurfaceInputPort`
+        的真形状（**按 reqId 索引的三张平行表**，见下条契约缺陷）；
+        ② `residuals` 上限**刻意未做** —— 属 L6 载荷预算决策，现在加就是死配置键；
+        ③ `heatmap_engine` 守住"只含已走满的桶"：列取 `0..current-1`，参数改名
+        `current → last_done`（漏改即 `NameError`），`skew_engine.series(moment)` 同步过滤。
+        实测：冒烟 **PASS 32 / FAIL 0**；变异反证（`last_done = current` + `[:current+1]`）
+        ⇒ 失败判据 **0 → 7 条**、**「颜色锁定」变红**（差异格数 21）⇒ 非空转成立；
+        行数门禁全库 **61 文件 / 0 违规**。
+        ⚠️ 过程中解决一个**结构冲突**（KAI 拍板「只订阅 0 DTE」）：原版曲面层写死
+        `num_expiries >= 2`，而本项目只订阅一个到期日 ⇒ SVI 永不拟合且**不抛异常**。
+        门槛搬进 `config/surface.json`（`min_expiries: 1`），配置对照实测
+        Q1 `fitted=1/1` vs Q2 `fitted=0/1`。
+        ⚠️ 另修一个**真契约缺陷**：`contracts/ports.py::SurfaceInputPort` 的 docstring
+        形状与消费方代码不符（照错形状写 ⇒ 曲面恒为空且不报错）。
+        详见 `ARCHITECTURE.md §13`（含 13.4「判据全绿其实空转」的根因与修法）
+  - [x] **#13 L6 `serialization/` + L7 `transport/` + L8 `app/` + `run.py`** ——
+        来源 = **旧项目 HEAD** `_ref_spxw_head`（原版 `live-volatility-surface`
+        **没有**这三层，只有 `models/` + 单体脚本）。层号改写用通用脚本
+        `tmp/port_layer_refs.py`（占位符双阶段 + `tmp/.ported_dirs.json` 防重复跑）：
+        `serialization` 31 处 / `transport` 14 处 + 措辞 1 处 / `app` 16 处，
+        逐行 diff 确认**零逻辑改动**。
+        ⚠️ 补了三处**静默缺口**（旧版 `build()` 是逐字段搬运，而新 `Frame` 多了字段
+        ⇒ 漏传不报错，只让字段恒为 `None`）：
+        ① `bundle.surface` 没搬 ⇒ 帧里 surface 恒为 `null`；
+        ② `Frame` 缺 `skew` 字段（实时点），`build()` 也没搬；
+        ③ `skew.latest` 取 `skew_series[-1]` —— 新语义下序列只含已走满的桶
+        ⇒ 顶栏读数滞后一整个桶（30 s）。修法：`Frame` 加 `skew` 字段 + 编码器取它。
+        实测：`tmp/l6_smoke.py` **39/0**（变异 `surface` ⇒ 7 红、`latest` ⇒ 2 红）；
+        `tmp/l8_smoke.py` **30/0**（变异 `session_key` ⇒ 2 红）；
+        `l2l3` 37/0 + `l5` 32/0 回归全绿；**全库 71 模块 import 全通**；
+        层号一致性核对（模块头 / 带模块名的引用 / 依赖行）**错配 0**；
+        行数门禁 **79 文件 / 0 违规**（`pipeline.py` 拆出 `persistence_boot.py`：
+        381 + 曲面接线 ≈ 394 → **364 行**）。详见 `ARCHITECTURE.md §14`
+  - [x] **#14 `web/` 前端（ECharts）** —— 来源 `_ref_spxw_head/web/`（18 个文件）。
+        **改动性质：零改动** —— `git status --short web/` 为空 ⇒ 与 `HEAD`（`bedbf11`）
+        **逐字节一致**。本轮 KAI 报的两个缺陷（整点触发 / 颜色锁定）在 `HEAD` 里已修完
+        （`bedbf11 fix(web): 周期只出已走满的组 + 论证「桶分组 ≡ 挂钟整点分分组」`）。
+        实测：13 个 JS 全部 `node --check` 通过，最大 `period.js` 391 行（< 400）；
+        **跨语言端到端对拍 `tmp/web_e2e.py` PASS 34 / FAIL 0**，4 个变异
+        （`codec_scale` / `codec_bitmask` / `period_null` / `volumes_agg`）**全部被抓到**；
+        四个离线冒烟复跑全绿（`l2l3` 37 / `l5` 32 / `l6` 39 / `l8` 30 = 138 条）。
+        详见 `ARCHITECTURE.md §15`。
+        ⚠️ **本条原写的「聚合不得有 `g == 1` 恒等短路」是错的，已推翻**：
+        `g=1` 时短路路径与聚合路径**数值恒等**（`floor(cols/1) = cols`，元字段换算同样
+        恒等），实测 120 格全等、误差 0。原禁令描述的是**修复前状态**（后端含未定稿桶），
+        真正保证末列定稿的是**后端**。**`check_grid_contract.py` 不得断言"没有 `g==1`
+        短路"** —— 会把正确代码判违规。
+        ⚠️ 另发现**第二类空转**：真实帧按绝对桶号索引、夹具只喂最后 7 桶 ⇒ `g=5` 时
+        **可比格数 = 0**，"最大误差 0"恒真。修法 = 比较函数报**实际比较格数** +
+        聚合语义改用**稠密合成帧**（仍走真实编码器）。
+        ⚠️ **`web/matrix_codec.js` 与 `serialization/heatmap_matrix.py` 是成对契约**
+        （`enc` / `scale` / `bm` / `i16` / `filled` / `vol_bm` / `vol_i16`），
+        改一侧必须改另一侧。`vol_bm`/`vol_i16` 是**可选字段**（`matrix.volumes`
+        非空时才发）⇒ 契约检查器**不得当必填**。
+        ⚠️ 帧里新增了 `surface` 段，且 **`skew.latest` 语义已变**（取**实时点**
+        `frame.skew`，不再是序列末项）—— 前端若要显示曲面残差/顶栏读数，按 §7 契约接。
+  - [x] **#15 `tools/` 门禁 + `run.py --check` + 非空转验证** —— **完成，覆盖 16/16**
+        （KAI 2026-09-15 明令「**必须重写，禁止移植失败品**」⇒ 全部按新架构重写，
+        **未从 `HEAD` 移植**）。详见 `ARCHITECTURE.md §16`。
+
+        ```text
+        [1]  文件长度（+余量 < 5 行警告）      [2] 分层（+层表覆盖核对）
+        [2b] 反向越界（层不得 import tools/）  [3] 配置 JSON 合法性（含**重复键**）
+        [4]  配置注释交叉引用                  [5] 配置键级完整性
+        [6]  配置不变量（订阅容量 / 显示窗口 / 窗口容差 / 网格容量 / use_model_greeks）
+        [7]  读取点 ↔ 声明键**双向推导**        [8] __slots__ 一致性
+        [9]  单一职能                          [9b] 依赖白名单
+        [10] 禁止硬编码（含待接线包清单）       [11] 限速桶 5 条不变量
+        [12] 时钟协议与裁剪路径                [13] 帧契约一致性 + 活链路
+        [14] TickRouter 语义（32 条判据）
+        结果: 16/16 项全部通过                                 RC=0
+        ```
+
+        **非空转**：`tools/selfcheck.py --selftest` ⇒ **16/16 全部被抓到**
+        （RC=0，2m06s），且**先跑未变异的对照（RC=0）**证明红可归因。
+        ⚠️ 判据已升级：**不再看"退出码非 0"**，而是要求**目标检查项自己那一段**
+        （`^\[\d+b?\]` 定位）出现 `[FAIL]` —— 否则任一无关检查项变红就会让
+        "抓住了"的结论变成假绿。三处 docstring 写明理由：**段落标题必须打在
+        `run_*_checks()` 里**，只在 `main()` 里打会让 `_section_failed()` 切不出该段
+        ⇒ **恒判为"抓住"**（判据恒真 = 空转）。
+
+        **对旧版的六处改进**（重写而非移植）：
+        ① `[3]` 补 **JSON 重复键**检测（`json.loads` 静默取最后一个 = 配置版的静默错值，
+        必须用 `object_pairs_hook` 才数得出来）；
+        ② `[5]` 改为**键级完整性**（空键名 / 空白键名 / null 值），**刻意不重建**
+        旧版那份会腐烂的手工 `REQUIRED_KEYS` 清单；
+        ③ `[13]` 帧字段清单**从 `dataclasses.fields(Frame)` 派生**，不写手工清单
+        —— 旧版那份已腐烂（漏了 `surface`，正是本轮修掉的静默缺口）；
+        ④ `[2]` 层表覆盖核对（旧版对未登记的包直接 `continue` ⇒ 新增包时该包的
+        跨层 import **一行都不检查**且不报错）；
+        ⑤ `--selftest` 判据从"RC 非 0"升级为"**目标检查项自己报了 FAIL**"；
+        ⑥ `[12]` 内建**反证**（同一组未来样本改用墙钟裁剪 ⇒ 丢弃 0 条），
+        证明前一条判据验的是"注入的时钟"而非"墙钟"。
+
+        ⚠️ **本轮抓到的真缺陷（重写过程中新发现，非移植遗留）**：
+        `config/transport.json::bucket_seconds_s` 是**真死键 + 描述不存在机制的注释**
+        —— 全工程零读取点，注释却写"推送必须对齐世界时间桶边界"，而 `PushLoop`
+        只按固定节奏 + 帧序号变化触发，**从来没有桶对齐逻辑**。该键**在旧项目 `HEAD`
+        的 `transport.json` 里根本不存在**（是上一轮移植时凭空补的）。已删键，注释改写为
+        "**不对齐是刻意的**（差 ≤ 1 个推送周期 = 400ms，相对 30s 桶 = 1.3%）"。
+        ⚠️ 另修 `[7]` 的**覆盖盲区**：`models/surface_params.py::_param_pairs(cfg, key, ...)`
+        把键名**当参数转发**给 `loader.get()`，字面量收集器跳过 ⇒ 5 个活键被误报为死键。
+        修法 = 新建 `tools/selfcheck_reads.py` 做**两遍 AST 扫描**追踪"键转发器"
+        （当轮 5 个假红消失）。⚠️ 读取点**计数随代码变化**，要引用一律实跑 `[7]`，
+        **不得抄写** —— 本轮就抄错过一次（`ARCHITECTURE.md` 曾写 176，当时真值 185）。
+        ⚠️ `--selftest` 一度报 `[14] 没抓住` —— 查下来是**变异本身写错了**（`return None`
+        改成 `continue`，而循环里后续 bid/ask 槽位通常为空 ⇒ 最终仍 `return None`
+        ⇒ **行为等价**），不是判据空转。**这两个结论必须分得清。**
+
+        **拆分**（`selfcheck_core.py` 逼近 400 行门禁）：新建 `fixtures.py` /
+        `selfcheck_reads.py` / `selfcheck_clock.py` / `selfcheck_router.py` /
+        `selfcheck_connectivity.py` / `selfcheck_config.py` /
+        `selfcheck_config_invariants.py` / `selfcheck_code.py`。
+
+        **本轮交付证据**（全部用 `venv/Scripts/python.exe`）：
+        `run.py --check` **16/16 RC=0** · `selfcheck.py --selftest` **16/16 RC=0** ·
+        `l2l3` 37/0 · `l5` 32/0 · `l6` 39/0 · `l8` 30/0 · `web_e2e` 34/0 ·
+        `check_web_contract --offline --selftest` RC=0。
+
+        ⚠️ **未做**：`tools/` 下 8 个独立检查器仍**待建**
+        （`check_matrix_codec` / `check_grid_contract` / `check_period_aggregation` /
+        `check_session_grid` / `check_surface_payload` / `check_reconnect_gap` /
+        `check_window_tolerance` / `check_ws_compression` / `ws_probe`），
+        状态表见 `README.md §6`。
+        ⚠️ **配置注释里已引用其中 6 个**，本轮已把这些引用逐条标注"**待建**"
+        （`serialization.json` ×3 处 / `subscription.json` ×1 / `transport.json` ×1）
+        —— 在它们建出来之前，那些引用是**设计意图而非既成事实**。
+        **（本项曾是 `bucket_seconds_s` 同类问题：注释断言"已有东西守着"，而东西不存在。）**
+
+  - [x] **[中] `README.md` 已重写**（2026-09-15）—— 按 **9 层新架构**（L0 `config`/
+        `contracts` … L8 `app`）+ **实际存在的检查器名** + 已知边界，共 10 节
+        （快速开始 / 架构 / 目录 / 配置 / 数据流 / 门禁 16 项矩阵 / 回归 /
+        仓库纪律 / 已知边界 / 深入阅读）。
+        旧版在清空时被删（` D`），**刻意未恢复**：它描述的是 6 层结构与旧检查器名，
+        恢复即制造"两份真相"。
+        ⚠️ §6 的「独立检查器」表**逐条标了状态**（✅ / ⬜ 待建），并明写警告：
+        **配置注释里已引用其中几个（如 `transport.json` 提到 `check_ws_compression`），
+        在它们建出来之前，那些引用是设计意图而非既成事实 —— 别把注释当成"已经有东西守着"。**
+        ⚠️ 对照：`.gitignore` 是**功能性**的（与 `selfcheck_core::NON_SOURCE_DIRS`
+        的 `tmp` 条目成对），已按 `HEAD` 恢复 —— **两者不可同样对待**。
+  - [ ] **[中] L8 完成后的在线验证**（L2/L3 目前**只有离线冒烟**）：`IbkrFeed` 连真实
+        Gateway / `SubscriptionManager` 的 300 退避 / `SpotSourceSelector` 区段切换 /
+        `WindowFollower` 窗口重建 —— 四项全部未跑（没有服务、也还出不了帧）
+  - [x] **[高] ✅ 曲面残差无方向字段 —— 已修复（2026-09-16，KAI 选方案 B）**
+        ⚠️ 原登记「**待 KAI 拍板**」，现已裁定并落地。
+
+        **方案 B（KAI 2026-09-16 选定）**：`SurfaceResidual` 加 `right` 字段；
+        `SurfaceInputPort.id_map` 改**三元组** `(expiry, strike, right)`，
+        把方向一路透传到帧。**保持了原版的全部数值口径**（见下方"未变"）。
+
+        **改动链（6 个文件，全部为增量、无行为改写）**：
+        1. `contracts/feature.py::SurfaceResidual` —— 新增 `right: str = ""`
+           （默认空串 ⇒ 老实现不填也不报错，但本项目恒填）；
+        2. `features/surface_engine.py::_build_snapshot()` ——
+           `id_map[rid]` 由 `(expiry, strike)` 改为 `(expiry, strike, right.value)`
+           （与已有的 `rid` 三元组同形）；
+        3. `models/raw_cleaning.py::build_clean_surface()` —— 用**切片**解包
+           `mapped[0], mapped[1]` + `mapped[2] if len(mapped) > 2 else ""`
+           （不是三元组硬解包，否则老实现给两元时 `ValueError`）；
+           `raw_rows` 新增 `Right` 列；
+        4. `models/svi_reporting.py::residuals()` —— `keep_cols` 与空表列清单
+           都加 `Right`；
+        5. `models/surface_adapter.py::_residuals()` —— 搬 `Right` 进
+           `SurfaceResidual`（`str(row.get("Right", "") or "")`）；
+        6. `serialization/surface_encoder.py::_residual()` —— 输出 `"right"` 键。
+
+        **未变（关键）**：`Right` 不参与任何 IV 过滤、离群剔除、pivot 构造、
+        平滑 —— 它只是一列随行下行的标记。`pivot_table` 仍对同档两侧取
+        **mean**（原版语义），残差仍报**单侧** IV 与它的差。
+
+        **实测证据**（`tmp/verify_residual_right.py`，**新建**；全部用
+        `venv/Scripts/python.exe`）：
+        - 夹具喂 **Put IV 比 Call 高 0.005**（真实微笑形状，非恒等）⇒
+          25 档 × 2 = **50 条**残差，`right ∈ {P, C}`，`(strike, right)` **50/50 唯一**；
+        - 同档两侧残差**实测不等**（最小差 **1.0000 波动率点**）—— 修复前这两条
+          数值相同/相消、前端无法区分；
+        - **拟合未受影响**：同 strike 的 `model_iv` 两侧**完全一致（25/25 档）**；
+        - 帧载荷 `surface.residuals[*].right` 存在且覆盖 P/C。
+        **合计 PASS 15 / FAIL 0。**
+        - **非空转（两处变异，各抓）**：① `id_map` 改回二元组 ⇒ **4 条 FAIL**
+          （降级为空串而非崩溃）；② 编码器删 `"right"` 键 ⇒ **1 条 FAIL**；
+          两者还原后**逐字节**回到原状（`diff -q` 确认）。
+        - `tmp/l6_smoke.py` 的那条旧断言「契约无 right 字段 ⇒ 待 KAI 定」
+          **已改写**为三条（逐 reqId 两条 / 每条带 right / (strike,right) 唯一）
+          ⇒ L6 从 **39 → 41** 条判据。
+        - 全量回归：门禁 **16/16 RC=0**；`l2l3` 37/0 · `l5` 32/0 · `l6` **41/0** ·
+          `l8` 30/0 · `web_e2e` 34/0。
+        - 行数：6 个文件全部 < 400（最长 `features/surface_engine.py` 282）。
+
+        ⚠️ **前端尚未消费**（`web/` 目前完全不读 `surface` 段）⇒ 残差图是
+        **另一件未开始的任务**，不在本次范围内。后端契约现已就绪。
+        ⚠️ **在线验证仍未做**（无服务在跑）—— 本项只做了离线端到端。
+
+        **实测事实链**（不是推测；**以下描述的是修复前的状态，2026-09-16 已按方案 B 修复**）：
+        1. `contracts/ports.py::SurfaceInputPort.id_map = {req_id: (expiry, strike)}`
+           —— **不带方向**；`models/raw_cleaning.py:96-112` 逐 reqId 攒一行，
+           `clean_df` 的列是 `Expiry/Strike/IV/Bid/Ask/...`，**没有 right**。
+        2. `models/raw_cleaning.py:241` 的 `df.pivot_table(index="Expiry",
+           columns="Strike", values="IV")` **未指定 aggfunc ⇒ 默认 mean**
+           ⇒ 曲面拟合用的是同 strike 的 **Put/Call 平均 IV**。
+        3. `models/svi_reporting.py:171-203` 的 `residuals()` 用的是 **`clean_df`
+           （未平均的原始行）**，逐行减去 `self.iv(Expiry, Strike)`
+           ⇒ 报的是**单侧** IV 与**双侧平均**拟合值的差。
+
+        实测（L6 冒烟）：`residual_count = 50`，`len(distinct strike) = 25`
+        ⇒ **恰好 2×**，且同一 strike 两条数值完全相同（因为夹具给 Put/Call 喂了
+        同一个 IV）。真实行情下 Put IV ≠ Call IV ⇒ 同一 strike 会出现**一正一负**
+        两条残差，而 `SurfaceResidual` 没有 `right` 字段 ⇒ **前端无法区分**，
+        残差图上同 strike 两个点会互相抵消/重叠。
+
+        ⇒ 对"残差是本项目产品指标之一"的定位（`ARCHITECTURE.md §1`），这是真问题。
+        **保真移植的结论不受影响**（差分对拍零差异），这是**原版设计在本项目输入下的
+        固有性质**，不是移植引入的。
+
+  - [ ] **[低] `acquisition/ibkr_gateway.py` = 399 行，距门禁仅剩 1 行** ——
+        Task #15 的门禁建议把"余量 < 5 行"的文件列为**警告**，否则下次加两行注释就违规
+- [ ] **[中] 跑原版 `test_models.py`（1589 行，已复制到 `tmp/`）**，用来回答一个对拍
+  答不了的问题：**pandas 3.0.5 是否改变了原版行为**。对拍用的是同一个 venv，
+  只证明了"移植没引入差异"。已知 `surface_adapter` / `dashboard_config` 相关用例
+  针对已删除的旧 API，**预期失败**。
+- [ ] **[低] `models/forecasting/`（ewma / garch / har_rv / snapshot_history）已移植但未接线**
+  —— 本项目是否需要尚未确定（原版是 RV 信号引擎用的）。
+- [ ] **[低] 清 `_ref_spxw_head` worktree**（`E:/US.market/SPXW SWATCH/_ref_spxw_head`，
+  `HEAD = bedbf11` 只读参照），重写完再清。
+- [ ] **[低] 逐条复核 `notes/memory/{QUICKREF,RULES,TROUBLESHOOTING}.md`** ——
+  三份是从 `HEAD` 恢复的旧实现记录，已加横幅；推进到对应层时复核并标 `[已复核 2026-09-15]`。
+
+---
+
+## Active —— 运行状态探针（2026-09-16 起）
+
+- [x] **[高] 前后端运行状态监听探针**（会话：`runtime-monitors`）
+  四项要求全部验证成立，后端已重启生效。见
+  `notes/sessions/2026-09-16/runtime-monitors/handoff.md`。
+
+- [ ] **[中] 两个变异未激活，判据真违例路径未验** ——
+  ① 后端 T3「挂钟对齐」判据恒真；② 前端 T4「把不一致故意不标记」。
+  本轮观测期内确实不存在真违例（无未对齐的列、无不一致的格），
+  ⇒ 变异体没被执行到。**要验它们必须先构造一个"真违例"输入，本轮未构造。**
+  残留风险：这两条判据若本身写错，当前探针**报不出来**。
+- [ ] **[中] 两只探针停在 `tmp/`，无回归保护** ——
+  按 KAI 明令（"不额外搭检查/校验模块"）它们就该留在 `tmp/`。
+  代价：产品代码日后改动，这两只探针不会被自动跑，出列定稿/挂钟对齐/
+  周期独立**没有持续回归**。若 KAI 日后要纳入 `tools/`，需先申请。
+- [ ] **[低] 前端从未消费 `surface` 残差段** ——
+  `web/` 读不到 `surface`，残差只留在帧数据里。KAI 已驳回"加副图"（"前端会变得很挤"）。
+  属独立未开工任务。
+
+---
+
+## 历史 Active（重写前，保留作教训；路径/检查器名可能已变）
+
+⚠️ **2026-09-15 白纸重写 —— 以下正文是重写前的记录。**
+`spxw_swatch` 源码已被清空，正在基于 `live-volatility-surface`（原版）重写。
+本文件正文（旧实现的状态/待办/交接）**保留作历史**：其中的纪律与教训继续有效，
+但文件路径、检查器名、模块名可能已变。**重写进度以本文件顶部的新块为准。**
+
+新架构 → `notes/memory/ARCHITECTURE.md`（旧 → `notes/context/archive/ARCHITECTURE_pre_rewrite.md`）
+本轮会话 → `notes/sessions/2026-09-15/rebuild-from-original/handoff.md`
+
 
 - [ ] **[低] 复现"未定稿末组"类缺陷时，必须对准边界帧而非抽间隔帧**（2026-09-15 08:4x
   `period-wallclock-semantics` 会话沉淀的**方法学**教训，非缺陷本身）。

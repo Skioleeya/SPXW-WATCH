@@ -1,8 +1,8 @@
 """
 L0 — 特征层输出对象。
 ======================
-L3（特征）算完之后交给 L4（序列化）的东西。放在 L0 的理由同 ``tick.py``：
-让 L4 不必 import L3 的实现细节。
+L5（特征）算完之后交给 L6（序列化）的东西。放在 L0 的理由同 ``tick.py``：
+让 L6 不必 import L5 的实现细节。
 
 单位约定（全系统统一，不允许各处各表）
 ---------------------------------------
@@ -11,6 +11,10 @@ L3（特征）算完之后交给 L4（序列化）的东西。放在 L0 的理�
   （即 IV 变动 0.01）。
 * 任何带 ``impulse`` 的字段 —— **波动率点 / 分钟**。
 * ``delta`` —— 券商推送的原始 Delta，不做本地重算。
+
+⚠️ **本模块不得出现 numpy / pandas 类型**。曲面模型层（L4）内部用 DataFrame，
+但跨层传出的必须是本模块定义的普通 dataclass —— 否则 numpy/pandas 会顺着
+类型标注漏到 L5–L8，第 0 节那条"只允许 models/ 用数值库"的决策就废了。
 """
 
 from __future__ import annotations
@@ -20,13 +24,14 @@ from dataclasses import dataclass
 from contracts.enums import OptionRight, Quality
 from contracts.tick import OptionRef
 
+
 @dataclass(frozen=True, slots=True)
 class WindowDelta:
     """
     某个回看窗口上的 IV 变化。
 
     ``seconds`` 由配置决定（``features.json`` 的 ``impulse_windows_seconds``），
-    因此这里用结构而不是 ``iv_1m`` / ``iv_5m`` 这种写死字段名——窗口长度一旦
+    因此这里用结构而不是 ``iv_1m`` / ``iv_5m`` 这种写死字段名 —— 窗口长度一旦
     调整，字段名就会对不上。
     """
 
@@ -114,6 +119,10 @@ class HeatmapMatrix:
       前端消费点在 ``web/heatmap.js::buildOption``，参数在
       ``web/config.js::heatmap.volumeBorder``。
 
+    **列数契约（2026-09-15 重写）**：``cols() == bucket_index``。
+    矩阵**只含已走满的桶**（列取 ``0 .. current-1``）—— 正在走的那一桶尚未定稿，
+    不得出列。理由与代价见 `notes/memory/ARCHITECTURE.md §8`。
+
     每个行权价只取 OTM 一侧（行权价 < 现价取 Put，否则取 Call），
     这样一张矩阵就能完整呈现 0DTE 微笑的两翼，无需再拆成两张图。
     """
@@ -152,12 +161,81 @@ class AtmSnapshot:
     ts: float = 0.0
 
 
+# --------------------------------------------------------------------------- #
+# 曲面模型层（L4）的输出契约
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True, slots=True)
+class SurfaceResidual:
+    """
+    单个 (到期日, 行权价, 方向) 上的曲面残差。
+
+    ``residual_vol_points = (raw_iv − model_iv) × 100``。
+    正值 = 市场报价比模型贵（"rich"）。``model_iv`` 为 ``None`` 表示该点
+    没有可用拟合（不应发生：模型层对坏切片会退回 Raw，见 ``used_fallback``）。
+
+    为什么必须有 ``right``
+    ----------------------
+    残差是**逐 reqId** 的：同一个 ``(expiry, strike)`` 上 Put 与 Call 是两张
+    不同合约，各出一条残差（实测 50 条 / 25 个 strike，恰好 2×）。缺少方向字段时，
+    同档两条残差在前端**无法区分** —— 残差图按行权价画，同 strike 的两个点会
+    重叠/互相抵消。真实行情下 Put IV ≠ Call IV，这两条的残差常常**一正一负**，
+    不区分就等于把两个相反信号画成了一个。
+
+    ⚠️ 注意口径差异（这是原版设计，未改）：``pivot_table`` 求拟合曲面时对同档
+    两侧取 **mean**，而残差用的是 ``clean_df`` 里**单侧**的原始行 ⇒
+    ``raw_iv`` 是单侧值、``model_iv`` 是双侧均值对应的值。
+
+    刻意**不含报价质量字段**：``models/`` 的 ``clean_df`` 里没有这个列
+    （原版 docstring 说"welcome"但从未产出），凭空造一个恒为空字符串的字段
+    只会让下游以为"我们有质量信息"。真要加，就得先在配置里定义分档阈值。
+    """
+
+    expiry: str
+    strike: float
+    raw_iv: float
+    model_iv: float | None = None
+    residual_vol_points: float | None = None
+    fit_status: str = ""
+    used_fallback: bool = False
+    #: 期权方向（``"P"`` / ``"C"``）。取自 ``contracts.enums.OptionRight`` 的值。
+    #: 空字符串表示来源未提供方向 —— 用于兼容老的 ``SurfaceInputPort`` 实现，
+    #: 本项目自己的 ``features/surface_engine.py`` 恒填。
+    right: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class SurfaceSummary:
+    """
+    曲面模型一轮拟合的诊断摘要。
+
+    字段名与 `models/` 层 `diagnostics()` 的返回键一一对应（去掉单位后缀），
+    但**只保留跨层需要的**：模型层内部的参数向量、逐点拟合细节不上行。
+    """
+
+    model_name: str = ""
+    fitted_expiries: int = 0
+    failed_expiries: int = 0
+    good_fits: int = 0
+    warn_fits: int = 0
+    bad_fits: int = 0
+    fallback_expiries: int = 0
+    avg_rmse_vol_points: float | None = None
+    max_rmse_vol_points: float | None = None
+    residuals: tuple[SurfaceResidual, ...] = ()
+
+    @property
+    def is_healthy(self) -> bool:
+        return self.failed_expiries == 0 and self.fitted_expiries > 0
+
+
 @dataclass(frozen=True, slots=True)
 class FeatureBundle:
     """
-    L3 一轮计算的完整产出。
+    L5 一轮计算的完整产出。
 
-    L4 拿到它之后只需要加健康信息就能组装成推送帧，不必再回头调用 L3 的任何方法。
+    L6 拿到它之后只需要加健康信息就能组装成推送帧，不必再回头调用 L5 的任何方法。
     """
 
     ts: float
@@ -167,6 +245,7 @@ class FeatureBundle:
     skew: SkewPoint | None = None
     skew_series: tuple[SkewPoint, ...] = ()
     atm: AtmSnapshot | None = None
+    surface: SurfaceSummary | None = None
     quality_ok: int = 0
     quality_flagged: int = 0
 

@@ -1,5 +1,5 @@
 """
-L1 — 0DTE 期权链解析。
+L2 — 0DTE 期权链解析。
 ======================
 唯一职责：从 IBKR 返回的期权链参数中挑出**当日到期**的那一片，并把可用行权价
 裁剪成以现价为中心的滑动窗口。
@@ -7,7 +7,7 @@ L1 — 0DTE 期权链解析。
 纯逻辑，不 import ``ib_async``（只按鸭子类型读 ``.expirations`` / ``.strikes``
 等属性），因此可以在离线环境下被完整单测。
 
-依赖：L0。
+依赖：L0（config / contracts）与 L1（core）。
 """
 
 from __future__ import annotations

@@ -1,7 +1,7 @@
 """
-L4 — 载荷组装器。
+L6 — 载荷组装器。
 ==================
-唯一职责：把 L3 的 ``FeatureBundle`` 与 L2 的健康读数合成一帧，编码成 JSON 文本，
+唯一职责：把 L5 的 ``FeatureBundle`` 与 L3 的健康读数合成一帧，编码成 JSON 文本，
 并对外暴露"最新一帧"。
 
 它同时实现两个 L0 协议
@@ -9,7 +9,7 @@ L4 — 载荷组装器。
 * ``FrameSource``：给健康面板/调试用的语义快照。
 * ``PayloadSource``：给传输层用的成品文本。
 
-这样 L5 只依赖 L0 就能拿到可发送内容，不必 import 本模块的任何编码器。
+这样 L7 只依赖 L0 就能拿到可发送内容，不必 import 本模块的任何编码器。
 
 为什么在这里预编码
 ------------------
@@ -17,7 +17,7 @@ L4 — 载荷组装器。
 里做一次，传输层就只是搬运字符串——即使前端全部掉线、广播被跳过，也不会有
 任何重复编码开销。
 
-依赖：L0、L2（MarketState 的类型无关，通过鸭子类型调用）、L4 内部。
+依赖：L0、L3（MarketState 的类型无关，通过鸭子类型调用）、L6 内部。
 """
 
 from __future__ import annotations
@@ -49,7 +49,14 @@ class PayloadBuilder:
     # ------------------------------------------------------------------ #
 
     def build(self, bundle: FeatureBundle, feed_status: FeedStatus) -> Frame:
-        """合成一帧并完成编码。返回的 ``Frame`` 同时被缓存。"""
+        """
+        合成一帧并完成编码。返回的 ``Frame`` 同时被缓存。
+
+        ⚠️ **每个字段都要显式搬运** —— ``Frame`` 的字段都有默认值，漏传一个不会
+        报错，只会让那个字段恒为 ``None``/``()``，前端表现为"这个功能一直没有
+        数据"（静默空值）。本模块因此刻意不用 ``dataclasses.replace`` 或
+        ``**asdict`` 这类"自动搬运"：显式列表让漏传在 code review 时看得见。
+        """
         self._seq += 1
 
         frame = Frame(
@@ -59,9 +66,11 @@ class PayloadBuilder:
             session=self._state.session_block(),
             health=self._state.health(feed_status, bundle.ts),
             heatmap=bundle.heatmap,
+            skew=bundle.skew,
             skew_series=bundle.skew_series,
             cells=bundle.cells,
             atm=bundle.atm,
+            surface=bundle.surface,
         )
 
         self._frame = frame

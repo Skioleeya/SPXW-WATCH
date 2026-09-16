@@ -1,5 +1,5 @@
 """
-L5 — 推送循环。
+L7 — 推送循环。
 ================
 唯一职责：按固定节奏检查"是否产出了新帧"，有则广播。
 
@@ -99,7 +99,7 @@ class PushLoop:
 
         text, seq = payload
         # 这里刻意用墙钟而不是会话时钟：心跳间隔是**真实时间**概念（"20 秒没推
-        # 就补发一次"），用被加速的会话时钟会让心跳在模拟模式下快 60 倍。
+        # 就补发一次"），用被加速的会话时钟会让心跳在离线夹具下快 60 倍。
         moment = now_ts()
         fresh = seq != self._last_seq
         stale_but_alive = (moment - self._last_push_at) >= self._heartbeat

@@ -1,6 +1,6 @@
 {
-  "_comment": "L4 序列化层 — 推送帧的形状与精度。bucket 决定热力图横轴的**基线**粒度，也是前端可选周期的下界（前端只做整数倍聚合）；color_* 决定色标量程的取法（分位截断 + 下限保护）；heatmap_encoding 是热力图数值块的线上编码名，必须与 web/matrix_codec.js 支持的那一种一致（两边由 tools/check_matrix_codec.py 逐值对拍）；heatmap_feed_gap_s 是『行情断流多久算一次断代』的阈值 —— 超过它，恢复后的第一桶只留白、不与断线前的 IV 做差（否则整段断线的变化会被压进单桶，画出假冲量），由 tools/check_reconnect_gap.py 守住。",
-  "_bucket_capacity_comment": "heatmap_max_buckets / skew_series_max_points 是环形缓冲容量，必须**覆盖整个交易日网格**，否则最早那段会被静默裁掉、图上表现为『左端凭空少一截』。网格长度 = 各会话时长 + 会话之间的空档，再除以 heatmap_bucket_seconds。当前 20:15→09:25（47400s）+ 空档 300s + 09:30→16:00（23400s）= 71100s ÷ 30s = 2370 桶。改会话定义或改桶宽后必须同步改这两个值，由 tools/check_session_grid.py 核对。",
+  "_comment": "L6 序列化层 — 推送帧的形状与精度。bucket 决定热力图横轴的**基线**粒度，也是前端可选周期的下界（前端只做整数倍聚合）；color_* 决定色标量程的取法（分位截断 + 下限保护）；heatmap_encoding 是热力图数值块的线上编码名，必须与 web/matrix_codec.js 支持的那一种一致（两边由 tools/check_matrix_codec.py 逐值对拍 —— ⚠️ 该检查器**待建**，见 README §6）；heatmap_feed_gap_s 是『行情断流多久算一次断代』的阈值 —— 超过它，恢复后的第一桶只留白、不与断线前的 IV 做差（否则整段断线的变化会被压进单桶，画出假冲量），由 tools/check_reconnect_gap.py 守住（⚠️ 该检查器**待建**，见 README §6）。",
+  "_bucket_capacity_comment": "heatmap_max_buckets / skew_series_max_points 是环形缓冲容量，必须**覆盖整个交易日网格**，否则最早那段会被静默裁掉、图上表现为『左端凭空少一截』。网格长度 = 各会话时长 + 会话之间的空档，再除以 heatmap_bucket_seconds。当前 20:15→09:25（47400s）+ 空档 300s + 09:30→16:00（23400s）= 71100s ÷ 30s = 2370 桶。改会话定义或改桶宽后必须同步改这两个值，由 tools/check_session_grid.py 核对（⚠️ 该检查器**待建**，见 README §6）。",
   "_ffill_comment": "heatmap_max_ffill_buckets = 前向填充的最长跨度（桶数）。矩阵的 ΔIV 用『沿用上一个已知 IV』把稀疏桶填平；该假定只对**短跨度**成立。超过这个跨度的空洞必须留白 —— 否则一个孤立的旧桶（如进程重启后由 recover() 捞回的 20:15 单桶）会被一路沿用，在图上拉出一整条 ΔIV=0 的『假 0 带』（亮黄绿，与真『IV 没变』无法区分）。30s/桶时 20 桶 = 10 分钟。",
   "heatmap_bucket_seconds": 30,
   "heatmap_max_buckets": 2370,
@@ -11,6 +11,8 @@
   "heatmap_color_quantile": 0.95,
   "heatmap_color_floor_vol_points": 0.5,
   "skew_series_max_points": 2370,
+  "_surface_comment": "surface_residuals_limit = 帧里携带的曲面残差点数上限。当前单到期日实测 50 点/模型，上限 200 ⇒ 不触发（全量）。它是**多到期日扩展时的保护**：残差点数按到期日数线性增长，几百个点 × 每点 7 个字段会压过热力图位图本身。超限时按**等间隔抽样**（保序、确定性），不取绝对值最大的 N 个 —— 那会让点全堆在翼部、中间空掉，看不出拟合形状。由 tools/check_surface_payload.py 守住（含抽样形状断言；⚠️ 该检查器**待建**，见 README §6）。",
+  "surface_residuals_limit": 200,
   "iv_decimals": 4,
   "impulse_decimals": 3,
   "price_decimals": 2,

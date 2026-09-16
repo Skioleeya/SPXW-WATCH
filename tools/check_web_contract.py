@@ -1,6 +1,7 @@
 """
-L6 — 前端契约回归。
-====================
+前端契约回归（引用 → 定义）。
+==============================
+
 唯一职责：证明前端读的每一个字段，后端真的在发；前端引用的每一个 DOM id 和
 每一个 ``CFG.*`` 配置键，真的存在。
 
@@ -11,33 +12,47 @@ L6 — 前端契约回归。
 藏身的地方。字段名差一个字母（``put25_iv`` 写成 ``put25iv``）不会报任何错，只会
 安静地渲染成 ``--``。
 
-它做三件事，全部是"引用 → 定义"的对照：
+三项对照，全部是"引用 → 定义"：
 
-1. ``app.js`` 里的 ``el("x")`` / ``setText("x")`` / ``setClass("x")`` → ``index.html``
-   里必须有 ``id="x"``。少一个就是一次静默的空操作。
-2. JS 里的 ``CFG.a.b`` → ``config.js`` 里必须真有这条路径。写错的配置键读出来是
-   ``undefined``，而 ``undefined`` 在算术里会变成 ``NaN``，最终渲染成一片空白。
-3. 前端声明的载荷字段路径 → 后端实际发出的帧里必须存在。**键缺失算失败，
+1. **离线** ``el("x")`` / ``setText("x")`` / ``setClass("x")`` → ``index.html`` 里
+   必须有 ``id="x"``。少一个就是一次静默的空操作。
+2. **离线** JS 里的 ``CFG.a.b`` → ``config.js`` 里必须真有这条路径。写错的配置键
+   读出来是 ``undefined``，而 ``undefined`` 在算术里会变成 ``NaN``，最终渲染成
+   一片空白。
+3. **在线** 前端声明的载荷字段路径 → 后端实际发出的帧里必须存在。**键缺失算失败，
    值为 null 不算** —— ``null`` 是"还没到那个时间"的合法语义。
+
+为什么要自动发现 JS 文件（而不是写死一份清单）
+----------------------------------------------
+``web/`` 下有 18 个 JS。写死扫描清单就等于"哪些文件被检查过"这件事有两处真相：
+新增一个 ``app_foo.js`` 时没人会记得回来加一行，于是新文件的 DOM/CFG 引用
+**静默地不受检查**。这里改成 glob ``web/*.js`` —— 新文件自动纳入。
+
+（载荷路径清单 ``PAYLOAD_PATHS`` 仍是**手抄**的，原因不同：那是"前端实际读了哪些
+字段"的语义声明，自动推断会把 ``frame.foo`` 这类动态访问一起抓进来，制造假警报。）
 
 用法::
 
-    python tools/check_web_contract.py
-    python tools/check_web_contract.py --url ws://127.0.0.1:8060/ws
+    python tools/check_web_contract.py --offline        # 只跑 1、2（无需服务）
+    python tools/check_web_contract.py --offline --selftest   # 证明 1、2 不是空转
+    python tools/check_web_contract.py                  # 连本地服务跑全部三项
+    python tools/check_web_contract.py --url ws://127.0.0.1:8060/ws --frames 3
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
+import io
 import json
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
-
-import aiohttp
 
 ROOT = Path(__file__).resolve().parent.parent
 WEB = ROOT / "web"
@@ -46,19 +61,19 @@ sys.path.insert(0, str(ROOT))
 GREEN, RED, RESET = "\033[32m", "\033[31m", "\033[0m"
 
 #: 前端实际读取的载荷字段路径。这份清单是**手抄**自 web/*.js 的读取点，
-#: 不是自动推断的——自动推断会把 `frame.foo` 这种动态访问一起抓进来。
+#: 不是自动推断的 —— 自动推断会把 `frame.foo` 这种动态访问一起抓进来。
 #: 每加一个前端读数，就应该在这里补一行，否则回归覆盖不到它。
 PAYLOAD_PATHS: tuple[str, ...] = (
     # 顶层
-    "seq", "ts", "spot", "atm", "session", "health", "heatmap", "skew", "cells",
-    # app.js → 顶栏读数
+    "seq", "ts", "spot", "atm", "session", "health", "heatmap", "skew",
+    # app_render.js / app.js → 顶栏读数
     "atm.atm_strike", "atm.atm_iv", "atm.straddle",
     "atm.put25_iv", "atm.call25_iv", "atm.butterfly", "atm.skew_25d",
-    # app.js → 状态行
+    # app_render.js / app_sessions.js → 状态行与时段切换
     "session.expiry", "session.elapsed_s", "session.bucket_count",
     "session.bucket_index",
-    # app.js → 时段切换（GTH / RTH / 全时段）。按钮**不写死**在后端：标签与列
-    # 区间都从这张区段表来，前端照着生成。少一个键就是少一个按钮或切错列。
+    # 时段切换（GTH / RTH / 全时段）。按钮**不写死**在后端：标签与列区间都从
+    # 这张区段表来，前端照着生成。少一个键就是少一个按钮或切错列。
     "session.zones",
     "session.zones.0.id", "session.zones.0.label", "session.zones.0.is_session",
     "session.zones.0.first", "session.zones.0.last",
@@ -81,12 +96,12 @@ PAYLOAD_PATHS: tuple[str, ...] = (
     # period.js（周期聚合要用基线桶宽换算组大小，并用后端的色标规则重算量程）
     "heatmap.bucket_seconds", "heatmap.scale_policy",
     "heatmap.scale_policy.quantile", "heatmap.scale_policy.floor",
-    # skew.js + app.js —— 折线对齐到热力图列网格（bucket 定列、ts 定量程窗口）。
-    # 纵轴量程由前端按**当前视口**算（不再有后端下发的窗口长度：那样缩放到早盘
-    # 段会把整条曲线裁到画面外，见 web/skew.js 模块 docstring）。
+    # skew.js + app_render.js —— 折线对齐到热力图列网格（bucket 定列、ts 定量程窗口）。
     "skew.series", "skew.series.ts", "skew.series.bucket", "skew.series.label",
     "skew.series.skew", "skew.series.atm",
     "skew.series.put25", "skew.series.call25",
+    # ⚠️ `skew.latest` 是**实时点**，取自 `Frame.skew`（不是 `skew_series[-1]`）——
+    # 后者只含已走满的桶，会滞后整整一个基线桶（30s）。见 ARCHITECTURE §7。
     "skew.latest", "skew.latest.skew", "skew.latest.atm",
 )
 
@@ -97,6 +112,11 @@ def _check(label: str, condition: bool, detail: str = "") -> bool:
     return condition
 
 
+def js_files(web: Path = WEB) -> list[Path]:
+    """web/ 下全部 JS（自动发现 —— 新文件自动纳入，不靠人记得加清单）。"""
+    return sorted(web.glob("*.js"))
+
+
 # ---------------------------------------------------------------------------
 # 静态对照 1：DOM id
 # ---------------------------------------------------------------------------
@@ -105,16 +125,16 @@ _ID_CALL = re.compile(r'(?:el|setText|setClass)\(\s*"([^"]+)"')
 _HTML_ID = re.compile(r'id="([^"]+)"')
 
 
-def check_dom_ids() -> bool:
-    html_ids = set(_HTML_ID.findall((WEB / "index.html").read_text("utf-8")))
+def check_dom_ids(web: Path = WEB) -> bool:
+    html_ids = set(_HTML_ID.findall((web / "index.html").read_text("utf-8")))
     used: dict[str, str] = {}
-    for js in ("app.js",):
-        src = (WEB / js).read_text("utf-8")
-        for name in _ID_CALL.findall(src):
-            used.setdefault(name, js)
+    for path in js_files(web):
+        for name in _ID_CALL.findall(path.read_text("utf-8")):
+            used.setdefault(name, path.name)
 
     missing = sorted(n for n in used if n not in html_ids)
-    print(f"[1] DOM id：JS 引用 {len(used)} 个，HTML 定义 {len(html_ids)} 个")
+    print(f"[1] DOM id：JS 引用 {len(used)} 个，HTML 定义 {len(html_ids)} 个"
+          f"（扫描 {len(js_files(web))} 个 JS）")
     return _check("JS 引用的 id 全部存在", not missing,
                   "缺失: " + ", ".join(missing) if missing else "")
 
@@ -126,8 +146,8 @@ def check_dom_ids() -> bool:
 _CFG_PATH = re.compile(r'CFG((?:\.\w+)+)')
 
 
-def _load_config_js() -> dict[str, Any]:
-    """用 Node 求值 config.js —— 手写 JS 对象字面量解析器只会制造新的 bug。"""
+def _load_config_js(web: Path = WEB) -> dict[str, Any]:
+    """用 node 求值 config.js —— 手写 JS 对象字面量解析器只会制造新的 bug。"""
     script = (
         "const fs=require('fs');"
         "const window={};"
@@ -135,7 +155,7 @@ def _load_config_js() -> dict[str, Any]:
         "process.stdout.write(JSON.stringify(window.SWATCH_CONFIG));"
     )
     out = subprocess.run(
-        ["node", "-e", script, str(WEB / "config.js")],
+        ["node", "-e", script, str(web / "config.js")],
         capture_output=True, text=True, timeout=30,
     )
     if out.returncode != 0:
@@ -164,13 +184,13 @@ def _resolve(obj: Any, path: str) -> tuple[bool, Any]:
     return True, node
 
 
-def check_cfg_paths() -> bool:
-    cfg = _load_config_js()
-    used: set[str] = set()
-    for js in ("app.js", "heatmap.js", "skew.js", "period.js",
-               "matrix_codec.js", "ws_client.js"):
-        src = (WEB / js).read_text("utf-8")
-        used.update(m.group(1).lstrip(".") for m in _CFG_PATH.finditer(src))
+def check_cfg_paths(web: Path = WEB) -> bool:
+    cfg = _load_config_js(web)
+    used: dict[str, str] = {}
+    for path in js_files(web):
+        src = path.read_text("utf-8")
+        for m in _CFG_PATH.finditer(src):
+            used.setdefault(m.group(1).lstrip("."), path.name)
 
     missing = sorted(p for p in used if not _resolve(cfg, p)[0])
     print(f"[2] CFG 路径：JS 引用 {len(used)} 条")
@@ -183,6 +203,8 @@ def check_cfg_paths() -> bool:
 # ---------------------------------------------------------------------------
 
 async def _grab_frame(url: str, want: int) -> dict | None:
+    import aiohttp  # 延迟 import：--offline 时不该因为缺依赖而失败
+
     timeout = aiohttp.ClientTimeout(total=60)
     last: dict | None = None
     async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -214,11 +236,65 @@ def check_payload(frame: dict) -> bool:
     return ok
 
 
+# ---------------------------------------------------------------------------
+# 非空转验证
+# ---------------------------------------------------------------------------
+
+#: 往 web/ 的**副本**里注入的假引用。两条都必须被抓到，否则说明对应的
+#: 对照是空转的（例如正则写歪、或者扫描的文件清单是空的）。
+_SELFTEST_INJECT = """
+/* --- selftest：以下两行是故意注入的假引用，真跑时不存在 --- */
+el("__selftest_missing_id__");
+CFG.__selftest.missing.key;
+"""
+
+
+def selftest() -> int:
+    """
+    把 web/ 复制到临时目录、往 app.js 尾部注入假引用，看 1、2 两项是否变红。
+
+    ⚠️ 必须改**副本**：改工作区里的 web/ 会污染真实代码，而且一旦中途抛异常
+    就留下脏文件。``copytree`` 是 18 个文件的一次性开销，换来的安全性很划算。
+    """
+    print("\n=== 变异自检：注入假引用，看 1、2 抓不抓得住 ===")
+    failures = 0
+    with tempfile.TemporaryDirectory(prefix="swatch-webct-") as tmp:
+        web = Path(tmp) / "web"
+        shutil.copytree(WEB, web)
+        target = web / "app.js"
+        target.write_text(
+            target.read_text("utf-8") + _SELFTEST_INJECT, encoding="utf-8"
+        )
+
+        for name, fn in (("DOM id 对照", check_dom_ids),
+                         ("CFG 路径对照", check_cfg_paths)):
+            # 内层对照会打印 FAIL，那是**预期**的；静音掉，只留下面一行结论。
+            sink = io.StringIO()
+            with contextlib.redirect_stdout(sink):
+                try:
+                    ok = fn(web)
+                except Exception:  # noqa: BLE001 — 抛异常也算抓住
+                    ok = False
+            caught = not ok
+            print(f"  {GREEN if caught else RED}[{'ok' if caught else 'FAIL'}]{RESET} "
+                  f"{name} → {'已抓住' if caught else '**没抓住（对照是空转的）**'}")
+            failures += 0 if caught else 1
+
+    return 0 if failures == 0 else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="check_web_contract.py")
     parser.add_argument("--url", default="ws://127.0.0.1:8060/ws")
     parser.add_argument("--frames", type=int, default=3)
+    parser.add_argument("--offline", action="store_true",
+                        help="只跑 1、2（不连服务；第 3 项记为 N/A）")
+    parser.add_argument("--selftest", action="store_true",
+                        help="注入假引用验证 1、2 的有效性")
     args = parser.parse_args(argv)
+
+    if args.selftest:
+        return selftest()
 
     print("=" * 72)
     print("前端契约回归（引用 → 定义）")
@@ -228,15 +304,19 @@ def main(argv: list[str] | None = None) -> int:
     passed &= check_dom_ids()
     passed &= check_cfg_paths()
 
-    try:
-        frame = asyncio.run(_grab_frame(args.url, args.frames))
-    except Exception as exc:  # noqa: BLE001 — 连不上就是失败，要把原因打出来
-        print(f"[3] 载荷字段：{RED}无法连接 {args.url}{RESET}  {exc}")
-        frame = None
-    if frame is None:
-        passed = False
+    if args.offline:
+        print("[3] 载荷字段：N/A：--offline，未连服务"
+              "（在线项见 tools/selfcheck_connectivity.py）")
     else:
-        passed &= check_payload(frame)
+        try:
+            frame = asyncio.run(_grab_frame(args.url, args.frames))
+        except Exception as exc:  # noqa: BLE001 — 连不上就是失败，要把原因打出来
+            print(f"[3] 载荷字段：{RED}无法连接 {args.url}{RESET}  {exc}")
+            frame = None
+        if frame is None:
+            passed = False
+        else:
+            passed &= check_payload(frame)
 
     print()
     print("=" * 72)

@@ -1,13 +1,13 @@
 """
-L1 — 期权合约工厂。
+L2 — 期权合约工厂。
 ====================
 唯一职责：把"标的 + 到期日 + 行权价 + 方向"翻译成 IBKR 的合约对象。
 
-这是 L1 中**仅有的两个**允许 import ``ib_async`` 的模块之一（另一个是
-``ibkr_gateway``）。其余 L1 模块通过鸭子类型与本模块交互，从而在离线模拟
-模式下完全不触碰 ``ib_async``。
+这是 L2 中**直接** import ``ib_async`` 的两个模块之一（另一个是
+``ibkr_gateway``；层内完整的依赖边界见本包 ``__init__`` docstring）。其余 L2
+模块通过鸭子类型与本模块交互，从而在离线夹具模式下完全不触碰 ``ib_async``。
 
-依赖：L0（config / contracts / core）。
+依赖：L0（config / contracts）与 L1（core）。
 """
 
 from __future__ import annotations

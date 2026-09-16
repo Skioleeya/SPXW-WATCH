@@ -1,5 +1,5 @@
 """
-L3 — 毛刺过滤。
+L5 — 毛刺过滤。
 ===============
 唯一职责：判断一个网格点的当前 IV 是否可信，输出 ``Quality`` 标签。
 
@@ -19,7 +19,7 @@ L3 — 毛刺过滤。
    是因为标准差本身会被离群点污染）
 5. tick 过旧
 
-依赖：L0。
+依赖：L0（config / contracts）与 L1（core）。
 """
 
 from __future__ import annotations

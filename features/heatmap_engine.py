@@ -1,5 +1,5 @@
 """
-L3 — 日内动能热力图引擎。
+L5 — 日内动能热力图引擎。
 ==========================
 唯一职责：把"每个网格点的时间序列"折叠成一张 2D 矩阵——
 纵轴行权价、横轴会话时间桶、颜色值 ΔIV（波动率点）。
@@ -9,6 +9,30 @@ L3 — 日内动能热力图引擎。
 IV 的绝对水平在 0DTE 上几乎不变，画出来是一片均匀的色块，什么信息都看不出来。
 真正有意义的是**变化**：哪个行权价在哪个时刻突然被重新定价。所以矩阵里存的是
 相邻时间桶之间的 IV 差。
+
+⚠️ 核心契约：矩阵**只含已走满的桶**（2026-09-15 白纸重写）
+---------------------------------------------------------
+**一个网格单元 = 一个已走满的时间桶。**
+
+矩阵列取 ``0 .. current-1``（即 ``last_done = current - 1``），共 ``current`` 列；
+**正在走的那个桶（``current``）不得出列**。``bucket_index`` 仍然是 ``current``
+（它是**时间读数**，供前端画进度，不是列数）。
+
+为什么必须这样 —— 这是上一版最贵的一个缺陷
+------------------------------------------
+上一版把 ``current`` 也出了列（``labels[:current+1]``）。那个桶还没走完，
+同一桶内每次推送都会覆盖它的 IV ⇒ 相邻两帧之间**这个桶的 ΔIV 一直在变** ⇒
+前端看到的就是"最后一列颜色持续闪动、永远定不下来"。而它左边那些已走满的列
+其实一动不动 —— 用户描述的"网格更新后颜色持续变化、无法锁定"就是这个。
+
+修法不是在前端加缓存（那是第二份真相，且要处理"什么时候算定稿"），
+而是**让数据源头不再产生会变的值**：桶没走满就不出列。于是颜色成了数据的
+纯函数，天然恒定。
+
+配套：``SkewEngine.series(moment)`` 同样只返回 ``bucket <= last_done`` 的点
+（``latest()`` 不受影响 —— 顶栏实时读数不是网格）。
+
+⚠️ 写回归夹具时也要守这条：把"正在走的桶"当定稿，会与产品犯同一个错。
 
 前向填充（forward fill）—— **有上限**
 ------------------------------------
@@ -31,7 +55,7 @@ IV 的绝对水平在 0DTE 上几乎不变，画出来是一片均匀的色块�
 30 秒桶**，在图上画出一堵与真冲量无法区分的假墙。色标下限只有 ±0.5 波动率点，
 几个点的跳变就直接打满，肉眼完全分不出来。
 
-所以这里引入 ``break``：调用方（L3 编排器，它才知道全局 tick 年龄）在
+所以这里引入 ``break``：调用方（L5 编排器，它才知道全局 tick 年龄）在
 "断流恢复"的那一刻传 ``break_now=True``，本桶的值**只作为新段的起点、不与
 前一个值做差**，即该桶输出 ``None``（留白）。宁可留白，也不画假信号。
 
@@ -69,7 +93,7 @@ Call**。如果历史按 ``(行权价, 方向)`` 分键，翻转之后这一行�
 在 ``use_model_greeks = false`` 时按 model → last → bid → ask 降级 ⇒ **关掉该开关，
 每次现价穿越行权价都会在图上打出一个假的 ΔIV 跳变**。它是本节的**前提条件**。
 
-依赖：L0。
+依赖：L0（config / contracts）。
 """
 
 from __future__ import annotations
@@ -78,6 +102,8 @@ from config import loader
 from contracts.enums import TRUSTWORTHY_QUALITIES, OptionRight
 from contracts.feature import HeatmapMatrix, ImpulseCell
 from contracts.tick import OptionRef
+
+from features.heatmap_snapshot import dump_bucket, load_snapshot
 
 _SERIAL = "serialization"
 
@@ -193,15 +219,22 @@ class HeatmapEngine:
         依赖的契约 —— 依赖它，就等于把帧的行序建立在一个跨模块的巧合上。
         帧的顺序是**对外契约**（前端纵轴按它渲染），所以必须由产出点保证。
         降序的含义：与屏幕自上而下一致（见 ``web/heatmap.js`` 的 ``inverse``）。
+
+        ⚠️ **列只到 ``last_done = current - 1``**（见模块 docstring 的核心契约）。
+        ``current`` 那个桶还在走，它的 IV 还会被覆盖 ⇒ 出了列就会让最后一列
+        的颜色持续变化、永远锁不住。
         """
         if not rows:
             return None
 
         current = self._clock.bucket_index_of_ts(now)
-        if current + 1 < self._min_buckets:
+        # 已走满的桶的序号上限。current=0 时为 -1 ⇒ 一列都没有 ⇒ 下面的
+        # min_buckets 门槛必然拦下（min_buckets >= 1），不会产出空行。
+        last_done = current - 1
+        if current < self._min_buckets:
             return None
 
-        labels = tuple(self._clock.bucket_labels()[: current + 1])
+        labels = tuple(self._clock.bucket_labels()[:current])
 
         strikes: list[float] = []
         rights: list[OptionRight] = []
@@ -211,7 +244,7 @@ class HeatmapEngine:
         for ref in sorted(rows, key=lambda r: r.strike, reverse=True):
             key = float(ref.strike)
             bucket = self._buckets.get(key)
-            row = self._row_values(bucket, current) if bucket else None
+            row = self._row_values(bucket, last_done) if bucket else None
             if row is None:
                 continue
             strikes.append(ref.strike)
@@ -219,7 +252,7 @@ class HeatmapEngine:
             values.append(row)
             # 体积矩阵：与 values 同形，取 tick 计数
             tick_bucket = self._tick_counts.get(key, {})
-            vol_row = self._row_volumes(tick_bucket, current)
+            vol_row = self._row_volumes(tick_bucket, last_done)
             volumes.append(vol_row)
 
         if not strikes:
@@ -236,10 +269,15 @@ class HeatmapEngine:
         )
 
     def _row_values(
-        self, bucket: dict[int, float] | None, current: int
+        self, bucket: dict[int, float] | None, last_done: int
     ) -> tuple[float | None, ...] | None:
         """
         把稀疏的桶字典展开成定长行，并前向填充后取差分。
+
+        ``last_done`` 是**已走满**的桶序号上限（``current - 1``）—— 参数名刻意
+        不叫 ``current``：旧版按 ``current`` 展开会把正在走的桶也画进去，
+        那正是"最后一列颜色锁不住"的根因（见模块 docstring 的核心契约）。
+        改名后任何漏改的调用点都会立刻 ``NameError``，不会静默沿用旧语义。
 
         返回 ``None`` 仅表示"该行一个桶都没写过"（整行丢弃）。只有**一个**
         桶有值（不一定是第 0 桶——冷启动/重启时当前桶常非第 0 桶）时，
@@ -266,7 +304,7 @@ class HeatmapEngine:
             return None
 
         first = min(bucket)
-        if first > current:
+        if first > last_done:
             return None
 
         blocked = self._breaks | self._zone_starts
@@ -275,7 +313,7 @@ class HeatmapEngine:
         previous: float | None = None
         last_seen: int | None = None
 
-        for index in range(current + 1):
+        for index in range(last_done + 1):
             raw = bucket.get(index)
             if raw is not None:
                 last_seen = index
@@ -297,17 +335,17 @@ class HeatmapEngine:
         return tuple(out)
 
     def _row_volumes(
-        self, tick_bucket: dict[int, int] | None, current: int
+        self, tick_bucket: dict[int, int] | None, last_done: int
     ) -> tuple[int | None, ...]:
         """
         把稀疏的 tick 计数字典展开成定长行。
         与 ``_row_values`` 同形：有值的位置给计数，无值给 None。
         """
         if not tick_bucket:
-            return tuple([None] * (current + 1))
+            return tuple([None] * (last_done + 1))
 
         out: list[int | None] = []
-        for index in range(current + 1):
+        for index in range(last_done + 1):
             count = tick_bucket.get(index)
             out.append(count if count is not None else None)
         return tuple(out)
@@ -339,58 +377,13 @@ class HeatmapEngine:
     # ------------------------------------------------------------------ #
     # 持久化快照
     # ------------------------------------------------------------------ #
+    # 编解码逻辑在 heatmap_snapshot（本模块只管状态与出矩阵）。
+    # 这两个方法保留为薄转调，是为了让调用方不必同时认识两个模块。
 
     def dump_bucket(self, bucket_index: int) -> dict[float, float]:
-        """
-        提取某一桶的原始 IV 字典 ``{strike: iv}``，**键按行权价降序**。
-
-        只返回该桶有值的档位；空桶返回空字典。供 ``AsyncPersistenceWriter``
-        序列化写入 SQLite。
-
-        为什么要在这里排序
-        ------------------
-        ``_buckets`` 的键序是**首次出现顺序**，不是排序结果：现价先上移、再
-        回落到会话初低点之下时，更低的档位会被追加到字典末尾（实测 ±12 档下
-        一次 7700→7820→7600 的往返即可复现）。JSON 对象的键序会被原样写进
-        ``ivs_json``，而 ``recover()`` / ``load_snapshot()`` 都不重排 —— 乱序
-        会落盘并被继承下去。直接读 ``data/sessions/<到期日>.db`` 的人（或脚本）
-        若默认"键序即降序"，就会静默错配行号。
-
-        排一次序，把这条不变量收回到快照的产出点，让落盘产物与内部字典的
-        历史无关。由 ``tools/check_persistence.py`` 的键序用例守住。
-
-        为什么是**降序**（2026-09-13 统一）
-        ----------------------------------
-        对外帧的 ``strikes`` 与屏幕自上而下都是降序（见 ``build()`` 与
-        ``web/heatmap.js`` 的 ``yAxis.inverse``）。冷数据一度是升序，与帧方向
-        相反 —— 同一个系统里两处行序相反，读代码的人迟早串味。现在两边同向：
-        **高行权价在前**。冷数据仍是内部恢复产物（键序不影响 ``_buckets`` 的
-        查找，``build()`` 自己会显式排序），统一只为消除这层反向语义。
-        """
-        out: dict[float, float] = {}
-        for strike in sorted(self._buckets, reverse=True):
-            iv = self._buckets[strike].get(bucket_index)
-            if iv is not None:
-                out[float(strike)] = float(iv)
-        return out
+        """某一桶的原始 IV 字典，键按行权价降序。见 ``heatmap_snapshot.dump_bucket``。"""
+        return dump_bucket(self._buckets, bucket_index)
 
     def load_snapshot(self, columns: list[dict]) -> None:
-        """
-        从持久化存储恢复原始 IV 桶。
-
-        ``columns`` 格式：
-        ``[{bucket_index: int, ivs: {float(strike): float}, break: bool}, ...]``
-
-        恢复后 ``_breaks`` 同时重建，但**不恢复任何差分产物**（ΔIV 在
-        ``build()`` 时按当前上下文重新计算）。
-        """
-        self._buckets.clear()
-        self._breaks.clear()
-        for col in columns:
-            idx = int(col["bucket_index"])
-            if col.get("break"):
-                self._breaks.add(idx)
-            for strike_str, iv in col.get("ivs", {}).items():
-                key = float(strike_str)
-                bucket = self._buckets.setdefault(key, {})
-                bucket[idx] = float(iv)
+        """从持久化存储恢复原始 IV 桶。见 ``heatmap_snapshot.load_snapshot``。"""
+        load_snapshot(self._buckets, self._breaks, columns)

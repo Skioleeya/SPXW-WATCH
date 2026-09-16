@@ -1,5 +1,6 @@
 {
-  "_comment": "L5 传输层 — HTTP 静态页与 WebSocket 同端口。client_queue_size=1 表示慢客户端直接丢帧（fail-closed）。ws_compression 必须为 true：它决定 WebSocket 是否协商 permessage-deflate，实测开关一次是 4.41GB/日 ↔ 0.40GB/日 的差别（11 倍），由 tools/check_ws_compression.py 守住。",
+  "_comment": "L7 传输层 — HTTP 静态页与 WebSocket 同端口。client_queue_size=1 表示慢客户端直接丢帧（fail-closed）。ws_compression 必须为 true：它决定 WebSocket 是否协商 permessage-deflate，实测开关一次是 4.41GB/日 ↔ 0.40GB/日 的差别（11 倍），由 tools/check_ws_compression.py 守住（⚠️ 该检查器**待建**，见 README §6）。",
+  "_push_comment": "推送节奏。⚠️ 推送**不对齐**桶边界，这是刻意的：PushLoop 按本键固定节奏醒来，只在帧序号变化（或心跳超时）时广播。热力图新列出现的时刻由 L6 的 heatmap_bucket_seconds 决定，与本键无关 —— 两者相差最多一个推送周期（400ms，相对 30s 桶 = 1.3%），不需要额外的对齐机制。**曾经这里有一个 bucket_seconds_s 键与一段『推送必须对齐世界时间桶边界』的注释，但那个机制从未实现**（键无人读，注释描述的是不存在的行为）；它由 --check 的 [7] 抓出来并删除。若日后确要对齐，须同时加键、实现、并在本注释里写明。",
   "host": "127.0.0.1",
   "http_port": 8060,
   "ws_path": "/ws",

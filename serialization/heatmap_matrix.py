@@ -1,5 +1,5 @@
 """
-L4 — 热力图矩阵编码。
+L6 — 热力图矩阵编码。
 =====================
 唯一职责：把 ``HeatmapMatrix`` 编码成前端能直接消费的 JSON 结构。
 
@@ -43,11 +43,11 @@ L4 — 热力图矩阵编码。
 几个基线桶并成一组）、色标量程是按什么规则取的（聚合后数值量级会变，``vmax``
 必须按同一规则重算，否则一换周期整张图就饱和或发灰）、以及定标整数的分母。
 
-与其让前端抄一份常量（那就是两份真相，改一处忘一处），不如由 L4 在帧里带上。
+与其让前端抄一份常量（那就是两份真相，改一处忘一处），不如由 L6 在帧里带上。
 ``scale_policy`` 只是**参数**，规则本体仍在 ``serialization/numeric.robust_bound``；
 前端那份实现由 ``tools/check_period_aggregation.py`` 与 Python 版逐值对拍。
 
-依赖：L0、L4（numeric / bitmap_codec）。
+依赖：L0、L6（numeric / bitmap_codec）。
 """
 
 from __future__ import annotations

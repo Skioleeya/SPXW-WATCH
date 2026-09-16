@@ -1,5 +1,5 @@
 """
-L3 — 特征编排器。
+L5 — 特征编排器。
 ==================
 唯一职责：按固定顺序跑完一轮特征计算，产出一个自洽的 ``FeatureBundle``。
 
@@ -15,41 +15,48 @@ L3 — 特征编排器。
     6. 折叠出 ΔIV 矩阵 → HeatmapMatrix
     7. 插值定位 25Δ → SkewPoint（并写入折线序列）
     8. 汇总 ATM 读数 → AtmSnapshot
+    9. 按间隔重拟合曲面 → SurfaceSummary（**贵，按 surface_refit_interval_s 限流**）
+
+第 9 步在代码里排在**最前面**执行（这样所有早退路径都能带上缓存的摘要），
+但它与第 1–8 步之间没有数据依赖，顺序不影响结果。
 
 先过滤再算动能，是因为一个毛刺点会同时污染它自己的冲量和整个时间桶的差分；
 反过来"先算再过滤"就必须在矩阵层再做一次清洗，逻辑会重复。
 
-依赖：L0、L2（TickStore）、L3 内部。
+依赖：L0（config / contracts）、L1（core）、L3（存储，鸭子类型）、L5 内部。
 """
 
 from __future__ import annotations
 
 from config import loader
-from contracts.enums import TRUSTWORTHY_QUALITIES, OptionRight, Quality
+from contracts.enums import TRUSTWORTHY_QUALITIES, Quality
 from contracts.feature import (
     AtmSnapshot,
     FeatureBundle,
     ImpulseCell,
+    SurfaceSummary,
 )
 from contracts.tick import OptionRef, OptionTick
 from core.ring_buffer import RingBuffer
 
+from features.atm_reader import build_atm
 from features.glitch_filter import GlitchFilter
 from features.heatmap_engine import HeatmapEngine
 from features.impulse_engine import ImpulseEngine
 from features.skew_engine import SkewEngine
 from features.strike_window import StrikeWindow
+from features.surface_engine import SurfaceEngine
 
 _FEAT = "features"
 _SERIAL = "serialization"
 
 
 class FeatureEngine:
-    """L3 的统一入口。"""
+    """L5 的统一入口。"""
 
     __slots__ = (
         "_store", "_clock", "_window", "_glitch",
-        "_impulse", "_heatmap", "_skew", "_each_side", "_session_key",
+        "_impulse", "_heatmap", "_skew", "_surface", "_each_side", "_session_key",
         "_feed_gap_s", "_feed_gap_open", "_writer",
     )
 
@@ -59,8 +66,18 @@ class FeatureEngine:
         clock,
         feat_cfg: dict,
         serial_cfg: dict,
+        surface_model,
+        is_delayed,
         writer: Any | None = None,
     ) -> None:
+        """
+        ``surface_model`` / ``is_delayed`` **必填**，不给默认值。
+
+        理由：曲面残差是本项目的产品指标之一（见 ``ARCHITECTURE.md §1``）。
+        如果做成"没传模型就跳过曲面"，那么任何一处漏接线都会表现为
+        "曲面一直空着"，而那是**静默**的 —— 与"没有曲面功能"无法区分。
+        必填参数会让漏接线在启动时立刻 ``TypeError``。
+        """
         self._store = store
         self._clock = clock
         self._window = StrikeWindow(feat_cfg)
@@ -68,6 +85,7 @@ class FeatureEngine:
         self._impulse = ImpulseEngine(feat_cfg)
         self._heatmap = HeatmapEngine(clock, serial_cfg)
         self._skew = SkewEngine(feat_cfg, serial_cfg, clock)
+        self._surface = SurfaceEngine(store, clock, surface_model, feat_cfg, is_delayed)
         self._each_side = loader.as_int(
             feat_cfg, "heatmap_rows_each_side", module=_FEAT
         )
@@ -87,25 +105,29 @@ class FeatureEngine:
     # ------------------------------------------------------------------ #
 
     def compute(self, now: float | None = None) -> FeatureBundle:
-        # 时间源必须取自注入的会话时钟，不能用墙钟：模拟模式下会话时间被加速，
+        # 时间源必须取自注入的会话时钟，不能用墙钟：夹具注入的时间源可以把会话时间加速，
         # 墙钟会落在开盘之前，分桶全部钳到第 0 桶，热力图就永远差不出第一列。
         moment = now if now is not None else self._clock.now_ts()
         self._sync_session()
         # 断流恢复的那一刻必须留白，否则整段断线的变化会被压进单个桶 ——
         # 画出一堵与真冲量无法区分的假墙（见 HeatmapEngine 模块 docstring）。
         feed_gap_break = self._note_feed_gap(moment)
+        # 曲面拟合放在最前面，这样**所有**早退路径都能带上缓存的摘要 ——
+        # 否则"现价还没到"或"窗口还没数据"的那几帧会丢曲面字段，
+        # 前端就得处理"这个字段有时在有时不在"（第二份真相）。
+        surface = self._surface_summary(moment)
         spot = self._store.spot()
 
         if spot <= 0:
-            return FeatureBundle(ts=moment, spot=0.0)
+            return FeatureBundle(ts=moment, spot=0.0, surface=surface)
 
         rows = self._window.rows(self._session_refs(), spot, self._each_side)
         if not rows:
-            return FeatureBundle(ts=moment, spot=spot)
+            return FeatureBundle(ts=moment, spot=spot, surface=surface)
 
         cells = self._build_cells(rows, moment)
         if not cells:
-            return FeatureBundle(ts=moment, spot=spot)
+            return FeatureBundle(ts=moment, spot=spot, surface=surface)
 
         self._heatmap.observe(cells, moment, break_now=feed_gap_break)
         matrix = self._heatmap.build(rows, spot, moment)
@@ -122,11 +144,27 @@ class FeatureEngine:
             cells=cells,
             heatmap=matrix,
             skew=skew_point,
-            skew_series=self._skew.series(),
+            skew_series=self._skew.series(moment),
             atm=atm,
+            surface=surface,
             quality_ok=ok,
             quality_flagged=len(cells) - ok,
         )
+
+    def _surface_summary(self, moment: float) -> SurfaceSummary | None:
+        """
+        到间隔就重拟合，否则复用缓存。
+
+        ⚠️ 判据放在**本层**（``SurfaceEngine.due()``），调度权在 L8。
+        这样"不许每轮都跑"这条约束不依赖调用方记得 —— 忘了限流的后果是
+        帧率塌掉（SVI 单次拟合实测中位 618 ms，推送节拍 400 ms）。
+
+        首轮必然拟合（``due()`` 的初值是 ``-inf``），之后每
+        ``surface_refit_interval_s`` 一次。
+        """
+        if self._surface.due(moment):
+            return self._surface.refit(moment)
+        return self._surface.summary()
 
     # ------------------------------------------------------------------ #
     # 各步骤
@@ -175,7 +213,7 @@ class FeatureEngine:
         于是跨会话之后，旧会话的 IV 会被原样写进新会话的时间桶。
 
         这里按 ``ref.expiry`` 过滤，而不是"翻篇时清空 tick 存储"：清空依赖调用
-        顺序，模拟模式下时钟连续推进，翻篇那一刻新会话的 tick 可能已经到了，
+        顺序，夹具注入的时钟连续推进时，翻篇那一刻新会话的 tick 可能已经到了，
         清空会把刚到的数据一起清掉。过滤与顺序无关。
 
         用到期日当会话身份不是将就：0DTE 的到期日**就是**这张合约的身份，而
@@ -206,82 +244,8 @@ class FeatureEngine:
         skew_point,
         now: float,
     ) -> AtmSnapshot:
-        atm_strike = StrikeWindow.nearest_strike(
-            (c.strike for c in cells), spot
-        )
-
-        atm_delta = None
-        if atm_strike is not None:
-            for cell in cells:
-                if cell.strike == atm_strike and cell.delta is not None:
-                    atm_delta = cell.delta
-                    break
-
-        return AtmSnapshot(
-            spot=spot,
-            atm_strike=atm_strike,
-            atm_iv=self._atm_iv(cells, atm_strike, skew_point),
-            atm_delta=atm_delta,
-            straddle_price=self._straddle(cells, atm_strike),
-            put25_iv=skew_point.put25_iv if skew_point else None,
-            call25_iv=skew_point.call25_iv if skew_point else None,
-            skew_25d_vol_points=(
-                skew_point.skew_25d_vol_points if skew_point else None
-            ),
-            butterfly_vol_points=(
-                skew_point.butterfly_vol_points if skew_point else None
-            ),
-            ts=now,
-        )
-
-    def _atm_iv(
-        self,
-        cells: tuple[ImpulseCell, ...],
-        atm_strike: float | None,
-        skew_point,
-    ) -> float | None:
-        """
-        平值 IV。
-
-        优先取平值档 Put 与 Call 的均值——热力图每档只保留虚值一侧，直接用它
-        会得到"平值档恰好是 Call 时只能看到 Call IV"的偏差，在偏斜较陡时这个
-        偏差可以到 1 个波动率点以上。两侧都拿不到时才退回微笑插值。
-        """
-        if atm_strike is not None and cells:
-            expiry = cells[0].ref.expiry
-            sides: list[float] = []
-            for right in (OptionRight.PUT, OptionRight.CALL):
-                ref = OptionRef(strike=float(atm_strike), right=right, expiry=expiry)
-                tick = self._store.latest_option(ref)
-                if tick is not None:
-                    sides.append(float(tick.iv))
-            if len(sides) == 2:
-                return sum(sides) / 2.0
-            if len(sides) == 1:
-                return sides[0]
-
-        return skew_point.atm_iv if skew_point else None
-
-    def _straddle(
-        self, cells: tuple[ImpulseCell, ...], atm_strike: float | None
-    ) -> float | None:
-        """
-        平值跨式价格 = 同档 Put + Call 的期权价之和。
-
-        热力图每档只保留 OTM 一侧，所以这里必须回到存储里把另一侧也取出来。
-        """
-        if atm_strike is None or not cells:
-            return None
-        expiry = cells[0].ref.expiry
-
-        total = 0.0
-        for right in (OptionRight.PUT, OptionRight.CALL):
-            ref = OptionRef(strike=float(atm_strike), right=right, expiry=expiry)
-            tick = self._store.latest_option(ref)
-            if tick is None or tick.opt_price is None:
-                return None
-            total += float(tick.opt_price)
-        return total
+        """转调 ``atm_reader.build_atm()`` —— 汇总逻辑不在本模块（见该模块 docstring）。"""
+        return build_atm(self._store, cells, spot, skew_point, now)
 
     def _persist_current_bucket(self, now: float, skew_point=None) -> None:
         """
@@ -347,13 +311,14 @@ class FeatureEngine:
         """清空所有按会话累积的状态。由 ``_sync_session()`` 在翻篇时触发。"""
         self._heatmap.reset()
         self._skew.reset()
+        self._surface.reset()
 
     def restore_heatmap(self, columns: list[dict]) -> None:
-        """从持久化存储恢复热力图原始 IV 桶。供 L6 组装层在启动时调用。"""
+        """从持久化存储恢复热力图原始 IV 桶。供 L8 组装层在启动时调用。"""
         self._heatmap.load_snapshot(columns)
 
     def restore_skew(self, points: list) -> None:
-        """从持久化存储恢复 Skew 折线序列。供 L6 组装层在启动时调用。"""
+        """从持久化存储恢复 Skew 折线序列。供 L8 组装层在启动时调用。"""
         self._skew.load_series(points)
 
     def windows(self) -> tuple[int, ...]:
@@ -362,3 +327,8 @@ class FeatureEngine:
     @property
     def glitch_filter(self) -> GlitchFilter:
         return self._glitch
+
+    @property
+    def surface_engine(self) -> SurfaceEngine:
+        """给 L8 读诊断量（``model_name`` / ``refits`` / ``refit_interval_s``）。"""
+        return self._surface

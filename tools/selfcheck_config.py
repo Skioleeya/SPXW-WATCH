@@ -1,252 +1,248 @@
 """
-L6 — 配置自检。
-================
-唯一职责：校验 ``config/`` 的**结构完整性**：能不能读、彼此是否独立、
-必需键是否齐备、容量是否安全、每个键是否归属于唯一的模块并且真的被接线。
+配置结构完整性检查（**不属于任何运行时层**）。
+================================================
+
+唯一职责：校验 ``config/`` 的**结构** —— 能不能读、彼此是否独立、键本身是否干净、
+每个键是否归属于唯一的模块并且真的被接线。
 
 检查项
 ------
-[3] 配置文件可读性
-[4] 配置零耦合（不得跨文件引用）
-[5] 关键配置项存在
-[6] 订阅容量与 IBKR 100 条上限；热力图显示窗口不得宽于订阅窗口
-[7] 配置键归属与接线 —— 每个键只能被它所属模块读取；且必须真的被读取
-[11] 出站限速桶容量与 IBKR 配额
+``[3]`` 配置文件可读性（含 **JSON 重复键**）
+``[4]`` 配置零耦合（不得跨文件引用）
+``[5]`` 键级完整性（空键名 / 空白键名 / null 值）
+``[7]`` 配置键归属与接线（读取点 ↔ 声明键**双向推导**）
 
-对应项目硬性要求第 3 条（禁止硬编码、必须配置化）与第 5 条
-（配置文件彼此独立、一个文件不得含跨层级/跨模块的变量）。
+对应项目硬性要求第 3 条（禁止硬编码、必须配置化）与第 5 条（配置文件彼此独立、
+一个文件不得含跨层级 / 跨模块的变量）。
 
-[7] 的判定依据是工程既有的 ``module=`` 约定：每次取键都显式声明"这个键属于哪个
-配置文件"。本检查把这个声明与实际配置文件对照 —— 键放错文件、或键没人读，
-都会在这里暴露。它不另建一张"键 → 归属"的映射表，避免制造第二份真相。
+⚠️ 为什么没有 ``REQUIRED_KEYS``
+-------------------------------
+旧实现有一张手工维护的"关键配置项必须存在"清单（11 个模块 × 若干键），配一个
+``[5] 关键配置项存在`` 逐条对照。本项目**刻意不重建它**：
 
-[11] 的存在理由：``ib_async`` 的 ``Client`` 自带 ``MaxRequests = 45`` 这个**隐式
-默认值**。项目把它搬进了 ``config/ibkr.json``，于是"桶到底多大"第一次成为一份
-可读的真相 —— 但只有加上这条校验，它才不至于在下次改动里悄悄失配。这里检查的是
-四件事：桶容量没超官方上限、滑动窗口长度为正、单批合约确认不会自己撑满桶、以及
-本项目的订阅节奏不超过桶容量。这些关系横跨 ``ibkr.json`` 与 ``subscription.json``，
-**由检查器读取两个文件**来核对 —— 配置文件之间仍然零引用（要求第 5 条）。
+* ``config/loader.py`` 已经是 fail-fast（缺键即抛 ``ConfigError``，加载器不含任何
+  业务默认值），"缺键"这件事在**运行期**就已经是响的；
+* "声明的键必须被读取、读取的键必须被声明"由 ``[7]`` 的**双向推导**得出 —— 机制
+  覆盖了那张清单的全部职能，且新增配置键时**不需要回来改工具**。
+
+手工清单的真实代价是"清单越守越长，且漏一项就静默失守"。旧清单已经腐烂过一次：
+``Frame`` 加了 ``surface`` 字段而帧字段清单没跟着长（见 ``selfcheck_connectivity``
+的模块注释）。所以 ``[5]`` 改为检查**键本身的形态**，那才是清单覆盖不到的地方。
+
+``[3]`` 为什么要查 JSON 重复键
+------------------------------
+``json.loads`` 对重复键**静默取最后一个**，不报错、不警告。这意味着配置里同一个键
+写了两遍（改配置时忘了删旧的）时，**前一个值被无声丢弃** —— 改了配置却"没生效"，
+而没有任何信号。这是本项目头号禁忌（静默错值）的配置版，只能靠逐对扫描拦住。
 """
 
 from __future__ import annotations
 
+import json
+
 from tools.selfcheck_core import (
     CONFIG_DIR,
+    CONFIG_SUFFIX,
     FORBIDDEN_CONFIG_KEYS,
-    REQUIRED_KEYS,
+    META_KEY_PREFIX,
     WHOLE_DICT_MODULES,
-    collect_reads,
     config_modules,
     declared_keys,
     fail,
     ok,
-    read_config,
     warn,
 )
-
-# 未接线键（配置里声明了但没有任何代码读取）一律视为失败。
-#
-# 这里曾经是 False（只报警告）：一次上线就抓出 7 个死键，而每个都需要产品决策，
-# 先留着 warn 免得 ``--check`` 长期变红。那 7 个键已于同日处理完毕（4 个接线、
-# 3 个删除），于是收紧为 True —— 从此任何**新出现**的死键会直接让自检失败，
-# 而不是静静躺在警告里。这正是检查 [7] 存在的意义：配置项一旦没人读，就是
-# 一份过期的真相。
-UNWIRED_IS_FAILURE = True
-
-IBKR_SUBSCRIPTION_LIMIT = 100
-
-# IBKR 官方规则：出站消息速率上限 = 已分配行情行数 ÷ 2。
-# 默认 100 行 → 50 msg/s。违约错误码 100，累计 3 次会终止 API 会话。
-IBKR_MESSAGES_PER_LINE = 2
+from tools.selfcheck_reads import collect_reads
 
 
-def check_config_readable() -> tuple[dict[str, dict], int]:
-    print("\n[3] 配置文件可读性")
-    loaded: dict[str, dict] = {}
+# --------------------------------------------------------------------------- #
+# [3] 可读性
+# --------------------------------------------------------------------------- #
+
+
+def _duplicate_keys(path) -> list[str]:
+    """
+    返回该 JSON 文件里**重复出现的键路径**（含嵌套层级）。
+
+    用 ``object_pairs_hook`` 而不是 ``json.loads`` 的默认行为：默认行为是"后者覆盖
+    前者"，重复键在解析结果里完全看不见 —— 只有拿到底层的 pairs 才数得出来。
+    """
+    duplicates: list[str] = []
+
+    def hook(pairs):
+        seen: dict = {}
+        for key, value in pairs:
+            if key in seen:
+                duplicates.append(key)
+            seen[key] = value
+        return seen
+
+    json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=hook)
+    return duplicates
+
+
+def check_config_readable() -> int:
+    print("\n[3] 配置文件可读性（含 JSON 重复键）")
     failures = 0
+    modules = sorted(config_modules())
 
-    for name in sorted(REQUIRED_KEYS):
-        path = CONFIG_DIR / f"{name}.json"
-        if not path.exists():
-            fail(f"缺少 config/{name}.json")
+    if not modules:
+        fail(f"{CONFIG_DIR} 下没有任何 {CONFIG_SUFFIX} 文件")
+        return 1
+
+    for module in modules:
+        path = CONFIG_DIR / f"{module}{CONFIG_SUFFIX}"
+        try:
+            duplicates = _duplicate_keys(path)
+        except (json.JSONDecodeError, OSError) as exc:
+            fail(f"config/{module}{CONFIG_SUFFIX} 无法解析: {exc}")
             failures += 1
             continue
-        try:
-            loaded[name] = read_config(name)
-        except Exception as exc:  # noqa: BLE001 - 任何读取失败都要报出来
-            fail(f"config/{name}.json 无法解析: {exc}")
+
+        if duplicates:
+            fail(f"config/{module}{CONFIG_SUFFIX} 有重复键 {sorted(set(duplicates))}"
+                 f" —— json 静默取最后一个，先写的那份**已被无声丢弃**")
             failures += 1
 
     if not failures:
-        ok(f"{len(loaded)} 个模块配置全部可读")
-    return loaded, failures
+        ok(f"{len(modules)} 个配置文件全部可解析，且无重复键")
+
+    # 再走一次真实加载路径：loader 的 fail-fast 是运行期唯一的守卫，
+    # 这里提前跑一遍，免得把"缺文件 / 顶层不是 object"留到启动时才炸。
+    from config import loader
+
+    load_failures = 0
+    for module in modules:
+        try:
+            loader.load(module, reload=True)
+        except loader.ConfigError as exc:
+            fail(f"loader 无法加载 {module}: {exc}")
+            load_failures += 1
+    if not load_failures:
+        ok(f"{len(modules)} 个配置文件全部能被 loader 加载（fail-fast 路径通畅）")
+    return failures + load_failures
 
 
-def check_config_coupling(loaded: dict[str, dict]) -> int:
+# --------------------------------------------------------------------------- #
+# [4] 零耦合
+# --------------------------------------------------------------------------- #
+
+
+def _string_leaves(node):
+    """递归产出配置里所有的字符串叶子值。"""
+    if isinstance(node, str):
+        yield node
+    elif isinstance(node, dict):
+        for value in node.values():
+            yield from _string_leaves(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _string_leaves(item)
+
+
+def check_config_coupling() -> int:
     print("\n[4] 配置零耦合（不得跨文件引用）")
     failures = 0
-    names = set(REQUIRED_KEYS)
+    modules = sorted(config_modules())
+    names = {f"{m}{CONFIG_SUFFIX}" for m in modules}
 
-    for name, cfg in loaded.items():
+    from tools.selfcheck_core import read_config
+
+    for module in modules:
+        cfg = read_config(module)
+
         for key in cfg:
             if key.strip().lower() in FORBIDDEN_CONFIG_KEYS:
-                fail(f"config/{name}.json 含跨文件引用键 {key!r}")
+                fail(f"config/{module}{CONFIG_SUFFIX} 含跨文件引用键 {key!r}")
                 failures += 1
 
-        blob = repr(cfg)
-        for other in names:
-            if f"{other}.json" in blob:
-                warn(f"config/{name}.json 的取值里出现了 {other}.json，请确认不是引用")
+        # 注释里**允许**提到别的配置文件名（本项目大量注释在解释"为什么这个键
+        # 不放在另一个文件里"），所以只检查非 ``_`` 前缀的取值。
+        for key, value in cfg.items():
+            if key.startswith(META_KEY_PREFIX):
+                continue
+            for leaf in _string_leaves(value):
+                hit = sorted(n for n in names if n in leaf)
+                if hit:
+                    fail(f"config/{module}{CONFIG_SUFFIX} 的 {key!r} 取值里出现 "
+                         f"{hit} —— 配置文件之间不得互相引用")
+                    failures += 1
 
     if not failures:
-        ok("未发现配置之间的相互引用")
+        ok(f"未发现配置之间的相互引用（{len(modules)} 个文件彼此独立）")
     return failures
 
 
-def check_required_keys(loaded: dict[str, dict]) -> int:
-    print("\n[5] 关键配置项存在")
-    missing = 0
-
-    for name, keys in REQUIRED_KEYS.items():
-        cfg = loaded.get(name)
-        if cfg is None:
-            continue
-        for key in keys:
-            if key not in cfg:
-                fail(f"config/{name}.json 缺少必需键 {key!r}")
-                missing += 1
-
-    if not missing:
-        total = sum(len(v) for v in REQUIRED_KEYS.values())
-        ok(f"{total} 个关键配置项齐备")
-    return missing
+# --------------------------------------------------------------------------- #
+# [5] 键级完整性
+# --------------------------------------------------------------------------- #
 
 
-def check_subscription_capacity(loaded: dict[str, dict]) -> int:
-    print(f"\n[6] 订阅容量与 IBKR {IBKR_SUBSCRIPTION_LIMIT} 条上限")
-    try:
-        sub = loaded["subscription"]
-        side = int(sub["num_strikes_each_side"])
-        cap = int(sub["max_total_subscriptions"])
-    except (KeyError, ValueError, TypeError) as exc:
-        fail(f"无法核算订阅容量: {exc}")
-        return 1
-
-    projected = 4 * side + 1
-    if projected > IBKR_SUBSCRIPTION_LIMIT:
-        fail(f"档位 ±{side} 需要 {projected} 条行情，超过 IBKR 硬上限 "
-             f"{IBKR_SUBSCRIPTION_LIMIT}")
-        return 1
-    if projected > cap:
-        fail(f"档位 ±{side} 需要 {projected} 条，超过自设上限 {cap}")
-        return 1
-
-    ok(f"档位 ±{side} → {projected} 条行情（自设上限 {cap}，"
-       f"IBKR 上限 {IBKR_SUBSCRIPTION_LIMIT}）")
-
-    # 显示窗口不得宽于订阅窗口：热力图的每一行都取自**已订阅**的合约
-    # （``StrikeWindow.rows()`` 只在 ``FeatureEngine._session_refs()`` 里挑），
-    # 所以 ``heatmap_rows_each_side`` 一旦大于 ``num_strikes_each_side``，
-    # 多出来的档位**永远拿不到数据**，而配置看上去像是生效的 —— 正是本项目
-    # 最怕的"配置静默失效"。两个键分属两份配置文件（要求第 5 条禁止跨文件
-    # 引用），只能由检查器读两份来核对，手法与 [11] 相同。
-    try:
-        rows_each_side = int(loaded["features"]["heatmap_rows_each_side"])
-    except (KeyError, ValueError, TypeError) as exc:
-        fail(f"无法核算热力图显示窗口: {exc}")
-        return 1
-
-    if rows_each_side > side:
-        fail(f"热力图显示窗口 ±{rows_each_side} 宽于订阅窗口 ±{side}"
-             f"（features.json::heatmap_rows_each_side > "
-             f"subscription.json::num_strikes_each_side）—— 超出的档位永远没有数据")
-        return 1
-
-    ok(f"显示窗口 ±{rows_each_side} ≤ 订阅窗口 ±{side}")
-
-    # 光"显示 ≤ 订阅"还不够：两者相等（或只差一两档）时，现价一移动，滑动窗口
-    # 就把尾部的档位退订（``cancel_stale_before_add``），那几档在往返期间收不到
-    # tick；而 ``HeatmapEngine._prune()`` 只按时间裁剪、从不按行权价裁剪，于是
-    # 该行不会被删掉，只在中间空一截 —— 图上就是"行权价轴上的一条时间空洞"。
-    #
-    # 需要多少容差？推导：重建触发是"中心行权价偏移 ≥ T 档"。两次重建之间，
-    # 中心最多滞后 T 档，故现价可探出**已订阅窗口** T 档。此时显示窗口最低一档
-    # = 现价 − (T + R − 1) × 步长，订阅窗口最低一档 = 中心 − (S − 1) × 步长；
-    # 要求前者不低于后者即得 S − R ≥ T。
-    #
-    # 这条判据是**推出来的，不是拿观测拟合的**：tools/check_window_tolerance.py
-    # 用容差 = T−1 与 T 两条对照跑出洞/不出洞，把边界钉死。
-    try:
-        trigger = float(sub["recenter_trigger_strikes"])
-    except (KeyError, ValueError, TypeError) as exc:
-        fail(f"无法核算窗口重建触发步长: {exc}")
-        return 1
-
-    tolerance = side - rows_each_side
-    if tolerance < trigger:
-        fail(f"窗口容差只有 {tolerance} 档（订阅 ±{side} − 显示 ±{rows_each_side}），"
-             f"小于窗口重建触发 {trigger} 档 —— 现价一走就会退订显示窗口里的档位，"
-             f"热力图会在行权价轴上留下时间空洞（见 "
-             f"tools/check_window_tolerance.py）")
-        return 1
-
-    ok(f"窗口容差 {tolerance} 档 ≥ 重建触发 {trigger} 档"
-       f"（现价在容差带内往返不掉档）")
-    # 以上每条不变量命中即 return 1（提前退）；走到这里说明前几条全过，
-    # 故直接返回子检查的计数，不引入本函数从未使用的 failures 变量。
-    return _check_model_greeks_prerequisite(loaded)
-
-
-def _check_model_greeks_prerequisite(loaded: dict[str, dict]) -> int:
+def check_config_key_hygiene() -> int:
     """
-    ``use_model_greeks`` 必须是 true —— 它是热力图正确性的**前置条件**。
+    键**本身**的形态：空键名、带前后空格的键名、``null`` 取值。
 
-    为什么这是硬约束而不仅是"偏好"
-    ------------------------------
-    热力图每一行（一个行权价）只保留**一条**序列，键**不带方向**
-    （``HeatmapEngine`` 的 ``_buckets[strike][bucket]``）。而现价在动，
-    现价穿越某个行权价时，该行的取边就按 ``StrikeWindow.otm_right()``
-    从 Call 翻成 Put（或反之）。这条合并序列**只在两侧 IV 相等时才连续**。
+    这三类都不在"必需键清单"的覆盖范围里，却都会造成静默失效：
 
-    实测（2026-09-14，见 ``notes/memory/TROUBLESHOOTING.md §10``）：
-      ``use_model_greeks=true`` → Put/Call **差 0.000**（IBKR 的 model IV
-      一个行权价只给一个值）；
-      关掉后走 last 口径 → 两侧差 **5.5~6.3 个波动率点**，而色标只有 ±0.5。
-
-    也就是说：把这里误改成 false，程序**照常启动、照常出图、不报任何错**，
-    只是在每次现价穿越行权价时打出一根**随现价漂移的竖直假亮条** —— 典型
-    的"静默错值"，正是本项目最怕的一类。此前这条依赖**只写在代码注释里**
-    （``features/heatmap_engine.py`` / ``strike_window.py``），没有任何门禁守。
-
-    为什么放在 [6]
-    --------------
-    它和本节的窗口/容量不变量同族：都是"单个配置值单独看都合法，但组合起来
-    违反一个跨模块不变量"。放这里不新增编号，也就不牵动 ``selfcheck.py``
-    的清单与 RULES/SKILL 的映射。
+    * ``""`` 空键名 —— 永远取不到，是纯噪音；
+    * ``"port "`` 带空格 —— 代码里写 ``cfg["port"]`` 找不到，而肉眼看配置"明明有"；
+    * ``null`` 取值 —— 键声明了却没有值；``loader.as_*`` 会抛类型错，但那时已经是
+      启动期，且报错信息指向"类型不符"而不是"这个键根本是空的"。
     """
-    ibkr = loaded.get("ibkr")
-    if ibkr is None:
-        return 0  # 可读性 [3] 已报错，不重复报
+    print("\n[5] 键级完整性（空键名 / 空白键名 / null 值）")
+    failures = 0
+    modules = sorted(config_modules())
 
-    value = ibkr.get("use_model_greeks")
-    if value is True:
-        ok("use_model_greeks=true（热力图合并序列的前置条件成立）")
-        return 0
+    from tools.selfcheck_core import read_config
 
-    if value is False:
-        fail("config/ibkr.json::use_model_greeks=false：热力图每档只留一条不带方向"
-             "的 IV 序列，现价穿越行权价时取边 Put↔Call 翻转；只有 model 口径两侧"
-             "同值（实测差 0.000）才无跳变。关闭后走 last 口径两侧差 5.5~6.3 个"
-             "波动率点（色标仅 ±0.5）⇒ 每次穿越打出一根随现价漂移的竖直假亮条，"
-             "且不报任何错。见 notes/memory/TROUBLESHOOTING.md §10")
-        return 1
+    def walk(node, module: str, path: str) -> None:
+        nonlocal failures
+        if isinstance(node, dict):
+            for key, value in node.items():
+                where = f"{path}.{key}" if path else key
+                if key == "":
+                    fail(f"config/{module}{CONFIG_SUFFIX} 有空键名（在 {path or '顶层'}）")
+                    failures += 1
+                elif key != key.strip():
+                    fail(f"config/{module}{CONFIG_SUFFIX} 的键 {key!r} 首尾有空白"
+                         f" —— 代码按 {key.strip()!r} 取会取不到")
+                    failures += 1
+                if value is None:
+                    fail(f"config/{module}{CONFIG_SUFFIX} 的 {where!r} 取值为 null"
+                         f" —— 键声明了却没有值，启动时会在 loader 类型校验处才炸")
+                    failures += 1
+                walk(value, module, where)
+        elif isinstance(node, list):
+            for i, item in enumerate(node):
+                walk(item, module, f"{path}[{i}]")
 
-    fail(f"config/ibkr.json::use_model_greeks={value!r} 不是布尔值")
-    return 1
+    for module in modules:
+        walk(read_config(module), module, "")
+
+    if not failures:
+        ok(f"{len(modules)} 个配置文件无空键名 / 无空白键名 / 无 null 取值")
+    return failures
+
+
+# --------------------------------------------------------------------------- #
+# [7] 归属与接线
+# --------------------------------------------------------------------------- #
 
 
 def check_config_ownership() -> int:
-    print("\n[7] 配置键归属与接线（一个键只能属于一个模块）")
+    """
+    键归属与接线 —— **双向推导**，不依赖任何手工清单。
+
+    正向：每处 ``loader.xxx(cfg, "<key>", module="<mod>")`` 调用，其 ``<key>``
+    必须真的在 ``config/<mod>.json`` 里（键放错文件、或键名拼错 ⇒ 失败）。
+
+    反向：``config/<mod>.json`` 里声明的每个键，必须至少有一处代码读取它
+    （没人读的键 = 一份过期的真相 ⇒ 失败）。
+
+    判据完全来自工程既有的 ``module=`` 约定，**不另建"键 → 归属"映射表**，
+    避免制造第二份真相。
+    """
+    print("\n[7] 配置键归属与接线（读取点 ↔ 声明键双向推导）")
     declared = {m: declared_keys(m) for m in config_modules()}
     resolved, unresolved = collect_reads()
     failures = 0
@@ -255,11 +251,12 @@ def check_config_ownership() -> int:
     for site in resolved:
         if site.module not in declared:
             fail(f"{site.path}:{site.line} 以 module={site.module!r} 取键，"
-                 f"但 config/{site.module}.json 不存在")
+                 f"但 config/{site.module}{CONFIG_SUFFIX} 不存在")
             misplaced += 1
         elif site.key not in declared[site.module]:
             fail(f"{site.path}:{site.line} 以 module={site.module!r} 读 "
-                 f"{site.key!r}，但 config/{site.module}.json 里没有这个键（键与文件错位）")
+                 f"{site.key!r}，但 config/{site.module}{CONFIG_SUFFIX} 里没有"
+                 f"这个键（键与文件错位）")
             misplaced += 1
 
     failures += misplaced
@@ -267,100 +264,33 @@ def check_config_ownership() -> int:
         ok(f"{len(resolved)} 处取键调用全部落在其声明的配置文件里")
 
     for site in unresolved:
-        warn(f"{site.path}:{site.line} 的 module= 无法静态解析，"
-             f"归属未校验（键 {site.key!r}）")
+        warn(f"{site.path}:{site.line} 的 module= 无法静态解析，归属未校验"
+             f"（键 {site.key!r}）")
 
     read = {(site.module, site.key) for site in resolved}
     unread: list[tuple[str, str]] = []
     for module in sorted(declared):
         if module in WHOLE_DICT_MODULES:
             continue
-        unread += [(module, k) for k in sorted(declared[module])
-                   if (module, k) not in read]
+        unread += [(module, key) for key in sorted(declared[module])
+                   if (module, key) not in read]
 
     for module, key in unread:
-        msg = f"config/{module}.json 的 {key!r} 没有任何代码读取（未接线/死键）"
-        if UNWIRED_IS_FAILURE:
-            fail(msg)
-        else:
-            warn(msg)
+        fail(f"config/{module}{CONFIG_SUFFIX} 的 {key!r} 没有任何代码读取"
+             f"（未接线 / 死键）—— 配置项一旦没人读，就是一份过期的真相")
+    failures += len(unread)
 
-    if UNWIRED_IS_FAILURE:
-        failures += len(unread)
-    elif not unread:
+    if not unread:
         ok("所有配置键都有代码读取（无死键）")
-    else:
-        warn(f"共 {len(unread)} 个未接线键，不阻塞通过；"
-             f"置 UNWIRED_IS_FAILURE=True 可升级为失败")
 
     return failures
 
 
-def check_rate_limit_bucket(loaded: dict[str, dict]) -> int:
-    """
-    校验出站限速桶容量，以及它与订阅侧配置的关系。
-
-    为什么是这五条
-    --------------
-    1. 容量 ≥ 1：``0`` 在 ``ib_async`` 里是"关闭限速"的开关值，不是"零容量"。
-       写 0 会静默退化成不限速 —— 那不是配置失误，是把保护关掉了。
-    2. 窗口 > 0：``RequestsInterval`` 为 0 时滑动窗口永不淘汰，桶会被一次性
-       填满且再也排不空。
-    3. 容量 ≤ 官方上限（行数 ÷ 2）：超了就是拿 Error 100 换性能，而累计 3 次
-       违约 IBKR 会直接终止 API 会话（必须重连）。
-    4. 容量 ≥ ``qualify_batch_size``：``qualifyContractsAsync`` 内部是
-       ``asyncio.gather`` 的**瞬时并发**，一批就是一个突发。批量大于桶容量，
-       等于每次窗口重建都必然触发限速。
-    5. 桶速率 ≥ 订阅节奏：``min_request_interval_s`` 反推的每秒请求数若高于桶
-       容量，桶会长期满着，这个节奏配置就是一句空话。
-
-    这些关系横跨 ``ibkr.json`` 与 ``subscription.json``。**由检查器读取两个文件**
-    来核对 —— 配置文件之间仍然零引用，要求第 5 条不受影响。
-    """
-    print("\n[11] 出站限速桶容量与 IBKR 配额")
-    try:
-        ibkr = loaded["ibkr"]
-        sub = loaded["subscription"]
-        capacity = int(ibkr["rate_limit_max_requests"])
-        interval = float(ibkr["rate_limit_interval_s"])
-        batch = int(ibkr["qualify_batch_size"])
-        pace_s = float(sub["min_request_interval_s"])
-    except (KeyError, ValueError, TypeError) as exc:
-        fail(f"无法核算限速桶容量: {exc}")
-        return 1
-
-    failures = 0
-    official = IBKR_SUBSCRIPTION_LIMIT / IBKR_MESSAGES_PER_LINE
-
-    if capacity < 1:
-        fail(f"rate_limit_max_requests={capacity} 无效：0 在 ib_async 里是"
-             "'关闭限速'的开关值，会静默退化成不限速")
-        failures += 1
-    if interval <= 0:
-        fail(f"rate_limit_interval_s={interval} 必须为正：为 0 时滑动窗口永不"
-             "淘汰，桶会被一次填满且再也排不空")
-        failures += 1
-    if capacity > official:
-        fail(f"rate_limit_max_requests={capacity} 超过官方上限 {official:g} "
-             f"（行情行数 {IBKR_SUBSCRIPTION_LIMIT} ÷ {IBKR_MESSAGES_PER_LINE}）"
-             "—— 会触发 Error 100，累计 3 次被 IBKR 终止 API 会话")
-        failures += 1
-    if batch > capacity:
-        fail(f"qualify_batch_size={batch} 超过桶容量 {capacity}："
-             "qualifyContractsAsync 是瞬时并发的一批，每次窗口重建都会撑满桶")
-        failures += 1
-
-    if pace_s <= 0:
-        fail(f"min_request_interval_s={pace_s} 必须为正")
-        failures += 1
-    elif capacity / interval < 1.0 / pace_s:
-        fail(f"订阅节奏 {1.0 / pace_s:.0f} 条/s（min_request_interval_s="
-             f"{pace_s}）高于桶容量 {capacity / interval:.0f} 条/s —— 桶会长期"
-             "满着，这个节奏配置等于没生效")
-        failures += 1
-
-    if not failures:
-        ok(f"桶 {capacity} 条 / {interval:g}s = {capacity / interval:.0f} 条/s"
-           f"（官方上限 {official:g}；qualify 单批 {batch} 条；"
-           f"订阅节奏 {1.0 / pace_s:.0f} 条/s）")
-    return failures
+def run_config_checks() -> int:
+    """供 ``--check`` 调用的入口。返回**失败条数**。"""
+    return (
+        check_config_readable()
+        + check_config_coupling()
+        + check_config_key_hygiene()
+        + check_config_ownership()
+    )

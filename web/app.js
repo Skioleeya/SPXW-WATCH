@@ -48,6 +48,11 @@
     frames: 0,
     lastFrame: null,
     lastFrameAt: 0,
+    /* 连接自称的状态：connecting / open / retrying / closed。
+       看门狗靠它区分"连接真的断了（socket 自己在退避重连）"与
+       "连接自称开着、其实早收不到数据（必须主动换掉）"—— 后者是本项目
+       2026-09-17 那次 4 小时静默中断的形状。 */
+    conn: "",
     lastHealth: "",
     startedAt: Date.now(),
     periodBase: 0,
@@ -158,13 +163,33 @@
   /* ------------------------------------------------------------------ */
 
   function watchdog() {
-    if (!state.lastFrameAt) { return; }
-    var age = Date.now() - state.lastFrameAt;
+    /* 计时基准优先取"最后一帧**成功渲染**的时刻"；一帧都没渲染过时退回
+       "连接建立时刻" —— 否则"连上了却一直没数据"会被 `!lastFrameAt` 直接跳过，
+       而那正是本项目最怕的静默故障形状。 */
+    var since = state.lastFrameAt || socket.stats.connectedAt;
+    if (!since) { return; }
+    var age = Date.now() - since;
 
     if (age > CFG.render.staleErrorMs) {
       setClass("st-dot", "dot err");
-      setText("st-conn", "数据中断 " + Math.round(age / 1000) + "s");
-    } else if (age > CFG.render.staleWarnMs) {
+      if (state.conn === "open") {
+        /* 连接自称开着、却一个帧都收不到 ⇒ 这条连接是假的，换掉它。
+           只在 "open" 时动手，天然限流：动手后状态变成 connecting/retrying，
+           下一秒 watchdog 不会再插一脚；换完还是静默，45 秒后才再换一次。
+           ⚠️ 状态文字交给 onState，这里只负责"动手" —— 否则每秒都会把
+           "重连中"改回"数据中断 Ns"。 */
+        if (CFG.render.reconnectOnStale) {
+          socket.forceReconnect("数据中断 " + Math.round(age / 1000) + "s");
+        } else {
+          setText("st-conn", "数据中断 " + Math.round(age / 1000) + "s");
+        }
+      } else if (state.conn === "closed") {
+        setText("st-conn", "数据中断 " + Math.round(age / 1000) + "s");
+      }
+      return;
+    }
+
+    if (age > CFG.render.staleWarnMs) {
       setClass("st-dot", "dot warn");
       setText("st-conn", "数据陈旧 " + Math.round(age / 1000) + "s");
     }
@@ -178,6 +203,7 @@
     path: RT.wsPath,
     onFrame: render,
     onState: function (kind, detail) {
+      state.conn = kind;
       if (kind === "open") {
         setClass("st-dot", "dot on");
         setText("st-conn", "已连接 · " + detail);

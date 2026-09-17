@@ -20,7 +20,14 @@ window.SWATCH_CONFIG = {
   render: {
     maxFps: 5,
     staleWarnMs: 15000,
-    staleErrorMs: 45000
+    /* 超过这个时长没有**成功渲染过**的帧 = 数据中断。取值必须远大于后端
+       push_loop 的心跳周期（config/transport.json 的 heartbeat_interval_s = 20s：
+       行情不动时后端也会每 20 秒补推一帧）—— 45s 不会把"午后死水"误判成中断。 */
+    staleErrorMs: 45000,
+    /* 数据中断时**是否真的换连接**，还是只把状态文字改成"数据中断 Ns"。
+       默认 true。留这个开关是为了能对同一份代码做非空转 A/B：
+       翻成 false ⇒ 行为回到 2026-09-17 修复之前（只报不改，页面永不自愈）。 */
+    reconnectOnStale: true
   },
 
   /* 热力图 */

@@ -36,7 +36,8 @@
       lastSeq: -1,
       gapCount: 0,
       lastFrameAt: 0,
-      connectedAt: 0
+      connectedAt: 0,
+      forces: 0
     };
   }
 
@@ -63,6 +64,40 @@
   SwatchSocket.prototype._url = function () {
     var proto = global.location.protocol === "https:" ? "wss:" : "ws:";
     return proto + "//" + global.location.host + this._path;
+  };
+
+  /* 强制换一条连接。
+   *
+   * 为什么需要它：本 socket 的重连入口只有 `onclose`（与构造抛错），而对端
+   * "不再投递、但也不断开"时 onclose 永不触发 —— 页面就永远停在旧数据上。
+   * 2026-09-17 实盘事故正是这种形状：后端那条连接 100% 丢帧、挂了 4 小时，
+   * 前端只是把状态文字改成"数据中断 Ns"，自己不会好，只能人工刷新。
+   *
+   * 做法是**先摘掉旧 socket 再重开**，不依赖旧连接的 onclose：
+   *   · 四个回调先清空 —— 旧 socket 稍后自己关掉时不会触发第二次重连，
+   *     否则会开出两条连接，而且 `_ws` 只指向后一条，前一条永久泄漏。
+   *   · `_attempt` 复位 —— 这是一次手动介入，不该继承上一次退避的档位。
+   * 只在真的持有连接时动手：`_ws` 为空说明重连本来就在进行中，
+   * 再插一脚只会打断退避节奏。
+   *
+   * 返回是否真的换过连接（探针据此做非空转判定）。 */
+  SwatchSocket.prototype.forceReconnect = function (reason) {
+    if (!this._ws) { return false; }
+
+    var old = this._ws;
+    this._ws = null;
+    old.onopen = null;
+    old.onmessage = null;
+    old.onerror = null;
+    old.onclose = null;
+    try { old.close(); } catch (e) { /* 忽略 */ }
+
+    if (this._timer) { clearTimeout(this._timer); this._timer = null; }
+    this._attempt = 0;
+    this.stats.forces += 1;
+    this.onError("连接已强制重建：" + (reason || "数据中断"));
+    this._open();
+    return true;
   };
 
   SwatchSocket.prototype._open = function () {

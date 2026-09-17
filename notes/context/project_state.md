@@ -1,11 +1,72 @@
 # Project State
 
-ACTIVE_SESSION: 2026-09-17/heatmap-auto-roll
-LAST_UPDATED: 2026-09-17 08:5x EDT —— **五轮改动已提交并推送（`ab853d3`），工作区干净**。
-本会话**功能提交** `ab853d3`（= 五轮代码全部入库；上一个功能提交是 `390ac6e`）。
-其后是若干 `docs(notes)` 记录提交 —— ⚠️ **HEAD 以 `git log` 为准，本文件不写死**
-（写死就会被下一条记录提交立刻变成假记录）。
-**本提交混合五个会话**：`heatmap-auto-roll` / `interaction-feedback-5fix` /
+ACTIVE_SESSION: 2026-09-17/frontend-stale-reconnect
+LAST_UPDATED: 2026-09-17 14:0x EDT —— **2026-09-17「前端数据中断」两处根因均已修完**
+（① 后端僵尸 `748cd56` · ② 前端看门狗自愈 本轮）。
+⚠️ **HEAD 以 `git log` 为准，本文件不写死**（写死就会被下一条记录提交立刻变成假记录）。
+⚠️ **时间基准**：环境注入的时钟比本机 `date` 慢 8h；本文件及 `notes/sessions/` 里
+2026-09-17 早先标注的 `04:xx`–`06:xx` **实际是本机 `13:xx`–`14:xx`**。
+
+## 本轮 —— 前端「数据中断」自愈（`frontend-stale-reconnect`）
+
+会话：`notes/sessions/2026-09-17/frontend-stale-reconnect/{handoff,project_state}.md`
+
+页面以前只会把状态文字写成「数据中断 Ns」，socket 一直开着、`onclose` 永不触发
+⇒ **永不自愈，只能人工刷新**。现在超过 `staleErrorMs`（45s）没有成功渲染过的帧、
+且连接**自称**还是 `open`，就主动把这条连接换掉。
+
+- `web/app.js`（217 → 243 行）：`state.conn` 记连接自称态；`watchdog()` 改判据
+  （自称 `open` + 超时 ⇒ 换连接）；计时基准加兜底 `lastFrameAt || connectedAt`。
+- `web/ws_client.js`（178 → 213 行）：新增 `forceReconnect(reason)`；`stats.forces` 计数。
+- `web/config.js`（327 → 334 行）：新增 `render.reconnectOnStale`（默认 `true`）。
+
+⚠️ **两个关键设计点**：
+① `forceReconnect()` **先摘掉四个回调再 `close()`** —— 否则"等 `onclose`"会与
+"已开的新连接"并存 ⇒ **每 45s 泄漏一条连接**（且 `_ws` 只指向后一条）。
+② 计时基准必须有兜底 —— 老代码 `if (!state.lastFrameAt) return;` 让
+**"连上了却一帧都没有"整段跳过**（本项目最怕的静默形状）。
+③ **看门狗只动手、不说话**（文字归 `onState`）—— 否则下一秒就被写回
+「数据中断 Ns」，用户永远看不到"它其实试过重连"。
+
+**验证（非空转）**：`tmp/probe_stale_reconnect.py`（真 headless Chrome + 产品自己的
+`WsBroadcaster`/`StaticHandler`/`config/transport.json`，只停推流**不断连接** = 事故原形），
+同一份代码只翻 `reconnectOnStale`：
+- **A 臂**（`false` ＝ 修复前）`forces=0`、恢复推流后帧**在原来那条连接上**就回来了
+  —— 证明那条连接本来还能用，页面只是永远不知道该重连（本轮最有力证据）。
+- **B 臂**（`true`）`forces=1`、`connectedAt` 变、**服务端连接数 1→2**、恢复后帧到达。
+- ⇒ **6/6 PASS，RC=0**（1m44s）。
+`tmp/probe_live_page.py 100` 对**真后端**采样 100s（>2 个 `staleErrorMs` 窗口）
+⇒ **6/6 PASS，RC=0**（1m51s）：帧 19→169 单调涨 · `forces` 恒 0 · `conn` 恒 `open` ·
+从未误报「数据中断」⇒ 排掉本轮特有坏法"每 45s 自己换一次连接"。
+`run.py --check` **16/16** · `node --check` 3/3。
+
+⚠️ **残留**：未在 KAI 真实浏览器 + 盘中背压下验证（触发条件"JS 主线程被占住"仍未重建）；
+最坏自愈延迟 = 45s（画面旧 45 秒，用户可感知）；未覆盖"后端进程整个挂掉"的形状
+（那种情况 socket 会关、走既有 `onclose` 退避）；门禁 D（`/health` 的
+`per_client.sent` 必须在涨）**仍未做**；三个探针留 `tmp/` ⇒ **无回归保护**。
+
+---
+
+## 上一轮 —— 提交推送 + 引用存储修复（`commit-and-push`）
+
+会话：`notes/sessions/2026-09-17/commit-and-push/handoff.md`
+
+五轮交互改动合并提交并推送（`ab853d3` 代码 19 文件 / +2151 −346 + `21293a1` 记录），
+工作区转干净。**顺带修掉一个引用存储缺陷**：远端跟踪引用 `origin/main` 被一份缺
+`# pack-refs with:` 头、mtime 2026-09-14 的 66 字节 `.git/packed-refs` 钉在 `6828e3a`
+⇒ `git status` 长期谎报 `[ahead 23]`（而 `ls-remote` 与本地 `HEAD` 明明一致）。
+**用标准命令 `git pack-refs --all` 修复**（**非**手工改 `.git` 文件）；
+⚠️ **根因未定论且会复现** —— 只查到"git 建不了 `.git/refs/` 下的二级子目录、
+非权限/重解析点"，**本环境每次 push/fetch 都会让跟踪引用陈旧**，`pack-refs` 只是
+把当前值改对、不是根治。**未在沙箱外复跑**。
+⚠️ **`git commit` 的 auto maintenance 在本环境会挂住** ⇒ 临时绕法
+`rm -f .git/objects/maintenance.lock` + `-c gc.auto=0 -c maintenance.auto=false`。
+
+---
+
+## 更早 —— 五轮交互改动（合并提交 `ab853d3`）
+
+⚠️ **该提交混合五个会话**：`heatmap-auto-roll` / `interaction-feedback-5fix` /
 `skew-drag-interaction` / `heatmap-pan-drag` / `skew-dual-axis-zoom` ——
 `web/index.html` 与 `web/config.js` 被五轮共同改动（新脚本标签、新配置块），
 `web/heatmap*.js` 被三轮动过、`web/skew*.js` 被两轮动过 ⇒ **文件级无法拆**，
@@ -13,13 +74,6 @@ LAST_UPDATED: 2026-09-17 08:5x EDT —— **五轮改动已提交并推送（`ab
 （含 5 个新增 `web/*.js`）。`notes/` 单独一个 `docs(notes)` 提交。
 ⚠️ 提交前 KAI 未逐轮验收，**本提交不等于 KAI 对五轮改动背书** ——
 各轮证据仍在各自的 `notes/sessions/2026-09-17/<task-id>/handoff.md`。
-
-⚠️ **顺带修掉一个引用存储缺陷**：远端跟踪引用 `origin/main` 被一份缺
-`# pack-refs with:` 头、mtime 2026-09-14 的 66 字节 `.git/packed-refs` 钉在 `6828e3a`
-⇒ `git status` 长期谎报 `[ahead 23]`（而 `ls-remote` 与本地 `HEAD` 明明一致）。
-**用标准命令 `git pack-refs --all` 修复**（**非**手工改 `.git` 文件）；
-**根因未定论** —— 只查到"git 建不了 `.git/refs/` 下的二级子目录、非权限/重解析点"，
-**未在沙箱外复跑**。详见 `notes/sessions/2026-09-17/commit-and-push/handoff.md`。
 
 热力图缩出横轴窗口后，窗口右缘**自动跟着最新列走**；往历史里拖 ⇒ 停滚；
 面板头「回到最新」按钮把右缘拉回最新列并恢复跟随、**保住当前缩放跨度**

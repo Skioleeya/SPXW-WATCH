@@ -1,14 +1,50 @@
 # Handoff Index
 
-- **提交状态**：功能提交 `ab853d3`（2026-09-17 08:5x EDT，**已推送 `origin/main`，
-  工作区干净**）——
-  **五个会话的改动合并为一个提交**（`web/index.html` 与 `web/config.js` 被五轮共同改动，
-  `web/heatmap*.js` 被三轮、`web/skew*.js` 被两轮动过 ⇒ 文件级无法拆），
-  19 文件 / +2151 −346（含 5 个新增 `web/*.js`）；`notes/` 随紧随其后的
-  `docs(notes)` 提交入库。
+- **提交状态**：`ab853d3`（五轮交互改动合并提交，19 文件 / +2151 −346）→
+  `21293a1`（`docs(notes)`）→ `748cd56`（`fix(transport)` 后端僵尸修复）
+  → **本轮** `fix(web)` 前端自愈 + `docs(notes)`。
+  ⚠️ **HEAD 以 `git log` 为准，本文件不写死**（写死就会被下一条记录提交立刻变成假记录）。
   ⚠️ **提交 ≠ KAI 逐轮验收** —— 各轮证据仍在各自的 `handoff.md`。
 
-## 最新：2026-09-17 / commit-and-push（完成，**已提交 `21293a1`**）
+## 最新：2026-09-17 / frontend-stale-reconnect（完成，**缺陷②前端自愈**）
+
+- **会话交接**：`notes/sessions/2026-09-17/frontend-stale-reconnect/handoff.md`
+  （"为什么这么改"在 `project_state.md`）
+- **一句话**：页面以前只会把状态文字写成「数据中断 Ns」，socket 一直开着、
+  `onclose` 永不触发 ⇒ **永不自愈，只能人工刷新**；现在超过 `staleErrorMs`（45s）
+  没有成功渲染过的帧、且连接自称还是 `open`，就**主动把这条连接换掉**。
+- **改了什么**：`web/app.js`（217 → 243 行）`watchdog()` 改判据 + `state.conn` 记连接自称态；
+  `web/ws_client.js`（178 → 213 行）新增 `forceReconnect()` + `stats.forces`；
+  `web/config.js`（327 → 334 行）新增 `render.reconnectOnStale`（默认 `true`）。
+- ⚠️ **两个关键设计点**：① `forceReconnect()` **先摘掉四个回调再 `close()`** ——
+  否则"等 `onclose`"与"已开的新连接"并存 ⇒ 每 45s 泄漏一条连接；
+  ② 计时基准加兜底 `lastFrameAt || connectedAt` —— 老代码在"连上了却一帧都没有"时
+  **整段跳过**（本项目最怕的静默形状）。
+- **验证（非空转）**：`tmp/probe_stale_reconnect.py` 真 headless Chrome + 产品自己的
+  `WsBroadcaster`/`StaticHandler`（只停推流、不断连接 = 事故原形），同一份代码只翻
+  `reconnectOnStale` ⇒ **A 臂**（旧行为）`forces=0`、恢复推流后帧**在原来那条连接上**
+  就回来了（证明连接本来还能用，页面只是不知道要重连）；**B 臂** `forces=1`、
+  服务端连接数 1→2、恢复后帧到达 ⇒ **6/6 PASS RC=0**。
+  `tmp/probe_live_page.py 100` 对**真后端**采样 100s ⇒ **6/6 PASS RC=0**
+  （169 帧单调涨 · `forces` 恒 0 · 从未误报「数据中断」）。
+  `run.py --check` **16/16** · `node --check` 3/3。
+- ⚠️ **未在 KAI 真实浏览器 + 盘中背压下验证**；最坏自愈延迟 = 45s；
+  触发条件（JS 主线程被占住）仍未重建。
+- ⚠️ **后端侧修复（`748cd56`）仍未生效** —— 需重启后端，KAI 决定自己重启。
+
+## 上一会话：2026-09-17 / frontend-data-outage（诊断完成 → 后端①已修）
+
+- **会话交接**：`notes/sessions/2026-09-17/frontend-data-outage/handoff.md`
+- **一句话**：前端"数据中断"**两处根因** —— ① 后端 WS 客户端变僵尸
+  （`_sender` 死掉但没人注销 ⇒ 连接留着、100% 丢帧、零日志，实测挂了 4h11m）；
+  ② 前端看门狗只报不改（见上一节）。
+- ⚠️ **原修复设想被实测证伪**：想用 `ws.close()` 顶醒读循环 —— 对端不读时
+  `close()` 卡在 drain、`transport.close()` 也冲不出缓冲 ⇒ 读循环永不醒
+  （`ws.closed=True` / `transport.is_closing()=True` / `ws._waiting=True` 三者同时成立）。
+  **改成**：`handle()` 用 `asyncio.wait({sender, reader}, FIRST_COMPLETED)` 赛跑，
+  谁先结束都立刻注销。
+
+## 上一会话：2026-09-17 / commit-and-push（完成，**已提交 `21293a1`**）
 
 - **会话交接**：`notes/sessions/2026-09-17/commit-and-push/handoff.md`
 - **一句话**：把叠在同一工作区的**五轮改动**提交并推送远端（`ab853d3` 代码 +
@@ -16,10 +52,10 @@
   远端跟踪引用 `origin/main` 被陈旧 `packed-refs` 钉在 `6828e3a`，
   导致 `git status` 长期谎报 `[ahead 23]`（`ls-remote` 与 `HEAD` 明明一致）。
 - **修复手段**：`git pack-refs --all`（标准命令，非手工改 `.git`）。
-- ⚠️ **根因未定论**：git 建不了 `.git/refs/` 下的二级子目录（排除权限与 junction）；
-  **未在沙箱外复跑**，下次远端有新提交时可能复现。
+- ⚠️ **根因未定论且会复现**：git 建不了 `.git/refs/` 下的二级子目录（排除权限与 junction）；
+  **本环境每次 push/fetch 都会让跟踪引用陈旧**，`pack-refs` 只是把当前值改对，不是根治。
 
-## 上一会话：2026-09-17 / heatmap-auto-roll（完成，**已提交 `ab853d3`**）
+## 更早：2026-09-17 / heatmap-auto-roll（完成，**已提交 `ab853d3`**）
 
 - **会话交接**：`notes/sessions/2026-09-17/heatmap-auto-roll/handoff.md`
 - **一句话**：热力图缩出横轴窗口后，窗口右缘**自动跟着最新列走**（不再越看越旧）；

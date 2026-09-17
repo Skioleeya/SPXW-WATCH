@@ -1,0 +1,113 @@
+# Project State — frontend-stale-reconnect
+
+> 本文件只放"为什么这么改"。改了什么、跑了什么、结论是什么 → `handoff.md`。
+
+## 被修的东西是什么形状
+
+前端**从来就有一个检测器**（`app.js::watchdog()`，每秒跑一次），它算得出
+"多久没有新帧了"，只是**只写状态文字、不做任何动作**。而 socket 的重连入口只有
+`onclose`（`ws_client.js`）—— 对端"不再投递、但也不断开"时 `onclose` 永不触发。
+
+⇒ 检测器看见了、但没人动手；动手的入口又等一个永远不来的事件。
+**两半各自都对，中间少一根线。**
+
+## 决定：让既有检测器动手，而不是再加一个检测器
+
+考虑过"前端定时发 `ping`、收不到回帧就重连"（后端 `handle()` 收到任何 TEXT 会立刻
+回一帧，确实能做）。**没采纳**，三条理由：
+
+1. **信息量是零**：帧本来就是**周期性**的 —— 后端 `push_loop` 有
+   `heartbeat_interval_s = 20s` 兜底，行情不动时也每 20 秒补推一帧。
+   ⇒ "45 秒没有帧"已经等价于"连接死了"，ping 探不出更多东西。
+2. **会被同一种故障骗过**：回帧和普通帧走同一条 socket、同一个发送协程。
+   发送端写不动时，回帧一样发不出来 —— 多一个探测器，不多一份真相。
+3. **多一个状态机**：ping 要自己配定时器 + 回帧匹配 + 超时，与 `_scheduleReconnect`
+   的退避又要协调。改一行判据能解决的事，不该长出一个子系统。
+
+## 为什么用 `state.conn` 当闸门
+
+看门狗必须区分两件事，否则一定会打架：
+
+| 情形 | 谁该动手 |
+|---|---|
+| 连接真的断了（socket 自己知道，正在指数退避重连） | **socket** —— 看门狗插一脚只会打乱退避节奏 |
+| 连接**自称还开着**、却一个帧都没有 | **看门狗** —— 这就是那次 4 小时事故的形状 |
+
+`socket.onState` 已经把这两者区分好了（`open` / `connecting` / `retrying` / `closed`），
+把它记进 `state.conn` 即可。**顺带白拿限流**：动手后状态立刻变成 `connecting`，
+下一秒看门狗不会再触发；换完还是静默，要再等一个 `staleErrorMs` 才会换第二次。
+⇒ **不需要新常量、不需要"多久才允许再试一次"这类计时器。**
+
+## 状态文字的所有权（一个必须分开的东西）
+
+看门狗**只动手、不说话**，文字交给 `onState`：
+
+- 老代码每秒写一次 `数据中断 Ns`；
+- 如果改完还是"既动手又写字"，那它会在**下一秒**把 `重连中` 覆盖回 `数据中断 Ns`
+  —— 用户永远看不到"它其实试过重连"，出了事又会归因成"它什么都不做"。
+- 而且每帧 `renderStatus()` 也会写 `st-conn`（`connected · delayed`）。
+  ⇒ `st-conn` 的**权威来源按情形分**：有帧时 = 帧里的 health；没帧时 = `onState`。
+  看门狗只在"没帧"这段里插话，且只在 `reconnectOnStale=false` 时写字（A 臂需要它复现旧行为）。
+
+## 为什么 `forceReconnect()` 要先摘回调再关
+
+**不能**"`ws.close()` 然后等 `onclose` 来触发重连"：
+
+- `close()` 在浏览器侧是**异步**的：发 close 帧、等对端回 close 帧。而对端在这种
+  场景里**正是不会回**的那一方（要么不读、要么已经坏了）⇒ 重连会被浏览器的关闭
+  超时拖住。
+- 更糟的是**竞态**：等 `onclose` 时又开一条新连接，旧 socket 稍后真的关掉时
+  `onclose` 再触发一次 `_scheduleReconnect` ⇒ **两条连接并存**，而 `_ws` 只指向后
+  一条 ⇒ 前一条永久泄漏（每 45 秒泄漏一条）。
+
+做法：先把 `onopen/onmessage/onerror/onclose` 四个回调置空，再 `close()`，
+再直接 `_open()`。**一次只有一条连接**，且不依赖对端配合。
+`_attempt` 一并复位 —— 这是一次手动介入，不该继承上一次退避的档位。
+
+## 计时基准为什么要有兜底
+
+`state.lastFrameAt` 是在 `app.js::render()` 里、**`decodeFrame` 之后**才写的。
+老代码第一句是 `if (!state.lastFrameAt) { return; }` ⇒ **"连上了却一帧都没有"
+会被整个跳过** —— 那正是本项目最怕的静默形状。
+
+所以改成 `state.lastFrameAt || socket.stats.connectedAt`：一帧都没渲染过时，
+从"连接建立时刻"起算。
+
+## 只新增了一个配置键，且它是为 A/B 生的
+
+`render.reconnectOnStale`（默认 `true`）。**不是为了可调**，是为了**能对同一份代码
+做非空转验证** —— 翻成 `false` 就是修复前的行为。这与本仓既有的
+`skew.pan.enabled` / `skew.feedback.enabled` 是同一套路（那两处注释写着
+"两者开关独立 —— 这是'互不冲突'的机械判据，探针按它做非空转验证"）。
+
+超时值**没有**新增键：直接复用 `render.staleErrorMs` —— 它本来就是"数据中断"的
+定义，再配一个就是两份真相。
+
+## 明确没做的
+
+- **`visibilitychange` / `onLine` 兜底**：标签页被节流后切回来时，`setInterval`
+  会恢复，看门狗 1 秒内就能发现 ⇒ 冗余。
+- **门禁**（`/health` 的 `per_client.sent` 必须在涨）：属 `tools/`，与本轮前端改动
+  是两件事，留在 `notes/context/open_tasks.md`。
+- **后端侧不变量**（"发送协程结束 ⇒ 客户端注销"）已由上一轮 `748cd56` 落在
+  `transport/ws_broadcaster.py`，本目录不重复记录。
+
+## 探针为什么长这样
+
+- **不能碰 KAI 正在跑的后端** ⇒ 自建假后端；但假后端**必须用产品自己的代码**
+  （`WsBroadcaster` + `StaticHandler` + 真实 `config/transport.json`，只改端口），
+  否则测的是"我写的另一个服务器"，不是产品行为。
+- **不能手搓测试帧** ⇒ `SWATCH_MATRIX.decodeFrame` + 两个渲染器对帧结构有一整串
+  隐含要求，手搓的帧很容易在渲染阶段抛异常。虽然 `render()` 是先写 `lastFrameAt`
+  再渲染（抛异常不影响"最后一帧时刻"），但**真帧**才顺带证明页面真的能出图。
+  ⇒ 用 `tmp/_capture_frame.py` 从真后端抓一帧落盘。
+- **两臂必须跑同一份代码**：`reconnectOnStale` 在页面里用 `Runtime.evaluate` 现翻，
+  而不是准备两份代码 —— 后者会引入"两份代码有别的差异"这种说不清的风险。
+- **CDP 管道抽到 `tmp/cdp_client.py`**：`probe_stale_reconnect.py`（假后端 A/B）与
+  `probe_live_page.py`（真后端回归）共用，避免同一套管道抄两遍。
+
+## 真后端回归
+
+`app.js::watchdog()` 这次改动的**特有坏法**是"每 45 秒自己换一次连接"（画面反复闪、
+后端连接数暴涨），静态检查看不出来 ⇒ `tmp/probe_live_page.py` 对着真后端采样 100 秒
+（> 2 个 `staleErrorMs` 窗口）。判据与结果见 `handoff.md::## 真后端回归`。

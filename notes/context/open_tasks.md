@@ -2,7 +2,7 @@
 
 Archive: notes/context/archive/open_tasks_2026-09.md
 
-## Active —— 前端数据中断（`frontend-data-outage`，2026-09-17 诊断完成，**未修复**）
+## Active —— 前端数据中断（`frontend-data-outage`，2026-09-17 诊断完成，**后端缺陷①已修并验证**）
 
 会话：`notes/sessions/2026-09-17/frontend-data-outage/`
 
@@ -10,29 +10,32 @@ Archive: notes/context/archive/open_tasks_2026-09.md
   `last_tick_age_s=0.1`、现价在动、订阅 80/92）；**断在「后端 → 浏览器」这一跳**。
   A/B：同一后端 + 同一份前端代码，**新开页面 `丢 0 · 缺口 0` 完全正常**
   ⇒ 前端代码没坏，坏的是那个标签页持有的旧连接。立即恢复手段 = **刷新页面**。
-- [ ] **[高] ⚠️ 缺陷①后端：WS 客户端会变僵尸、永不注销** ——
-  `transport/ws_broadcaster.py::_sender` 超时后 `except Exception: pass` **静默退出**，
-  而注销只在 `handle()` 的 `finally`；`handle()` 停在 `async for message in ws:`
-  等**永不到来的**上行消息 ⇒ 客户端永不注销、队列（`client_queue_size: 1`）无人消费
-  ⇒ **每帧都进 `dropped`、100% 丢帧**。实测僵尸存活 **4 小时**、
-  `per_client.sent` 冻结在 5044、`dropped` 单调涨。
-  `heartbeat_interval_s: 20` **救不了**（PING/PONG 由浏览器网络栈应答，与 JS 消费无关）。
-  **修复建议（未实施）**：`_sender` 的 `finally` 里 `await ws.close()`，
-  让 `handle()` 的 `async for` 结束、`finally` 生效。
+- [x] **[高] 缺陷①后端僵尸：已修（2026-09-17 05:0x）** —— `transport/ws_broadcaster.py`
+  256 → 333 行。**注销改为由"发送协程结束"直接触发**：`handle()` 把读循环拆成
+  `_reader()` 协程，与 `_sender` 用 `asyncio.wait(..., FIRST_COMPLETED)` 赛跑，
+  谁先结束都立刻 `_unregister`；`_unregister` 先 discard 再清理、`ws.close()` 带超时。
+  ⚠️ 原方案（"`_sender` 退出时 `ws.close()` 顶醒读循环"）**已实测证伪**：对端不读时
+  `close()` 卡在 drain，`transport.close()` 也冲不出缓冲 ⇒ 读循环永不醒
+  （`ws.closed=True` / `transport.is_closing()=True` / `ws._waiting=True` 三者同时成立）。
+  验证：`tmp/probe_zombie_ws.py` **非空转 A/B**（旧代码 FAIL + WARN 0 条 / 新代码
+  1.5s 注销 + WARN 1 条），`run.py --check` **16/16**。
+  - [ ] ⚠️ **后端未重启 ⇒ 尚未生效**（线上仍跑旧代码，僵尸仍在）。
 - [ ] **[高] ⚠️ 缺陷②前端：看门狗只报不改** —— `web/app.js::watchdog()`
   算出 `age > staleErrorMs` 后**只改状态文字**（`数据中断 Ns`），**不重连**；
   而 `web/ws_client.js` 的重连入口**只有** `ws.onclose` 与构造抛错
   ⇒ socket 一直 OPEN、`onclose` 永不触发 ⇒ **页面永远卡住，只能人工刷新**。
   **修复建议（未实施）**：`watchdog()` 触发 `SwatchSocket.forceReconnect()`；
   或用后端既有行为（收到任何 TEXT 立刻回一帧）做"发 ping 等回帧"的活体探针。
-- [ ] **[中] 可观测性缺口** —— `_sender` 死时**一条日志都不留**（WARN 计数恒 0 的成因之一）；
-  `/health` 也不报"发送协程是否还活着" ⇒ 僵尸从外部看是"正常连接"。
-  **建议**：`stats()` 增加 `sender_alive` / `last_sent_at`，`except` 分支补计数 + WARN。
 - [ ] **[中] 门禁缺口** —— 建议新增检查器：`/health` 的 `per_client.sent` **必须在涨**，
   冻结即红（属"静默错值"类，正是本项目该守的）。
+- [x] **[中] 可观测性缺口：已补** —— `_sender` 的 `except` 由 `pass` 改为
+  `send_failures += 1` + 一条 WARN；`stats()` 的 `per_client` 增
+  `sender_alive`（派生自 task，不另存字段）/ `last_sent_age_s` / `send_failures`。
 - [ ] **[低] ⚠️ 触发点未重建** —— 哪段 JS 占住了主线程导致 >1s 背压，无法重建
   （浏览器侧无埋点）。可确证的只是余量薄：`payload_bytes ≈ 347 KB/帧`
   （热力图 40 档后翻倍）、`client_queue_size: 1`、`send_timeout_s: 1.0`。
+- [ ] **[低] 探针无回归保护** —— `tmp/probe_zombie_ws.py` 留在 `tmp/`（按既有约定
+  不建常驻检查器）；未在真实浏览器 + 真实背压下复测。
 
 ---
 

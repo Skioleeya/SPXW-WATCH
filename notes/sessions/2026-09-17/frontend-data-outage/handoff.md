@@ -1,9 +1,9 @@
 TASK-ID: frontend-data-outage
 DATE: 2026-09-17
 TIER: T1
-STATUS: complete
+STATUS: 诊断 complete → 后端修复已实施并验证（前端部分未做）
 CHANGE-ID: N/A:非 OpenSpec 仓库，无变更单
-STARTUP-PROOF: N/A:纯诊断会话，未改任何产品代码；基线即下述 /health 与帧 health 快照。
+STARTUP-PROOF: `run.py --check` 16/16；修复前基线（诊断阶段）为 `/health` + 帧内 `health` 快照；修复后基线为 `tmp/probe_zombie_ws.py`（见文末「修复验证」）。
 
 # Handoff — 前端数据中断（诊断）
 
@@ -93,7 +93,7 @@ TCP 仍是 `ESTABLISHED`（`127.0.0.1:52119 → :8060`），所以**从外部看
 那批堆栈指向 aiohttp 自己的 `WebSocketWriter._send_compressed_frame_async_locked`，
 是客户端断线时的库噪声。`_sender` 的死**是静默的、无堆栈**。
 
-## 修复建议（未实施，等 KAI 拍板）
+## 修复建议（原提 A–E；其中 **A 被实测证伪后改方案**、B 已实施，C/D/E 未实施）
 
 **A. 后端（根治，最小改动）**：让发送协程退出时**自己关连接**，
 使 `handle()` 的 `async for` 结束、`finally` 生效：
@@ -131,8 +131,80 @@ finally:
 ## OPEN-RISKS
 
 - **触发点未重建**（哪段 JS 占住了主线程），只能定性为"一次 >1s 背压"。
-- **修复建议全部未实施、未验证** —— 本会话只做诊断。
-- 僵尸**当前仍在**（`clients: 1`、`sent` 冻结、`dropped` 持续增长）。
-  未代 KAI 重启后端 / 未代 KAI 刷新页面。
+- **僵尸当前仍在**（`clients: 1`、`sent` 冻结在 5044、`dropped` 持续增长）——
+  **后端进程还在跑旧代码**，本会话未代 KAI 重启（重启才生效）。
 - 帧体积已涨到 ~347 KB/帧（热力图 40 档的副作用），
   与 `client_queue_size: 1` + `send_timeout_s: 1.0` 的组合余量变薄 —— 值得单独评估。
+- 前端 ②（只报不改）、门禁 D、运维 E **均未实施**；前端不修则"后端放弃连接"仍要靠
+  `onclose` 才自愈（而 `onclose` 需要连接真的断得掉，见下"关不掉"一节）。
+
+---
+
+# 修复（已实施，2026-09-17 05:0x EDT）
+
+KAI 拍板"先修后端"。改动**只在一个文件**：`transport/ws_broadcaster.py`（256 → 333 行）。
+
+## 为什么原方案 A 走不通（实测，不是推理）
+
+原方案是"发送协程退出时 `ws.close()`，把 `handle()` 的读循环顶醒"。探针实测**做不到**：
+
+```
+对端不读 ⇒ 发送缓冲满 ⇒ ws.close() 卡在内部 drain
+        ⇒ 即使超时后 aiohttp 去关底层 transport，transport.close() 也要等缓冲冲出去
+⇒ 读循环永远不醒。实测三者同时成立：
+   ws.closed=True · transport.is_closing()=True · ws._waiting=True
+   sender done=True cancelled=False      ← 客户端一直留在注册表里
+```
+
+**结论：把"注销"的成立条件绑在"TCP 还写得动"上，等于没有不变量。**
+
+（顺带排掉一个假线索：探针里 `_sender` 任务一度显示 `cancelled=True`，
+调用栈落在 `asyncio/timeouts.py:130 _on_timeout → self._task.cancel()` ——
+那是 `wait_for` 自己的超时机制，不是别的代码在取消它。）
+
+## 实际做法：注销由"发送协程结束"直接触发
+
+`handle()` 不再就地 `async for`，而是把读循环拆成 `_reader()` 协程，与发送协程**赛跑**：
+
+```python
+client.task = asyncio.create_task(self._sender(client))
+client.reader = asyncio.create_task(self._reader(client))
+try:
+    await asyncio.wait({client.task, client.reader},
+                       return_when=asyncio.FIRST_COMPLETED)
+finally:
+    await self._unregister(client)
+```
+
+配套三处：
+
+- `_unregister()`：**先 `_clients.discard()`，再清理**（注册表才是 `max_clients` 名额
+  与丢帧统计的依据，清理慢不能继续占名额）；两个协程一律 cancel + await（顺手取走异常，
+  免 "never retrieved" 噪音）；`ws.close()` 带 `wait_for(timeout=send_timeout_s)` 兜底
+  （关不掉也无妨，客户端已不在注册表里）。
+- `_sender()`：`except Exception: pass` → **`send_failures += 1` + 一条 WARN**
+  （僵尸之所以能藏 4 小时，就是因为这里一条日志都不留）。
+- `stats()`：`per_client` 增 `sender_alive`（**派生**自 task，不另存字段，免得漂移）、
+  `last_sent_age_s`、`send_failures`；`ClientStats` 增 `last_sent_at`。
+
+## 修复验证（非空转 A/B）
+
+探针：`tmp/probe_zombie_ws.py` —— 真实 aiohttp 服务 + 真实 TCP；
+阶段 1 用"只握手、此后不读"的裸 socket（`SO_RCVBUF=4096`）制造写不动的客户端，
+阶段 2 用正常客户端做**主路径回归**（防止修僵尸把好客户端弄坏）。
+
+| 代码 | 阶段 1（僵尸） | 阶段 2（正常） | WARN | RC |
+|---|---|---|---|---|
+| 旧（`git stash` 摘掉修复） | **FAIL** —— 15s 观察窗内一直留在注册表（`sender done=True cancelled=False`、`ws._waiting=True`） | PASS（收 3 帧、关闭后立即注销） | **0 条** | 1 |
+| 新 | **PASS —— 1.5s 被注销，注册表清空** | PASS（`sent 1→10`、`dropped 0`、关闭后 0.0s 注销） | 1 条 | 0 |
+
+同一份探针、两种代码给出不同结果 ⇒ 不是空转。
+静态门禁：`run.py --check` **16/16**（改动前后各跑一次，均 16/16）。
+
+## 未做 / 待办
+
+- ⚠️ **后端未重启 ⇒ 修复尚未生效**，线上仍跑旧代码（僵尸仍在）。
+- 前端 ②（看门狗只报不改）、门禁 D（`per_client.sent` 必须在涨）、运维 E 未做。
+- 探针留在 `tmp/`（按既有约定不建常驻检查器）⇒ **无回归保护**。
+- 未在真实浏览器 + 真实背压下复测（探针用的是裸 socket，比浏览器更极端）。
+

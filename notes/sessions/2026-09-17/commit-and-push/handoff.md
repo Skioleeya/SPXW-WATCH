@@ -36,6 +36,8 @@ STARTUP-PROOF: N/A:本会话为仓库操作（提交/推送/引用存储修复�
 - `21293a1` `docs(notes)` —— **15 文件**：
   3 个已跟踪（`notes/context/{handoff,open_tasks,project_state}.md`）
   + 12 个新增（5 个会话目录 + `notes/analysis/2026-09-17-main-chart-interaction-audit.md`）
+- 其后还有若干 `docs(notes)` 记录提交（含"引用陈旧**已确认复现**"的更正，以及本文件本身）
+  —— ⚠️ **提交条数与哈希都以 `git log` 为准，不在记录里写死**（写死即过期）
 - `tmp/` 与 `.workbuddy-ai/` 按 `.gitignore` 不入库（含本会话的提交信息草稿与
   `tmp/_packed-refs.bak`）
 
@@ -51,15 +53,14 @@ check_web_contract.py --selftest      ⇒ RC=0（el / bindButton / ViewChips 三
 # 提交与推送
 git commit -F tmp/_commit_msg_code.txt   ⇒ [main ab853d3] 19 files changed, +2151 -346
 git commit -F tmp/_commit_msg_notes.txt  ⇒ [main 21293a1] 15 files changed
-git push origin main                     ⇒ 390ac6e..21293a1  main -> main
+git push origin main                     ⇒ 390ac6e..21293a1  main -> main（此后又推两次）
 
-# 收尾核对（三项必须相等）
-本地 HEAD            = 21293a1963ad2ccad26a082737799b130335b572
-远端 refs/heads/main = 21293a1963ad2ccad26a082737799b130335b572
-本地 origin/main     = 21293a1963ad2ccad26a082737799b130335b572
-git status --short --branch = ## main...origin/main
+# 收尾核对（**不写死 HEAD** —— 本会话后续还会追加记录提交，写死就会立刻过期）
+不变式：本地 HEAD == 远端 refs/heads/main == 本地 origin/main（三者相等，每次 push 后均核过）
+git status --short --branch = ## main...origin/main（无 ahead/behind）
 git status --porcelain | wc -l = 0
 git fsck --no-progress --connectivity-only ⇒ RC=0（只有 dangling commit，无损坏）
+run.py --check = 16/16
 ```
 
 ## 引用存储缺陷（本会话查实并修复）

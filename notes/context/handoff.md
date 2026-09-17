@@ -1,6 +1,7 @@
 # Handoff Index
 
-- **提交状态**：`ab853d3`（2026-09-17 08:5x EDT，**已推送 `origin/main`，工作区干净**）——
+- **提交状态**：功能提交 `ab853d3`（2026-09-17 08:5x EDT，**已推送 `origin/main`，
+  工作区干净**）——
   **五个会话的改动合并为一个提交**（`web/index.html` 与 `web/config.js` 被五轮共同改动，
   `web/heatmap*.js` 被三轮、`web/skew*.js` 被两轮动过 ⇒ 文件级无法拆），
   19 文件 / +2151 −346（含 5 个新增 `web/*.js`）；`notes/` 随紧随其后的

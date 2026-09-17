@@ -2,7 +2,9 @@
 
 ACTIVE_SESSION: 2026-09-17/heatmap-auto-roll
 LAST_UPDATED: 2026-09-17 08:5x EDT —— **五轮改动已提交并推送（`ab853d3`），工作区干净**。
-`HEAD` = `ab853d3`（= `origin/main`；上一个功能提交是 `390ac6e`）。
+本会话**功能提交** `ab853d3`（= 五轮代码全部入库；上一个功能提交是 `390ac6e`）。
+其后是若干 `docs(notes)` 记录提交 —— ⚠️ **HEAD 以 `git log` 为准，本文件不写死**
+（写死就会被下一条记录提交立刻变成假记录）。
 **本提交混合五个会话**：`heatmap-auto-roll` / `interaction-feedback-5fix` /
 `skew-drag-interaction` / `heatmap-pan-drag` / `skew-dual-axis-zoom` ——
 `web/index.html` 与 `web/config.js` 被五轮共同改动（新脚本标签、新配置块），

@@ -163,14 +163,24 @@
   /* ------------------------------------------------------------------ */
 
   function watchdog() {
-    /* 计时基准优先取"最后一帧**成功渲染**的时刻"；一帧都没渲染过时退回
-       "连接建立时刻" —— 否则"连上了却一直没数据"会被 `!lastFrameAt` 直接跳过，
-       而那正是本项目最怕的静默故障形状。 */
-    var since = state.lastFrameAt || socket.stats.connectedAt;
-    if (!since) { return; }
-    var age = Date.now() - since;
+    /* 两个活体信号必须分开 —— **换连接只能修传输，修不了解码/渲染的错**。
+       · 传输活体：`socket.stats.lastFrameAt`（`ws_client._accept` 里、任何解析
+         之前打点）= "socket 收到了帧"。
+       · 渲染活体：`state.lastFrameAt`（`render` 里、`decodeFrame` 之后打点）
+         = "页面真的画出来过一帧"。
+       两者都取 **`max(最后一帧, 连接建立时刻)`**：
+       · 用 `||` 会让"刚换上的新连接"继承上一条连接的老时间戳 ⇒ 新连接一开就
+         判定超时；若它又恰好收不到帧，就会变成重连风暴。
+       · 一帧都没有时 `max` 自动退回"连接建立时刻"，否则"连上了却一直没数据"
+         会被 `!since` 直接跳过 —— 那正是本项目最怕的静默故障形状。 */
+    var rxAt = Math.max(socket.stats.lastFrameAt, socket.stats.connectedAt);
+    /* 两个时间戳都还是 0 ⇒ 一次都没连上过，没有可用的基准，什么都别判。
+       （少了这一句，"连接中"那一拍会把 `Date.now() - 0` 当成天文数字的
+       超时值，于是连接中就把状态点刷成错误色。） */
+    if (!rxAt) { return; }
+    var rxAge = Date.now() - rxAt;
 
-    if (age > CFG.render.staleErrorMs) {
+    if (rxAge > CFG.render.staleErrorMs) {
       setClass("st-dot", "dot err");
       if (state.conn === "open") {
         /* 连接自称开着、却一个帧都收不到 ⇒ 这条连接是假的，换掉它。
@@ -179,19 +189,31 @@
            ⚠️ 状态文字交给 onState，这里只负责"动手" —— 否则每秒都会把
            "重连中"改回"数据中断 Ns"。 */
         if (CFG.render.reconnectOnStale) {
-          socket.forceReconnect("数据中断 " + Math.round(age / 1000) + "s");
+          socket.forceReconnect("数据中断 " + Math.round(rxAge / 1000) + "s");
         } else {
-          setText("st-conn", "数据中断 " + Math.round(age / 1000) + "s");
+          setText("st-conn", "数据中断 " + Math.round(rxAge / 1000) + "s");
         }
       } else if (state.conn === "closed") {
-        setText("st-conn", "数据中断 " + Math.round(age / 1000) + "s");
+        setText("st-conn", "数据中断 " + Math.round(rxAge / 1000) + "s");
       }
       return;
     }
 
-    if (age > CFG.render.staleWarnMs) {
+    /* 帧在来（传输没问题），但页面很久没画出一帧 ⇒ 渲染层坏了。
+       换连接不可能修好，只能**报** —— 报出来才不会变成
+       "状态写着已连接、图却冻住"的假象（`render()` 在拆分模块缺失时是
+       **静默丢弃**每一帧的，原本没有任何出口）。 */
+    var drawAge = Date.now() - Math.max(state.lastFrameAt,
+      socket.stats.connectedAt);
+    if (drawAge > CFG.render.staleErrorMs) {
+      setClass("st-dot", "dot err");
+      setText("st-conn", "渲染停滞 " + Math.round(drawAge / 1000) + "s");
+      return;
+    }
+
+    if (rxAge > CFG.render.staleWarnMs) {
       setClass("st-dot", "dot warn");
-      setText("st-conn", "数据陈旧 " + Math.round(age / 1000) + "s");
+      setText("st-conn", "数据陈旧 " + Math.round(rxAge / 1000) + "s");
     }
   }
 

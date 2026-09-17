@@ -35,6 +35,18 @@ Archive: notes/context/archive/open_tasks_2026-09.md
   `tmp/probe_live_page.py 100` 对**真后端**采样 100s **6/6 PASS RC=0**
   （169 帧单调涨 / `forces` 恒 0 / 从未误报"数据中断"）。
   ⚠️ **未在 KAI 真实浏览器 + 盘中背压下验证**；最坏自愈延迟 = 45s。
+  - [x] **补记（14:1x）：拆成「两个活体信号」+ 修掉重连风暴** —— 上一轮把两个故障
+    塞进了同一个信号（`state.lastFrameAt` 既代表"传输活着"又代表"页面画出来了"），
+    且计时基准用 `||` ⇒ 换上的新连接**继承上一条连接的老时间戳** ⇒ 一开就被判超时。
+    **实测后果比预想重**：注入"帧在来但页面不画"后，旧写法 50s 内 `forces=5`
+    （**≈每秒一条连接的风暴**，且永不停），新写法 `forces=0` 且报出「渲染停滞 Ns」。
+    修法：`rxAge`（传输，`socket.stats.lastFrameAt`）/ `drawAge`（渲染，
+    `state.lastFrameAt`）**两个信号分开**，基准都用
+    `max(最后一帧, 连接建立时刻)`；`!rxAt` 守卫保留（`isFinite` 是错的）。
+    非空转：`tmp/probe_render_stall_guard.py` **旧 RC=1 7/9 / 新 RC=0 9/9**。
+    顺带**证伪**"解码抛错会冻结时间戳"（`matrix_codec.decode()` 无 throw 路径）。
+    ⚠️ 已知分工：「渲染器抛异常」那条路走 `sb-msg`（`_flushSoon` 的 onError），
+    **不进 `st-conn`**，未统一。
 - [ ] **[中] 门禁缺口** —— 建议新增检查器：`/health` 的 `per_client.sent` **必须在涨**，
   冻结即红（属"静默错值"类，正是本项目该守的）。
 - [x] **[中] 可观测性缺口：已补** —— `_sender` 的 `except` 由 `pass` 改为

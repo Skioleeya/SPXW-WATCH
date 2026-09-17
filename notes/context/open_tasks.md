@@ -21,7 +21,10 @@ Archive: notes/context/archive/open_tasks_2026-09.md
   `git update-ref` **RC=0 但文件不生成**；`git fetch` 会把整个 `refs/remotes/origin/`
   **删掉**。已排除权限（`icacls` 两目录 ACE 逐条相同）与 junction（`fsutil` 否）。
   **未在沙箱外复跑** ⇒ 无法排除是运行环境沙箱所致。
-  **下次远端有新提交、需要更新 `origin/main` 时若复现，即为这条限制的残留。**
+  ⚠️ **已确认会复现**（`3c6d5ad` 推送后当场复现：`origin/main` 回落到 `21293a1`、
+  `refs/remotes/origin/` 变成空目录）⇒ **本环境里每次 push/fetch 都会让跟踪引用陈旧**；
+  `pack-refs` 只是"把当前值改对"，**不是根治**。修复命令：
+  `git pack-refs --all`（标准命令）或手工建目录后直写松散引用。
 - [ ] **[中] ⚠️ 提交 ≠ KAI 逐轮验收** —— 五轮改动均为各会话自证，KAI 未逐轮复核。
 - [ ] **[中] `notes/analysis/` 归属仍待 KAI 裁** —— 本次提交只是**保全**证据，
   不等于把它定为永久库成员（按"答不出类别的不进永久库"纪律）。

@@ -95,6 +95,12 @@ git fsck --no-progress --connectivity-only ⇒ RC=0（只有 dangling commit，�
 ⚠️ **未定论的部分**：git 建不了二级子目录的**原因没有查明** —— 只查到"是 git 进程被拦、
 不是文件系统权限/重解析点"。**本会话未在沙箱外复跑**，无法排除是运行环境的沙箱所致。
 
+⚠️ **已确认会复现**（不是推测）：本会话第 3 个提交 `3c6d5ad` 推送后，
+`git rev-parse origin/main` **又回落到 `21293a1`**（推送前的值），`git status` 又变
+`[ahead 1]`；此时 `refs/remotes/origin/` 是一个**空目录**、里面没有 `main`。
+⇒ **在本环境里，每一次 push / fetch 只要需要更新跟踪引用，就会把它变陈旧。**
+所以 `pack-refs` 只是"把当前值改对"，**不是根治**。
+
 ## Closed in session
 
 - 五轮改动入库并推送；工作区干净（`porcelain` = 0）
@@ -106,7 +112,8 @@ git fsck --no-progress --connectivity-only ⇒ RC=0（只有 dangling commit，�
 ## OPEN-RISKS
 
 - **git 建不了 `.git/refs/` 二级子目录的原因未查明**（疑为运行环境沙箱）。
-  下次远端有新提交、需要更新 `origin/main` 时可能复现。**未在沙箱外验证。**
+  ⚠️ **已确认每次 push/fetch 都会让 `origin/main` 变陈旧**（`3c6d5ad` 推送后当场复现）。
+  **未在沙箱外验证。**
 - **提交 ≠ KAI 逐轮验收**：五轮改动均为各会话自证，KAI 未逐轮复核。
 - `notes/analysis/` 归属仍未定（本提交只是**保全**证据）。
 - `notes/context/*` 三件套在**堆积历史**（`handoff.md` 已叠 5 段会话），与

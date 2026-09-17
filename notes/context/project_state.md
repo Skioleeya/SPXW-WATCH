@@ -1,14 +1,28 @@
 # Project State
 
 ACTIVE_SESSION: 2026-09-17/heatmap-two-window
-LAST_UPDATED: 2026-09-17 02:4x —— **热力图纵轴改为「画 40 档 / 露 24 档」；
-门禁 16/16、变异 18/18 全过；真机联调未做。**
+LAST_UPDATED: 2026-09-17 04:0x —— **热力图纵轴「画 40 档 / 露 24 档」已落盘、已推送、
+工作区干净**（`HEAD = 130acdc`，与 `origin/main` 一致，`git ls-remote` 已核）。
 
 纵轴现在是**三个半径**：订阅 20（`subscription.json::num_strikes_each_side`）/
-绘制 20（`features.json::heatmap_draw_rows_each_side` ⇒ 每帧 40 行）/
+绘制 20（`features.json::heatmap_draw_rows_each_side` ⇒ 稳态 40 行）/
 可视 12（`features.json::heatmap_visible_rows_each_side` ⇒ 屏幕 24 行）。
 可视半径**随帧下发**，前端从帧上读。三条不变量（绘制 ≤ 订阅 / 可视 ≤ 绘制 /
 订阅 − 可视 ≥ 重建触发）由 `run.py --check [6]` 守，3 条变异。
+
+**真机联调已补做（03:09–04:00，IB Gateway PID 1232 + 后端 PID 7784）**：
+DOM 渲染 `tmp/_dom_check.js` **PASS 15 / FAIL 0**（40 行 / `yAxis 8..31` /
+像素复核恰好 24 行在网格内 / Top-N 描边全在可视区 / 读数「可见 24/40 档」）；
+在线契约检查 RC=0；窗口扫描 FAIL 0；`run.py --check` 16/16。
+
+⚠️ **两条已定性的"看着像缺陷其实不是"**：
+① **「每帧发 40 行」是上限不是保证** —— 实测现价 7612/7614 ⇒ 40 行、7618 ⇒ 39 行
+（随现价漂移 ±1，会来回变），冷启动约 1 分钟 33 行；可视 24 行不受影响
+（`S − V ≥ T` 保证）。已修 `README.md §4` 与 `features.json` 注释。
+② **已退订的档仍留在 `TickStore.refs()`**（`prune()` 不删键），但冻住的行只可能出现在
+绘制窗口最外侧（距现价 ≥18 档），比可视区（±12）外扩 6 行以上 ⇒ 用户看不到；
+实测 39 行 **0 行落后**。守卫仍是 `S − V ≥ T`。
+
 详见 `notes/sessions/2026-09-17/heatmap-two-window/{handoff,project_state}.md`。
 
 > 以下为**上一会话**的原状态文字（保留原样，未 retro-fit）。

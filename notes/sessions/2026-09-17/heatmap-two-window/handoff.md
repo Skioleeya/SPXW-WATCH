@@ -3,6 +3,12 @@ DATE: 2026-09-17
 TIER: T2
 STATUS: complete
 CHANGE-ID: N/A:非 OpenSpec 仓库，无变更单
+COMMIT: 130acdc —— `feat(web): 热力图纵轴「画 40 档 / 露 24 档」—— 三个半径 + 三条不变量`
+  （26 文件 / +1207 −319）。**已推送**：`git ls-remote origin refs/heads/main`
+  == `git rev-parse HEAD` == `130acdc…`；推送后工作区 0 项脏。
+  ⚠️ 本机 `git status -sb` 的 ahead/behind **不可信**（git 自己写
+  `.git/refs/remotes/**` 不落盘，推送成功后仍报 `[ahead 20]`）——
+  判推送只能靠 `ls-remote` 对 `rev-parse`，详见 `.workbuddy-ai/memory/2026-09-17.md`。
 
 # Handoff — 热力图纵轴「画 40 档 / 露 24 档」
 

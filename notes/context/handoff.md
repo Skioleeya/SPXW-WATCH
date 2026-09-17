@@ -1,13 +1,22 @@
 # Handoff Index
 
-## 最新：2026-09-17 / heatmap-two-window（完成，**未提交**）
+## 最新：2026-09-17 / heatmap-two-window（完成，**已提交 `130acdc` 并推送远端**）
 
 - **会话交接**：`notes/sessions/2026-09-17/heatmap-two-window/handoff.md`
 - **一句话**：热力图纵轴改为「**画 40 档 / 露 24 档**」—— 三个半径
   （订阅 20 / 绘制 20 / 可视 12），三条不变量由 `[6]` 守（变异 1 → 3 条）。
+- **提交**：`130acdc feat(web): 热力图纵轴「画 40 档 / 露 24 档」—— 三个半径 + 三条不变量`
+  （26 文件 / +1207 −319）。推送后 **`git ls-remote origin refs/heads/main` ==
+  `git rev-parse HEAD`**、工作区 **0 项脏**。
 - **状态**：`run.py --check` **16/16 RC=0**；`--selftest` **18/18**；
-  离线探针全过。⚠️ **真机联调没做**（IB Gateway 不在，`:4002` 无监听）
-  ⇒ 页面读数「可见 24/40 档」**未经真机验证**；性能未按新形状重测。
+  **真机联调已补做**（IB Gateway PID 1232 + 后端 PID 7784）：
+  DOM 渲染 `tmp/_dom_check.js` **PASS 15 / FAIL 0**（40 行 / `yAxis 8..31` /
+  像素复核恰好 24 行在网格内 / Top-N 描边全在可视区 / 读数「可见 24/40 档」）、
+  `tools/check_web_contract.py` **在线 RC=0**、窗口扫描 FAIL 0、
+  渲染 `setOption` p50 27.4ms / max 44.6ms（远低于 400ms 推送间隔）。
+- **两条已定性的"看着像缺陷其实不是"**：① 「每帧发 40 行」是**上限**
+  （实测现价 7612/7614 ⇒ 40、7618 ⇒ 39，随现价漂移）；② 已退订的档仍在
+  `TickStore.refs()` 里，但冻住的行只可能落在**可视区之外**（实测 39 行 0 行落后）。
 - **本会话根只有 2 个文件**（无 `startup.md`）：改动前未采基线，
   按 skill 规则不补写，`handoff.md` 里记 `STARTUP-PROOF: N/A:<原因>`。
 

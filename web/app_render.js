@@ -10,25 +10,6 @@
   var CFG = global.SWATCH_CONFIG;
   var app = global.SWATCH_APP;
 
-  /* P2: 按共享 viewport 裁剪矩阵列。zoom 为 null 时原样返回。 */
-  function applyViewport(block, zoom) {
-    if (!zoom || !block || !block.labels || !block.labels.length) { return block; }
-    var n = block.labels.length;
-    var from = zoom.start;
-    var to = zoom.tail ? n - 1 : zoom.end;
-    if (from < 0) { from = 0; }
-    if (to >= n) { to = n - 1; }
-    if (from >= to) { return block; }
-    return {
-      strikes: block.strikes,
-      rights: block.rights,
-      labels: block.labels.slice(from, to + 1),
-      values: block.values.map(function(row) { return row.slice(from, to + 1); }),
-      volumes: block.volumes ? block.volumes.map(function(row) { return row.slice(from, to + 1); }) : undefined,
-      vmax: block.vmax
-    };
-  }
-
   /*
    * 基线矩阵 → 实际要画的矩阵。三步都是纯呈现变换，本体在 web/period.js。
    */
@@ -111,38 +92,28 @@
     var display = displayView(frame.heatmap, frame.session);
     if (!display) {
       app.setText("heatmap-meta", global.currentViewLabel() + " · 该时段尚未开始");
-      app.state.lastDisplay = null;
       return null;
     }
 
-    /* P2: 缓存完整 display，供 viewport 变化回调复用 */
-    app.state.lastDisplay = display;
-
-    /* P2: 按共享 viewport 裁剪列（Skew 缩放驱动） */
-    var view = app.state.viewport ? applyViewport(display.view, app.state.viewport) : display.view;
-
-    /* 可视行半径**从帧上取**，不从 block 上取。block 到这里已经被四次逐字段
-       重建过（sliceZones → aggregate → clipTail → applyViewport），挂在上面的
-       新字段会在第一跳静默消失；帧对象自始至终没被重建，取它才是稳的。
+    /* 可视行半径**从帧上取**，不从 block 上取。block 到这里已经被三次逐字段
+       重建过（sliceZones → aggregate → clipTail），挂在上面的新字段会在
+       第一跳静默消失；帧对象自始至终没被重建，取它才是稳的。
        取不到时 HeatmapPanel.update() 会报错并保留上一帧（不猜值）。 */
     var visibleEach = frame.heatmap ? frame.heatmap.visible_rows_each_side : undefined;
 
-    var info = app.heatmapPanel.update(view, frame.spot, visibleEach);
+    /* 横轴缩放窗口由面板自己持有（`heatmap.js::_xWin`），这里不掺和 ——
+       2026-09-17 取消两图联动后，热力图的行/列窗口都只归它自己管。 */
+    var info = app.heatmapPanel.update(display.view, frame.spot, visibleEach);
     if (info) {
-      var zoomText = "";
-      if (app.state.viewport) {
-        var totalCols = display.view.labels.length;
-        var to = app.state.viewport.tail ? totalCols - 1 : app.state.viewport.end;
-        zoomText = " · 缩放 " + (app.state.viewport.start + 1) + "–" + (to + 1) + "/" + totalCols + " 列";
-      }
-      /* 读数写成「可见 24/40 档」而不是只写一个档数：纵轴现在是"画多、看少"，
-         只写一个数就分不出窗口有没有生效 —— 而那正是这一版最容易静默失效的地方。 */
+      /* 横轴"有没有窗口"**不写在这里** —— 它是徽标（`heatmap-mode`）的归属。
+         同一件事写两处，迟早有一处忘了改，用户就得在两个地方对照着读。 */
       app.setText("heatmap-meta", "可见 " + info.visible + "/" + info.rows + " 档 × " +
         info.cols + " 桶 · " + info.cells.toLocaleString() + " 格 · 色标 ±" +
         info.vmax.toFixed(2) + " · " + global.currentViewLabel() + " · " +
-        global.currentPeriodLabel() + zoomText);
+        global.currentPeriodLabel());
     }
-    app.setText("heatmap-foot", movers(view));
+    syncViewChips();
+    app.setText("heatmap-foot", movers(display.view));
     return display;
   }
 
@@ -187,15 +158,68 @@
     writeSkewMeta(app.skewPanel.update(aligned));
   }
 
+  /*
+   * 面板头徽标 + 复位按钮可用态。数据源是**面板自己的状态查询**
+   * （`heatmapPanel.xZoom()` / `skewPanel.viewState()`），**不是**上面那些读数 ——
+   * 读数在没有数据时会提前返回，徽标就会停在上一帧的样子
+   * （"图没数据但徽标说有时间窗"，最难查的一类）。
+   *
+   * 为什么这些状态要从 meta 行搬出来：此前它们只是 meta 行里的一段 10.5px 灰字，
+   * 与提示文字（操作说明书）位置分离、字号极小。用户离开一会儿回来，
+   * 无法一眼判断图还是不是自己调过的样子。
+   */
+  function syncViewChips() {
+    var xz = app.heatmapPanel.xZoom();
+    var st = app.heatmapPanel.stats();
+    var rl = app.heatmapPanel.xRoll();
+    /* 窗口态与"要不要跟着最新列走"是**两件事**：前者是"变焦没变焦"，
+       后者是"盯着正在发生的、还是在翻历史"。两者写进同一个徽标，
+       但文案必须让人一眼分开 —— 否则"图不动了"会被读成卡死。
+       自动滚动**功能被关掉**时只报窗口本身，不报"已停滚"：那是两回事，
+       后者会让人以为是自己停的。 */
+    var text = "跟随最新";
+    var cls = "chip follow";
+    if (xz) {
+      /* 文案压紧：只报"状态 + 看得见的列区间"，**不报总数** ——
+         总数已经在左边 meta 的「× N 桶」里，写两处是重复真相；
+         而缩进后这个徽标比默认态宽约 70px，会把 meta 行挤到省略号。 */
+      var span = (xz.from + 1) + "–" + (xz.to + 1);
+      if (!rl.enabled) { text = "窗口 " + span; cls = "chip window"; }
+      else if (rl.following) { text = "自动滚动 " + span; cls = "chip window"; }
+      else { text = "已停滚 " + span; cls = "chip paused"; }
+    }
+    global.ViewChips.set("heatmap-mode", text, cls);
+    /* 两个按钮都只在"现在点它有作用"时点亮：复位 = 视图被改过；
+       回到最新 = 右缘**没**贴住最新列（判据与自动滚动开关无关 ——
+       它是用户指令，关掉自动滚动之后照样该能手动追最新）。 */
+    global.ViewChips.button("heatmap-reset", !!xz);
+    global.ViewChips.button("heatmap-latest", !!xz && !rl.atTail);
+
+    var s = app.skewPanel.viewState();
+    global.ViewChips.set("skew-mode",
+      s.windowed ? "窗口 " + (s.from + 1) + "–" + (s.to + 1) + "/" + s.cols + " 列" : "跟随最新",
+      s.windowed ? "chip window" : "chip follow");
+    /* 锁定徽标**带区间**：只说"锁了"看不出锁到哪，而"锁到哪"正是读图要看的东西。 */
+    global.ViewChips.set("skew-lock-0", lockText("左轴锁 ", s.ranges[0], CFG.decimals.skew), "chip lock");
+    global.ViewChips.set("skew-lock-1", lockText("右轴锁 ", s.ranges[1], CFG.decimals.iv), "chip lock");
+    global.ViewChips.button("skew-reset", s.dirty);
+  }
+
+  function lockText(prefix, range, digits) {
+    if (!range) { return ""; }
+    return prefix + range[0].toFixed(digits) + "–" + range[1].toFixed(digits);
+  }
+
   function writeSkewMeta(info) {
+    syncViewChips();
     if (!info || !app.lastSkewLatest) { return; }
-    var zoom = info.view
-      ? " · 缩放 " + info.view.from + "–" + info.view.to + "/" + info.view.cols + " 列"
-      : "";
+    /* 时间窗与纵轴锁定态**不写在这里** —— 它们各自归一个徽标
+       （`skew-mode` / `skew-lock-0` / `skew-lock-1`）。同一件事写两处，
+       迟早有一处忘了改。 */
     app.setText("skew-meta", info.points + "/" + info.cols + " 点 · 当前 " +
       app.signed(app.lastSkewLatest.skew, CFG.decimals.skew) + " · ATM " +
       app.num(app.lastSkewLatest.atm, CFG.decimals.iv) + " · " + global.currentViewLabel() +
-      " · " + global.currentPeriodLabel() + zoom);
+      " · " + global.currentPeriodLabel());
   }
 
   /* 导出到 global，供 app.js 主循环调用 */
@@ -204,7 +228,7 @@
   global.renderHeatmap = renderHeatmap;
   global.renderSkew = renderSkew;
   global.writeSkewMeta = writeSkewMeta;
+  global.syncViewChips = syncViewChips;
   global.movers = movers;
-  global.applyViewport = applyViewport;
   global.displayView = displayView;
 })(window);

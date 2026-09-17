@@ -36,8 +36,13 @@
   function setPeriod(seconds) {
     if (seconds === app.state.periodSeconds) { return; }
     app.state.periodSeconds = seconds;
-    /* P2: 周期切换后列数骤变，旧 zoom 窗口必然越界 —— 重置为全宽。 */
-    app.state.viewport = null;
+    /* 周期切换后列数骤变，旧窗口必然越界 —— 复位热力图自己的横轴缩放。
+       窗口归**面板**持有（`heatmap.js::_xWin`），所以复位要问面板，不是改共享状态。 */
+    app.heatmapPanel.resetXZoom();
+    /* Skew 的时间窗同样按**列下标**存，周期一换列的含义就全变了（1 列 = 30 秒
+       还是 5 分钟）⇒ 必须跟着复位，否则窗口会落到一段完全无关的时间上。
+       两个面板各管各的，这里只是**同一时刻各问一次**，不是联动。 */
+    app.skewPanel.resetZoom();
     renderPeriodButtons();
     if (app.state.lastFrame) {
       global.renderSkew(app.state.lastFrame, global.renderHeatmap(app.state.lastFrame));

@@ -64,8 +64,12 @@
   function setView(id) {
     if (id === app.state.viewId) { return; }
     app.state.viewId = id;
-    /* P2: 时段切换后列数骤变，旧 zoom 窗口必然越界 —— 重置为全宽。 */
-    app.state.viewport = null;
+    /* 时段切换后列数骤变，旧窗口必然越界 —— 复位热力图自己的横轴缩放。
+       窗口归**面板**持有（`heatmap.js::_xWin`），所以复位要问面板。 */
+    app.heatmapPanel.resetXZoom();
+    /* 同上：Skew 的时间窗也是列下标，换时段后必须复位。两者各自复位，
+       不是联动 —— 谁都不去改对方的窗口。 */
+    app.skewPanel.resetZoom();
     renderSessionButtons();
     if (app.state.lastFrame) {
       global.renderSkew(app.state.lastFrame, global.renderHeatmap(app.state.lastFrame));

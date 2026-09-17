@@ -190,6 +190,12 @@ main {
 .panel-head .hint {
   font-size: 10.5px;
   color: var(--text-faint);
+  /* 面板头是单行 flex。加了徽标与复位按钮之后，宽度不够时**先挤提示文字**
+     （它是说明书，可省略），徽标与按钮 `flex: 0 0 auto` 永远看得见。 */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .panel-head .meta {
   margin-left: auto;
@@ -197,7 +203,35 @@ main {
   font-size: 10.5px;
   color: var(--text-dim);
   white-space: nowrap;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
+
+/* ------------------------------------------------------------------ */
+/* 状态徽标 / 复位按钮                                                  */
+/* ------------------------------------------------------------------ */
+
+/* 徽标：把"是否还在跟随最新""哪条纵轴被锁"从 meta 行里**移出来**。
+   此前这两件事只在一段 10.5px 的灰字里，与提示文字位置分离 —— 用户离开一会儿
+   回来，无法一眼判断图还是不是自己调过的样子。 */
+.chip {
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  line-height: 1.5;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text-faint);
+  background: var(--panel);
+  white-space: nowrap;
+}
+.chip.hidden { display: none; }
+.chip.window { color: var(--accent); border-color: var(--accent); }
+.chip.lock   { color: var(--warn);   border-color: var(--warn); }
+.chip.paused { color: var(--text-dim); border-color: var(--border); }
+.chip.flash  { color: var(--warn);   border-color: var(--warn); background: #241d0c; }
 
 /* ------------------------------------------------------------------ */
 /* 时段切换（GTH / RTH / 全时段）                                      */
@@ -208,7 +242,11 @@ main {
   gap: 3px;
   flex: 0 0 auto;
 }
-.sessions button {
+/* 三组按钮（时段 / 周期 / 复位）共用一套样式 —— 此前 `.sessions button` 与
+   `.periods button` 是两份逐字重复的规则，再加一组就是三份。 */
+.sessions button,
+.periods button,
+.vbtn {
   font-family: var(--mono);
   font-size: 10.5px;
   line-height: 1.4;
@@ -219,11 +257,23 @@ main {
   padding: 1px 7px;
   cursor: pointer;
 }
-.sessions button:hover {
+.sessions button:hover,
+.periods button:hover,
+.vbtn:hover {
   color: var(--text);
   border-color: var(--border-2);
 }
-.sessions button.on {
+.sessions button.on,
+.periods button.on {
+  color: #06222a;
+  background: var(--accent);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
+/* 复位按钮：视图被改过就点亮 —— "这个面板现在不是默认样子"必须一眼可见。 */
+.vbtn { flex: 0 0 auto; }
+.vbtn.dirty {
   color: #06222a;
   background: var(--accent);
   border-color: var(--accent);
@@ -246,17 +296,6 @@ main {
   gap: 3px;
   flex: 0 0 auto;
 }
-.periods button {
-  font-family: var(--mono);
-  font-size: 10.5px;
-  line-height: 1.4;
-  color: var(--text-dim);
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 3px;
-  padding: 1px 7px;
-  cursor: pointer;
-}
 .periods button:hover {
   color: var(--text);
   border-color: var(--border-2);
@@ -268,7 +307,59 @@ main {
   font-weight: 600;
 }
 
-.chart { flex: 1 1 auto; min-height: 0; }
+/* ------------------------------------------------------------------ */
+/* 图表容器 / 指针反馈层                                                */
+/* ------------------------------------------------------------------ */
+
+/* `position: relative` 是给两个覆盖层做定位锚点（十字线、手势区高亮）。
+   覆盖层全部 `pointer-events: none` —— 否则它们会吃掉鼠标事件，
+   症状是"指针一进图就再也拖不动"。 */
+.chart { position: relative; flex: 1 1 auto; min-height: 0; }
+
+/* 热力图十字线 + 命中格描边（`web/heatmap_hover.js`）。
+   为什么画在 DOM 上而不是画布上：本面板每 400ms 用 notMerge 重建整份 option，
+   画布上的临时标记活不过一次重建，而指针反馈必须与指针同步。 */
+.xhair {
+  position: absolute;
+  display: none;
+  pointer-events: none;
+  z-index: 3;
+}
+.xhair.on { display: block; }
+.xhair.h, .xhair.v { background: rgba(0, 229, 255, .45); }
+.xhair.h { height: 1px; }
+.xhair.v { width: 1px; }
+.xhair.box {
+  border: 1.5px solid var(--text);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, .55);
+}
+
+/* Skew 手势区高亮框（`web/skew_regions.js`）。
+   网格区只画虚线框不填色 —— 它占满整个图，填色会压住曲线。 */
+.region-hint {
+  position: absolute;
+  display: none;
+  pointer-events: none;
+  z-index: 2;
+  border: 1px dashed rgba(0, 229, 255, .35);
+}
+.region-hint.on { display: block; }
+.region-hint.y0, .region-hint.y1 {
+  background: rgba(255, 176, 32, .10);
+  border-color: rgba(255, 176, 32, .45);
+}
+.region-hint.x {
+  background: rgba(0, 229, 255, .10);
+  border-color: rgba(0, 229, 255, .45);
+}
+
+/* 游标语义：可拖的地方对用户必须**可见**（此前四个手势区全都没有 cursor）。
+   游标表达的是**动作**（上下拖 / 左右拖 / 拖拽），不是**对象** —— 左右两条
+   Y 轴区共用 `ns-resize`，是哪一侧由高亮框与徽标说。 */
+.chart.cur-y { cursor: ns-resize; }
+.chart.cur-x { cursor: ew-resize; }
+.chart.cur-pan { cursor: grab; }
+.chart.cur-pan.dragging { cursor: grabbing; }
 
 .panel-foot {
   padding: 5px 12px;

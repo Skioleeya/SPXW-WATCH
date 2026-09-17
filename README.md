@@ -242,6 +242,10 @@ venv/Scripts/python.exe tools/check_web_contract.py --offline --selftest
   （`features/persistence_store.py` 于 2026-09-15 拆出 `persistence_archive.py` 后
   由 398 降到 365，**不再是瓶颈**。⚠️ 行数是**会腐烂的派生量** —— 要真值请实跑
   `run.py --check` 的 `[1]`，**别抄本节**。）
+- 前端也有两个贴着上限的：**`web/heatmap.js`**（2026-09-17 加横轴自动滚动后逼近门禁）
+  与 **`web/style.css`**。`heatmap.js` 的下一次改动几乎必然要先拆分 ——
+  可拆的缝：左键拖拽手势（`_panStart` / `_panMove` / `_panEnd` 一整块）
+  按 `heatmap_hover.js` / `heatmap_roll.js` 的既有模式下沉成 `heatmap_pan.js`。
 
 ## 10. 深入阅读
 

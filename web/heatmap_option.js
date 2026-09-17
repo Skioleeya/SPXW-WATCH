@@ -34,6 +34,17 @@
  * 把可视区间收成 24 行。为什么不干脆只放 24 行：那样现价一动就要重建整个
  * series 数据，而"画 40"的全部意义就是让**窗口移动而不动数据**。
  * 实测口径（ECharts 5.6.0 + ``inverse: true``）见 buildOption 内的注释。
+ *
+ * 横轴（列方向）缩放 —— 与 Skew 面板无关，是本图自己的交互
+ * --------------------------------------------------------
+ * 滚轮交给 ``dataZoom(inside)`` 自己做（本图**没有**第二个缩放处理器，
+ * 不存在争抢）。用户缩出来的窗口由 ``web/heatmap.js`` 从 ``dataZoom`` 抄回来，
+ * 每帧重新贴进 option —— 本面板每帧 ``notMerge`` 重建整份 option，不贴回来
+ * 缩放在下一帧就被冲掉了。
+ *
+ * ⚠️ 横轴有了可视裁剪之后，**"全部列"不再等于"看得见的列"**，与纵轴同一个坑：
+ * Top-N 的排序范围、网格线步长、标签抽稀三处**都按可视列区间算**。
+ * 只改其中一处，症状是静默的 —— 黑边落在看不见的列上、或者标签被无谓抽稀。
  * ------------------------------------------------------------------ */
 (function (global) {
   "use strict";
@@ -88,11 +99,13 @@
      返回 { cells: {键→条目}, hi: 选中集最大成交量, lo: 选中集最小成交量 }；
      无成交量数据时返回 null。
 
-     ⚠️ "可视区域"= 纵轴的**可视行窗口** [rowFrom, rowTo]，不是帧里的全部行。
-     2026-09-17 之前两者相同（帧只有 24 行、全显示），改成"画 40 露 24"之后
-     它们不再相同：若仍按全部 40 行排序，Top-N 会选中**用户看不见的行**里的格子，
-     于是可视区里一个黑边都没有 —— 而"没有黑边"与"这段确实没有成交量"
-     在图上无法区分（静默失效）。横向仍是全部列（横轴没有可视裁剪）。
+     ⚠️ "可视区域"= 纵轴的可视行窗口 × 横轴的可视列窗口，**两者都不是全部**。
+     纵轴：2026-09-17 之前帧只有 24 行、全显示，改成"画 40 露 24"之后
+     [rowFrom, rowTo] 不再等于全部行；若仍按全部 40 行排序，Top-N 会选中
+     **用户看不见的行**里的格子，于是可视区里一个黑边都没有 —— 而"没有黑边"
+     与"这段确实没有成交量"在图上无法区分（静默失效）。
+     横轴：同一天加了滚轮横向缩放，[colFrom, colTo] 同理不再等于全部列。
+     两个方向都必须传窗口，传错任一个都是同一类静默失效。
 
      为什么要记 hi / lo：描边宽度在**选中集内部**按 hi→lo 线性插值，
      这样同属 Top-N 也分得出强弱（第 1 名最粗、第 N 名最细）。
@@ -102,13 +115,13 @@
 
      同值排序口径：成交量相同则"先列后行"（列号小者优先，同列则行号小者优先）。
      必须稳定 —— 否则每帧同值格子的相对次序会变，高亮在黑边之间跳动。 */
-  function pickTopCells(volumes, rowFrom, rowTo, cols, topN) {
+  function pickTopCells(volumes, rowFrom, rowTo, colFrom, colTo, topN) {
     if (!volumes || !(topN > 0)) { return null; }
 
     var list = [];
     for (var r = rowFrom; r <= rowTo; r++) {
       var row = volumes[r] || [];
-      for (var c = 0; c < cols; c++) {
+      for (var c = colFrom; c <= colTo; c++) {
         var v = row[c];
         if (v === null || v === undefined || !(v > 0)) { continue; }
         list.push({ c: c, r: r, v: v });
@@ -145,7 +158,7 @@
   /* Option 构建                                                         */
   /* ------------------------------------------------------------------ */
 
-  function buildOption(panel, block, spot, vmax, window_) {
+  function buildOption(panel, block, spot, vmax, window_, xWin) {
     var strikes = block.strikes || [];
     var rights = block.rights || [];
     var labels = block.labels || [];
@@ -153,10 +166,24 @@
     var rows = strikes.length;
     var cols = labels.length;
 
+    /* 可视列区间（含两端下标）。xWin 为 null = 全宽。
+       越界一律**夹回**帧内（这里只做几何夹取，不改窗口状态 —— 状态归
+       `heatmap.js::_captureX`，越界时的复位在那里显式发生并告警）。 */
+    var xFrom = 0;
+    var xTo = cols - 1;
+    if (xWin) {
+      xFrom = Math.max(0, Math.min(cols - 1, xWin.from));
+      xTo = Math.max(0, Math.min(cols - 1, xWin.to));
+      if (xTo <= xFrom) { xFrom = 0; xTo = cols - 1; }
+    }
+    var xCols = xTo - xFrom + 1;
+
     var rect = panel._el.getBoundingClientRect();
     var gridW = Math.max(1, rect.width - PAD.left - PAD.right);
     var gridH = Math.max(1, rect.height - PAD.top - PAD.bottom);
-    var strideX = strideFor(gridW, cols);
+    /* 网格线步长 / 标签抽稀按**可视列数**算：可视区之外的列不画，
+       拿全部列当分母会把线抽稀、把标签抽稀到看不出时间结构。 */
+    var strideX = strideFor(gridW, xCols);
     /* 网格线的行步长按**可视行数**算：可视区之外的行的行高不参与
        "线间距够不够"的判断（它们根本不画）。 */
     var strideY = strideFor(gridH, window_.count);
@@ -168,18 +195,21 @@
        这是"标记"不是"连续编码" —— 逐格按成交量变粗会让满屏都是黑边，
        反而看不出谁最活跃（2026-09-15 KAI 定的语义）。
 
-       可视区域 = 纵轴的可视行窗口（见 web/heatmap_window.js）——
-       "画 40 露 24"之后它**不再等于**帧的全部行，所以这里必须传窗口，
-       不能传 0..rows-1（传错会让黑边全落在看不见的行上，见 pickTopCells）。 */
+       可视区域 = 纵轴的可视行窗口（见 web/heatmap_window.js）× 横轴的可视列
+       窗口（见 buildOption 的 dataZoom）。"画 40 露 24"与横向缩放之后，
+       它**两个方向都不再等于**帧的全部行列，所以这里必须传两个窗口，
+       不能传 0..rows-1 / 0..cols-1（传错会让黑边全落在看不见的格子上，
+       见 pickTopCells）。 */
     var vt = CFG.heatmap.volumeTop || {};
     var vtOn = vt.enabled !== false;
     var volumes = block.volumes || null;
 
     /* 描边宽度区间锚在格子**短边**上：锚长边时窄行的上下边框会互相吃穿。
-       配置显式给了像素值就用像素值，否则按短边的比例派生。 */
-    var cellShort = Math.min(gridW / Math.max(cols, 1), gridH / Math.max(window_.count, 1));
+       配置显式给了像素值就用像素值，否则按短边的比例派生。
+       ⚠️ 短边按**可视**列数算 —— 放大之后格子变宽，描边也该跟着变粗。 */
+    var cellShort = Math.min(gridW / Math.max(xCols, 1), gridH / Math.max(window_.count, 1));
     var pick = vtOn
-      ? pickTopCells(volumes, window_.from, window_.to, cols, vt.topN)
+      ? pickTopCells(volumes, window_.from, window_.to, xFrom, xTo, vt.topN)
       : null;
     var vtHiPx = vt.maxPx > 0 ? vt.maxPx : cellShort * (vt.maxRatio > 0 ? vt.maxRatio : 0);
     var vtLoPx = vt.minPx > 0 ? vt.minPx : cellShort * (vt.minRatio > 0 ? vt.minRatio : 0);
@@ -224,6 +254,32 @@
       animation: false,
       backgroundColor: "transparent",
       grid: { left: PAD.left, right: PAD.right, top: PAD.top, bottom: PAD.bottom },
+      /* 横轴缩放 / 平移（本图唯一的横轴窗口入口，与 Skew 面板无关）。
+         · `minValueSpan` 用**列数** —— category 轴的数据值就是下标。
+         · `filterMode: "none"`：只改坐标轴范围，**不动 series 数据** ——
+           与纵轴"画多、看少"同一思路（窗口移动，数据不重建）。
+         · `moveOnMouseWheel` 关：滚轮只缩放，不做滚动式平移。
+         · `moveOnMouseMove` **必须为 false**：ECharts 自带的拖拽平移把"正在拖"
+           这个状态存在它自己的 RoamController 里，而本面板每 400ms 用
+           `notMerge` 重建整份 option ⇒ 控制器连同该状态一起重建，拖到下一帧就
+           断掉（实测：8 段拖拽里只有前 3 段生效，停点正好落在一次 setOption 上）。
+           左键拖拽平移改由 `heatmap.js` 自己做（窗口状态只有一个出口 `_xWin`）。
+         · start/end 按**列下标**换算成百分比（`/(cols-1)`，与
+           `heatmap.js::_captureX` 同一口径 —— 两处必须同口径，否则来回
+           换算会漂，窗口每帧自己往回缩一点）。
+         · 全宽时也必须显式写 0/100：本面板每帧 `notMerge` 重建，不写就等于
+           "没有 dataZoom 组件"，上一次的缩放/平移会被整份冲掉。 */
+      dataZoom: [{
+        type: "inside",
+        xAxisIndex: [0],
+        filterMode: "none",
+        zoomOnMouseWheel: CFG.heatmap.xZoom.enabled !== false,
+        moveOnMouseWheel: false,
+        moveOnMouseMove: false,
+        minValueSpan: CFG.heatmap.xZoom.minCols,
+        start: xFrom / Math.max(cols - 1, 1) * 100,
+        end: xTo / Math.max(cols - 1, 1) * 100
+      }],
       tooltip: {
         trigger: "item",
         backgroundColor: "rgba(17,21,26,.96)",
@@ -262,7 +318,7 @@
         axisLabel: {
           color: CFG.theme.textFaint,
           fontSize: 10,
-          interval: xInterval(cols),
+          interval: xInterval(xCols),
           hideOverlap: true
         }
       },
@@ -285,6 +341,8 @@
            40 行里恰好 24 行落在网格矩形内。
            备选方案 dataZoom(inside) 实测结果相同，但要多挂一个交互组件
            （还得 disabled 掉），这里选更少活动部件的那个。
+           ⚠️ 本图**另有一个** dataZoom，那是横轴的（只认 `xAxisIndex: [0]`）——
+           与纵轴窗口无关，别把两者当成同一个东西。
 
            ⚠️ 绝不能只在渲染前把 40 行裁成 24 行：那样现价一动就要重建整个
            series 数据，而"画 40"的全部意义就是**让窗口移动不动数据**。 */

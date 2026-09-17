@@ -63,9 +63,13 @@
     <div class="panel-head">
       <h2>日内 IV 冲量热力图</h2>
       <span class="hint">颜色 = ΔIV（波动率点 / 时间桶）· 暖色 = IV 上行 · 冷色 = IV 下行</span>
+      <span class="hint">滚轮 = 缩放时间轴 · 左键拖 = 平移 · 双击 / 复位 = 还原</span>
       <div class="sessions" id="heatmap-sessions"></div>
       <div class="periods" id="heatmap-periods"></div>
       <span class="meta" id="heatmap-meta"></span>
+      <span class="chip" id="heatmap-mode"></span>
+      <button class="vbtn" id="heatmap-latest" type="button" title="右缘回到最新列并恢复跟随（保持当前缩放跨度）">回到最新</button>
+      <button class="vbtn" id="heatmap-reset" type="button" title="复位横轴缩放（快捷键 Esc / R）">复位</button>
     </div>
     <div class="chart" id="heatmap"></div>
     <div class="panel-foot" id="heatmap-foot"></div>
@@ -75,7 +79,13 @@
     <div class="panel-head">
       <h2>25Δ Skew 实时曲线</h2>
       <span class="hint">Put25 − Call25，正值代表下行保护更贵</span>
+      <span class="hint">左 / 右 Y 轴区上下拖 = 只缩那一侧纵轴 · 网格内拖 = 平移 · 底部时间轴区左右拖 = 缩时间窗</span>
+      <span class="hint">双击 / 复位 = 三条轴全部复位</span>
       <span class="meta" id="skew-meta"></span>
+      <span class="chip" id="skew-mode"></span>
+      <span class="chip" id="skew-lock-0"></span>
+      <span class="chip" id="skew-lock-1"></span>
+      <button class="vbtn" id="skew-reset" type="button" title="三条轴全部复位（快捷键 Esc / R）">复位</button>
     </div>
     <div class="chart" id="skew"></div>
   </section>
@@ -89,14 +99,19 @@
 <script src="vendor/echarts.min.js"></script>
 <script src="runtime-config.js"></script>
 <script src="config.js"></script>
+<script src="view_chips.js"></script>
 <script src="period.js"></script>
 <script src="period_align.js"></script>
 <script src="matrix_codec.js"></script>
 <script src="ws_client.js"></script>
 <script src="heatmap_window.js"></script>
+<script src="heatmap_roll.js"></script>
+<script src="heatmap_hover.js"></script>
 <script src="heatmap_option.js"></script>
 <script src="heatmap.js"></script>
 <script src="skew_helpers.js"></script>
+<script src="skew_regions.js"></script>
+<script src="skew_zoom.js"></script>
 <script src="skew_option.js"></script>
 <script src="skew.js"></script>
 <script src="app.js"></script>

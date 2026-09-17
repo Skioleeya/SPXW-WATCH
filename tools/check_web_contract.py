@@ -127,7 +127,17 @@ def js_files(web: Path = WEB) -> list[Path]:
 # 静态对照 1：DOM id
 # ---------------------------------------------------------------------------
 
-_ID_CALL = re.compile(r'(?:el|setText|setClass)\(\s*"([^"]+)"')
+# id 的取法有三条路，**都必须扫**：
+#   ① `el("x")` / `setText("x")` / `setClass("x")`（app.js 的 DOM 助手）
+#   ② `bindButton("x", ...)`（面板头按钮的统一接法）
+#   ③ `ViewChips.set/flash/button("x", ...)`（状态徽标 + 按钮可用态）
+# 2026-09-17 补 ②③：此前只扫 ①，于是「回到最新」按钮的绑定、以及上一轮
+# 全部徽标与复位按钮的 id **都不在覆盖内** —— 打错一个字就静默失效
+# （按钮点了没反应、徽标永不更新），正是本项目最忌讳的那类缺陷。
+_ID_CALL = re.compile(
+    r'(?:el|setText|setClass|bindButton)\(\s*"([^"]+)"'
+    r'|ViewChips\.(?:set|flash|button)\(\s*"([^"]+)"'
+)
 _HTML_ID = re.compile(r'id="([^"]+)"')
 
 
@@ -135,7 +145,9 @@ def check_dom_ids(web: Path = WEB) -> bool:
     html_ids = set(_HTML_ID.findall((web / "index.html").read_text("utf-8")))
     used: dict[str, str] = {}
     for path in js_files(web):
-        for name in _ID_CALL.findall(path.read_text("utf-8")):
+        for groups in _ID_CALL.findall(path.read_text("utf-8")):
+            # 两个分支各一个捕获组，只有一个非空
+            name = groups[0] or groups[1]
             used.setdefault(name, path.name)
 
     missing = sorted(n for n in used if n not in html_ids)
@@ -246,13 +258,34 @@ def check_payload(frame: dict) -> bool:
 # 非空转验证
 # ---------------------------------------------------------------------------
 
-#: 往 web/ 的**副本**里注入的假引用。两条都必须被抓到，否则说明对应的
+#: 往 web/ 的**副本**里注入的假引用。都必须被抓到，否则说明对应的
 #: 对照是空转的（例如正则写歪、或者扫描的文件清单是空的）。
+#: id 三条取法各注入一个 —— 只注入一条的话，"正则少了两个分支"与
+#: "对照整体空转"分不开：前者照样会红（被 `el()` 那条抓到），但另外两条
+#: 取法其实**没在覆盖内**（2026-09-17 补 ②③ 之前就是这个状态）。
+_SELFTEST_IDS = ("__selftest_missing_id__", "__selftest_missing_btn__",
+                 "__selftest_missing_chip__")
 _SELFTEST_INJECT = """
-/* --- selftest：以下两行是故意注入的假引用，真跑时不存在 --- */
+/* --- selftest：以下几行是故意注入的假引用，真跑时不存在 --- */
 el("__selftest_missing_id__");
+bindButton("__selftest_missing_btn__", function () {});
+ViewChips.set("__selftest_missing_chip__", "x");
 CFG.__selftest.missing.key;
 """
+
+
+def _check_id_branches(report: str) -> int:
+    """
+    三个假 id 必须**全部**出现在缺失清单里 —— 一个分支漏扫就是空转。
+    只断言"整体变红"不够：正则少了 `bindButton` / `ViewChips` 两个分支、
+    只留 `el()`，整体照样变红。
+    """
+    missed = [n for n in _SELFTEST_IDS if n not in report]
+    ok = not missed
+    print(f"  {GREEN if ok else RED}[{'ok' if ok else 'FAIL'}]{RESET} "
+          f"id 三条取法都被扫到 → " + ("el / bindButton / ViewChips 全命中"
+                                      if ok else "漏: " + ", ".join(missed)))
+    return 0 if ok else 1
 
 
 def selftest() -> int:
@@ -285,6 +318,8 @@ def selftest() -> int:
             print(f"  {GREEN if caught else RED}[{'ok' if caught else 'FAIL'}]{RESET} "
                   f"{name} → {'已抓住' if caught else '**没抓住（对照是空转的）**'}")
             failures += 0 if caught else 1
+            if name == "DOM id 对照" and caught:
+                failures += _check_id_branches(sink.getvalue())
 
     return 0 if failures == 0 else 1
 

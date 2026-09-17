@@ -3,8 +3,15 @@
  * 主序列：25Δ Skew（Put25 − Call25），按正负分段着色。
  * 辅序列：ATM IV / 25Δ Put IV / 25Δ Call IV（右侧纵轴）。
  *
- * 横轴由 app.js 对齐到热力图列网格；本面板不做时间轴换算。
- * 纯函数已拆分到 skew_helpers.js，首次渲染 option 构建拆分到 skew_option.js。
+ * 横轴由 app.js 对齐到热力图列网格；本面板不做时间轴换算。它默认是一条自动
+ * 滚动的全宽时间轴（每帧尾部追加新列、自动跟随最新），**只有用户自己拖出时间窗
+ * 之后才不再跟随最新**（窗口状态归 `skew_zoom.js`，本文件每帧把它贴回 option）。
+ *
+ * 分层（都只依赖 global，互不反向引用）：
+ *   skew_helpers.js  纯函数（量程、标签间隔、小数位、缩放与平移的数学）
+ *   skew_option.js   完整 option 与 dataZoom 片段构建
+ *   skew_zoom.js     手势交互（轴区缩放 / 网格平移 / 双击复位）与**视图状态**的唯一出口
+ *   本文件           编排：帧数据 → series → option → 图表
  * ------------------------------------------------------------------ */
 
 (function (global) {
@@ -29,108 +36,128 @@
     this._el = el;
     this._chart = echarts.init(el, null, { renderer: "canvas" });
     this._count = 0;
-    this._zoom = null;
     this._labelInterval = null;
     this._series = null;
     this._initialized = false;
-    this._viewportHook = null;
-    this._viewportChangeHook = null;
-    /* Y 轴锁定量程（滚轮缩放用）。null = 走自动量程。 */
-    this._yLocked = null;
+    this._zoomHook = null;
     this._yDecimals = null;
 
     var self = this;
-    this._chart.on("datazoom", function () { self._captureZoom(); });
-    this._chart.getZr().on("dblclick", function () { self._resetZoom(); });
-    this._bindWheel();
+    this._zoom = new global.SkewZoom(this._chart, {
+      onZoom: function () { self._applyZoom(); }
+    });
+    this._zoom.bind();
+
+    /* 手势区的可见反馈（游标 + 区域高亮 + 空操作提示）。它只**读**视图状态，
+       不参与手势判定 —— 归属判定仍然只有 `skew_zoom.js` 一处。 */
+    this._regions = new global.SkewRegions(el, this._chart, function () {
+      return !!self._zoom.xWindow();
+    });
+    this._regions.attach();
 
     global.addEventListener("resize", function () { self._chart.resize(); });
   }
 
   /* ------------------------------------------------------------------ */
-  /* Y 轴滚轮自由缩放                                                    */
+  /* 量程                                                                */
   /* ------------------------------------------------------------------ */
 
+  /* 这一帧左轴要用的量程：锁定则用锁定值，否则按**可视窗口**自动算。
+     右轴不在这里 —— 它未锁定时由 ECharts 自己伸缩（见 _zoom.yAxisPatch）。 */
+  SkewPanel.prototype._yRange = function (view) {
+    return H.effectiveRange(this._series || {}, this._zoom.locked(0), view.from, view.to);
+  };
+
   /*
-   * 只认"落在网格矩形内、且不带 X 轴意图"的滚轮。
+   * 纵轴补丁 = 量程 + 锁定态**同源**（锁定态跟着量程一起从 `skew_zoom.js` 出来），
+   * 再由本文件翻译成样式：被锁的那一侧换成警示色。
    *
-   * **为什么拦住 X**：ECharts 的 `dataZoom{type:"inside"}` 自己监听同一元素的
-   * wheel 事件来做 X 轴缩放。若不拦截，一次滚轮会同时缩 X 和 Y —— 而需求明确
-   * 要求 X 轴时间范围在缩放过程中不变。
-   *
-   * 分工（配置见 config.js::skew.yZoom）：
-   *   - 指针在网格内 → 只缩 Y，X 完全不动
-   *   - 指针在网格外（轴标签 / 图例区）→ 放行给 dataZoom，仍按原样缩 X
+   * 为什么必须看得见：两条纵轴各缩各的之后，同一屏幕高度在左右两边含义不同，
+   * 而此前两条轴的刻度颜色、字重、字号**完全相同**，唯一提示是 meta 行里的一段
+   * 文字 —— 用户完全可能把"左轴放大、右轴没放大"的图当成正常的双轴图读数。
    */
-  SkewPanel.prototype._bindWheel = function () {
-    var self = this;
-    this._el.addEventListener("wheel", function (ev) {
-      var cfg = CFG.skew.yZoom;
-      if (!cfg || cfg.enabled === false) { return; }
-      if (!self._series) { return; }
-
-      var factor = ev.deltaY > 0 ? cfg.step : (1 / cfg.step);
-      var anchor = self._anchoredValue(ev);
-      if (!self._inGrid(ev)) { return; }   /* 网格外：交给 dataZoom 缩 X */
-
-      var base = self._yRange();
-      var next = H.zoomRange(base, factor, anchor);
-      /* 与当前量程实质相同（已顶到 minSpan / maxSpan）⇒ 不再吞事件，
-         免得滚轮在边界上"卡住"整个页面。 */
-      if (!(Math.abs(next[1] - next[0] - (base[1] - base[0])) > 1e-12) &&
-          !(Math.abs(next[0] - base[0]) > 1e-12)) {
-        return;
-      }
-      self._yLocked = next;
-      ev.preventDefault();
-      self._applyViewport();
-    }, { passive: false });
-  };
-
-  /* 指针是否落在绘图网格矩形内（用 ECharts 自己的几何，不自己算 PAD）。 */
-  SkewPanel.prototype._inGrid = function (ev) {
-    var rect = this._el.getBoundingClientRect();
-    var x = ev.clientX - rect.left;
-    var y = ev.clientY - rect.top;
-    var model = this._chart.getModel && this._chart.getModel();
-    var grid = model && model.getComponent("grid", 0);
-    if (!grid) { return true; }
-    var gr = grid.coordinateSystem.getRect();
-    return x >= gr.x && x <= gr.x + gr.width &&
-           y >= gr.y && y <= gr.y + gr.height;
-  };
-
-  /* 指针处对应的 Y 值 —— 缩放锚点。取不到就返回 null（由 zoomRange 锚中心）。 */
-  SkewPanel.prototype._anchoredValue = function (ev) {
-    var cfg = CFG.skew.yZoom;
-    if (!cfg || cfg.anchorAtPointer === false) { return null; }
-    try {
-      var rect = this._el.getBoundingClientRect();
-      return this._chart.convertFromPixel(
-        { yAxisIndex: 0 }, [ev.clientX - rect.left, ev.clientY - rect.top]
-      )[1];
-    } catch (e) {
-      return null;   /* 图尚未出，或坐标轴未就绪 —— 退回锚中心 */
+  SkewPanel.prototype._yPatch = function (range) {
+    var patch = this._zoom.yAxisPatch(range);
+    /* 两条轴的**默认**色，与 `skew_option.js` 首次渲染时写的一致。
+       未锁定也要显式写回去：ECharts 的 setOption 是**合并**语义，
+       只发"锁定色"不发"解锁色"的话，复位之后那一侧的刻度会**留在警示色**上
+       （症状：点了复位，图也回去了，但刻度还是黄的）。 */
+    var labelColor = [CFG.theme.textDim, CFG.theme.textFaint];
+    for (var i = 0; i < patch.length; i++) {
+      var locked = patch[i].locked === true;
+      patch[i].axisLabel = { color: locked ? CFG.theme.warn : labelColor[i] };
+      patch[i].axisLine = {
+        lineStyle: { color: locked ? CFG.theme.warn : CFG.theme.border }
+      };
+      patch[i].nameTextStyle = { color: locked ? CFG.theme.warn : CFG.theme.textDim };
     }
+    return patch;
   };
 
-  /* 这一帧的基准量程：已锁定则用锁定值，否则用自动量程。 */
-  SkewPanel.prototype._yRange = function () {
-    var series = this._series || {};
-    var n = this._count;
-    var win = H.windowOf(this._zoom, n);
-    return H.effectiveRange(series, win, this._yLocked);
+  /* 纵轴小数位随量程变 —— 合并进补丁，**不能整个覆盖 `axisLabel`**：
+     覆盖会把上面刚写进去的锁定色一起抹掉（症状：缩放一次之后锁定色就没了）。 */
+  SkewPanel.prototype._applyDecimals = function (patch, range) {
+    var decimals = H.axisDecimalsFor(range);
+    if (decimals === this._yDecimals) { return; }
+    this._yDecimals = decimals;
+    var label = patch[0].axisLabel || {};
+    label.formatter = yFormatter(decimals);
+    patch[0].axisLabel = label;
   };
 
-  /* 复位到自动量程（双击 / 切周期 / 数据重置时调用）。 */
-  SkewPanel.prototype.resetY = function () {
-    if (!this._yLocked) { return; }
-    this._yLocked = null;
-    this._applyViewport();
+  /*
+   * 视图状态快照 —— 面板头徽标与复位按钮的**唯一**数据来源。
+   * 不从读数（`_readout`）里取：那条路在没有数据时会提前返回，
+   * 徽标就会停在上一帧的样子（"图没数据但徽标说有时间窗"，最难查的一类）。
+   */
+  SkewPanel.prototype.viewState = function () {
+    var win = this._zoom.xWindow();
+    var l0 = this._zoom.locked(0);
+    var l1 = this._zoom.locked(1);
+    return {
+      windowed: !!win,
+      from: win ? win.from : 0,
+      to: win ? win.to : Math.max(this._count - 1, 0),
+      cols: this._count,
+      locked: [!!l0, !!l1],
+      ranges: [l0, l1],
+      dirty: !!win || !!l0 || !!l1
+    };
+  };
+
+  /* 空操作提示的回调（由 `app.js` 接到徽标上）。图表层不直接碰 DOM。 */
+  SkewPanel.prototype.setNoopHook = function (fn) {
+    this._regions.hint(fn || null);
   };
 
   SkewPanel.prototype.yLocked = function () {
-    return this._yLocked ? [this._yLocked[0], this._yLocked[1]] : null;
+    return this._zoom.locked(0);
+  };
+
+  /* 复位全部三条轴（两条纵轴量程 + 时间窗）。双击走的就是这条路；
+     切周期 / 换时段时由调用方再点一次 —— 那时列的含义已经变了，
+     旧窗口必然落到一段无关的时间上。 */
+  SkewPanel.prototype.resetZoom = function () {
+    this._zoom.reset();
+  };
+
+  /* 这一帧的时间窗（下标 + 百分比补丁 + 是否刚被挤动），同时把列数告诉交互层。
+     ⚠️ 每帧都必须问、必须贴：横轴在长，窗口按**列下标**存，
+     不重贴就会按旧列数画（症状：右边永远少一截）。
+     窗口被挤动 / 被复位都**必须响** —— 静默复位是"图自己跳回全宽"这类
+     无源症状的根因（2026-09-17 实测：列数帧间抖动曾把用户窗口整个抹掉）。 */
+  SkewPanel.prototype._view = function (count) {
+    this._zoom.setCols(count);
+    var view = this._zoom.view();
+    if (global.console && console.warn) {
+      if (view.reset) {
+        console.warn("[skew] 时间窗已越界（当前 " + count + " 列）—— 复位为全宽");
+      } else if (view.clamped) {
+        console.warn("[skew] 时间窗超出当前列数（" + count + " 列）—— 已夹回可见范围 " +
+          (view.from + 1) + "–" + (view.to + 1));
+      }
+    }
+    return view;
   };
 
   SkewPanel.prototype.resize = function () {
@@ -140,54 +167,30 @@
   SkewPanel.prototype.clear = function () {
     this._chart.clear();
     this._count = 0;
-    this._zoom = null;
     this._labelInterval = null;
     this._series = null;
     this._initialized = false;
     /* 数据被清空（切周期 / 换时段）⇒ 锁定的量程失去参照，一并复位。 */
-    this._yLocked = null;
+    this._zoom.clear();
     this._yDecimals = null;
   };
 
-  SkewPanel.prototype._visibleSpan = function (n) {
-    var win = H.windowOf(this._zoom, n);
-    return win ? (win.to - win.from + 1) : n;
-  };
+  /* ------------------------------------------------------------------ */
+  /* 渲染                                                                */
+  /* ------------------------------------------------------------------ */
 
-  SkewPanel.prototype.setViewport = function (zoom) {
-    this._zoom = zoom || null;
-    if (this._viewportChangeHook) { this._viewportChangeHook(zoom); }
-    this._applyViewport();
-  };
-
-  SkewPanel.prototype._captureZoom = function () {
-    var n = this._count;
-    if (!(n > 1)) { this.setViewport(null); return; }
-
-    var opt = this._chart.getOption();
-    var dz = (opt && opt.dataZoom && opt.dataZoom[0]) || {};
-    var start = Number(dz.start);
-    var end = Number(dz.end);
-    if (!isFinite(start) || !isFinite(end)) { return; }
-
-    var a = Math.round(start / 100 * (n - 1));
-    var b = Math.round(end / 100 * (n - 1));
-    if (a < 0) { a = 0; }
-    if (b > n - 1) { b = n - 1; }
-
-    if (a <= 0 && b >= n - 1) { this.setViewport(null); } else {
-      this.setViewport({ start: a, end: b, tail: b >= n - 1 });
-    }
-  };
-
-  SkewPanel.prototype._applyViewport = function () {
+  /* 手势改完视图之后的重绘：只改量程 / 时间窗 / 刻度，不动 series。 */
+  SkewPanel.prototype._applyZoom = function () {
     if (!this._series) { return; }
 
-    var win = H.windowOf(this._zoom, this._count);
-    var range = H.effectiveRange(this._series, win, this._yLocked);
-    var patch = { yAxis: [{ min: range[0], max: range[1] }, {}] };
+    var view = this._view(this._count);
+    var range = this._yRange(view);
+    var patch = {
+      yAxis: this._yPatch(range),
+      dataZoom: [global.buildSkewDataZoom(view.patch)]
+    };
 
-    var interval = H.labelInterval(this._visibleSpan(this._count));
+    var interval = H.labelInterval(view.count);
     if (interval !== this._labelInterval) {
       this._labelInterval = interval;
       patch.xAxis = { axisLabel: { interval: interval } };
@@ -195,24 +198,10 @@
 
     /* 放大到很窄时必须给刻度加小数位，否则一屏标签全变成同一个数
        （量程 0.05 波动率点、1 位小数 ⇒ 全是 "0.1"）。 */
-    var decimals = H.axisDecimalsFor(range);
-    if (decimals !== this._yDecimals) {
-      this._yDecimals = decimals;
-      patch.yAxis[0].axisLabel = { formatter: yFormatter(decimals) };
-    }
+    this._applyDecimals(patch.yAxis, range);
 
     this._chart.setOption(patch);
-    if (this._viewportHook) { this._viewportHook(this._readout()); }
-  };
-
-  SkewPanel.prototype._resetZoom = function () {
-    /* 双击 = 一次性复位**两种**缩放：X 轴窗口与 Y 轴量程。
-       用户的心智是"双击回默认视图"，只复位一半会让人以为程序卡住。 */
-    if (this._zoom) {
-      this._chart.setOption({ dataZoom: [{ start: 0, end: 100 }] });
-      this.setViewport(null);
-    }
-    this.resetY();
+    if (this._zoomHook) { this._zoomHook(this._readout()); }
   };
 
   SkewPanel.prototype.update = function (series) {
@@ -226,12 +215,8 @@
     var put25 = series.put25 || [];
     var call25 = series.call25 || [];
 
-    var win = H.windowOf(this._zoom, count);
-    if (this._zoom && !win) { this._zoom = null; }
-    var span = win ? (win.to - win.from + 1) : count;
-
-    /* 已锁定 Y 量程时用锁定值（新数据不覆盖它），否则用自动量程。 */
-    var range = H.effectiveRange(series, win, this._yLocked);
+    var view = this._view(count);
+    var range = H.effectiveRange(series, this._zoom.locked(0), view.from, view.to);
     var sign = H.splitBySign(skew);
     this._series = series;
 
@@ -310,68 +295,62 @@
     }
 
     if (!this._initialized) {
-      var fullOption = global.buildSkewFullOption(graphs, labels, win, span, range);
+      var fullOption = global.buildSkewFullOption(
+        graphs, labels, view, range, this._yPatch(range)
+      );
       this._chart.setOption(fullOption, { notMerge: true });
       this._initialized = true;
       this._yDecimals = null;   /* 整份 option 重建，缓存作废 */
     } else {
       var delta = {
         xAxis: { data: labels },
-        yAxis: [{ min: range[0], max: range[1] }, {}],
-        dataZoom: [{
-          start: win ? win.start : 0,
-          end: win ? win.end : 100
-        }],
-        series: graphs
+        yAxis: this._yPatch(range),
+        series: graphs,
+        dataZoom: [global.buildSkewDataZoom(view.patch)]
       };
-      var interval = H.labelInterval(span);
+      var interval = H.labelInterval(view.count);
       if (interval !== this._labelInterval) {
         delta.xAxis.axisLabel = { interval: interval };
       }
-      /* 纵轴刻度位随量程变 —— 与 _applyViewport 同一规则，两处都要发，
-         否则滚轮缩放后第一帧的标签会用旧位数。 */
-      var decimals = H.axisDecimalsFor(range);
-      if (decimals !== this._yDecimals) {
-        this._yDecimals = decimals;
-        delta.yAxis[0].axisLabel = { formatter: yFormatter(decimals) };
-      }
+      /* 纵轴刻度位随量程变 —— 与 _applyZoom 同一规则，两处都要发，
+         否则纵轴缩放后第一帧的标签会用旧位数。 */
+      this._applyDecimals(delta.yAxis, range);
       this._chart.setOption(delta);
     }
 
+    /* ⚠️ 必须是**总列数**，不是窗口列数。`_applyZoom()` 拿它去 `setCols()`，
+       而 `setCols()` 是"当前有多少列"的唯一来源 —— 这里写成 `view.count`
+       （窗口列数）会让 `_cols` 逐帧**自我折叠**：拖一次窗口 → 下一帧
+       `_cols` = 窗口宽 → 再拖时按这个小列数算窗口 → 再下一帧更小……
+       实测（2026-09-17 探针）654 列被折成 4 列，而图上只看到"窗口越缩越小"，
+       找不到原因。这条是**我引入的**，不是数据层抖动 —— 已证伪的假设不要留在注释里。 */
     this._count = count;
-    this._labelInterval = H.labelInterval(span);
+    this._labelInterval = H.labelInterval(view.count);
     return this._readout();
   };
 
+  /* 面板读数：只有"画了多少点 / 一共多少列"。
+     视图状态（时间窗在哪、哪条纵轴被锁）**不在这里** —— 那是 `viewState()`
+     的归属，由面板头的徽标呈现。同一件事两处报，迟早有一处忘了改。 */
   SkewPanel.prototype._readout = function () {
     var series = this._series;
     if (!series) { return null; }
     var values = series.skew || [];
     var n = values.length;
-    var win = H.windowOf(this._zoom, n);
-    var from = win ? win.from : 0;
-    var to = win ? win.to : n - 1;
 
     var filled = 0;
-    for (var i = from; i <= to; i++) {
+    for (var i = 0; i < n; i++) {
       var v = values[i];
       if (v !== null && v !== undefined) { filled += 1; }
     }
 
-    return {
-      points: filled,
-      cols: to - from + 1,
-      range: H.axisRange(series, win),
-      view: win ? { from: win.from + 1, to: win.to + 1, cols: n } : null
-    };
+    return { points: filled, cols: n };
   };
 
-  SkewPanel.prototype.setViewportHook = function (fn) {
-    this._viewportHook = fn || null;
-  };
-
-  SkewPanel.prototype.setViewportChangeHook = function (fn) {
-    this._viewportChangeHook = fn || null;
+  /* 缩放回调：视图变了要**立刻**重写 meta 行（否则读数要等下一帧才更新，
+     而下一帧最长 400ms —— 拖动时会看到读数一跳一跳）。 */
+  SkewPanel.prototype.setZoomHook = function (fn) {
+    this._zoomHook = fn || null;
   };
 
   global.SkewPanel = SkewPanel;

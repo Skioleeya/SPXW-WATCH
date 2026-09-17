@@ -12,6 +12,13 @@ LAST_UPDATED: 2026-09-17 08:5x EDT —— **五轮改动已提交并推送（`ab
 ⚠️ 提交前 KAI 未逐轮验收，**本提交不等于 KAI 对五轮改动背书** ——
 各轮证据仍在各自的 `notes/sessions/2026-09-17/<task-id>/handoff.md`。
 
+⚠️ **顺带修掉一个引用存储缺陷**：远端跟踪引用 `origin/main` 被一份缺
+`# pack-refs with:` 头、mtime 2026-09-14 的 66 字节 `.git/packed-refs` 钉在 `6828e3a`
+⇒ `git status` 长期谎报 `[ahead 23]`（而 `ls-remote` 与本地 `HEAD` 明明一致）。
+**用标准命令 `git pack-refs --all` 修复**（**非**手工改 `.git` 文件）；
+**根因未定论** —— 只查到"git 建不了 `.git/refs/` 下的二级子目录、非权限/重解析点"，
+**未在沙箱外复跑**。详见 `notes/sessions/2026-09-17/commit-and-push/handoff.md`。
+
 热力图缩出横轴窗口后，窗口右缘**自动跟着最新列走**；往历史里拖 ⇒ 停滚；
 面板头「回到最新」按钮把右缘拉回最新列并恢复跟随、**保住当前缩放跨度**
 （与「复位」分工：复位 = 丢掉缩放回全宽）。

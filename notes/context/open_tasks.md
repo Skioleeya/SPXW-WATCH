@@ -2,6 +2,37 @@
 
 Archive: notes/context/archive/open_tasks_2026-09.md
 
+## Active —— 提交推送 + 引用存储修复（`commit-and-push`，2026-09-17 完成）
+
+会话：`notes/sessions/2026-09-17/commit-and-push/`
+
+- [x] **[高] 五轮改动提交并推送** —— `ab853d3` `feat(web)`（19 文件 / +2151 −346）+
+  `21293a1` `docs(notes)`（15 文件）；`git status --porcelain` = **0**；
+  本地 `HEAD` = 远端 `ls-remote` = 本地 `origin/main`。
+  **五轮合并为一个提交**（`web/index.html` / `web/config.js` 被五轮共同改动；
+  中间态 `heatmap.js` 会 import 尚未入库的 `heatmap_roll.js` ⇒ 拆出来的中间提交
+  **跑不起来**），沿用 `0d30943` / `53da940` 先例。
+- [x] **[高] 陈旧远端跟踪引用已修** —— `origin/main` 被一份缺 `# pack-refs with:` 头、
+  mtime 2026-09-14 的 66 字节 `packed-refs` 钉在 `6828e3a` ⇒ `git status` 谎报 `[ahead 23]`。
+  用**标准命令** `git pack-refs --all` 修复（**非**手工改 `.git`）；fetch 复测不复现。
+- [ ] **[高] ⚠️ 根因未定论：git 建不了 `.git/refs/` 下的二级子目录** ——
+  `refs/remotes/zzz/`、`refs/tags/yyy/` 全失败，而一层 `refs/remotes/aaa` 与
+  新建一级目录 `refs/xyz/` 成功；bash 的 `mkdir -p` 却能建。
+  `git update-ref` **RC=0 但文件不生成**；`git fetch` 会把整个 `refs/remotes/origin/`
+  **删掉**。已排除权限（`icacls` 两目录 ACE 逐条相同）与 junction（`fsutil` 否）。
+  **未在沙箱外复跑** ⇒ 无法排除是运行环境沙箱所致。
+  **下次远端有新提交、需要更新 `origin/main` 时若复现，即为这条限制的残留。**
+- [ ] **[中] ⚠️ 提交 ≠ KAI 逐轮验收** —— 五轮改动均为各会话自证，KAI 未逐轮复核。
+- [ ] **[中] `notes/analysis/` 归属仍待 KAI 裁** —— 本次提交只是**保全**证据，
+  不等于把它定为永久库成员（按"答不出类别的不进永久库"纪律）。
+- [ ] **[低] ⚠️ `notes/context/*` 三件套在堆积历史**（`handoff.md` 已叠 5 段会话），
+  与 `notes-session-records` 要求的 "latest-state-only" 不符 —— **未清理**。
+- [ ] **[低] 候选新条目待 KAI 裁** —— "git 建不了 `.git/refs/` 二级子目录 ⇒ 跟踪引用
+  静默陈旧"属**静默错值**类，按纪律候选进 `notes/memory/QUICKREF.md`；
+  但 KAI 明令**清单只减不增 / 禁止自行追加** ⇒ **故未落清单，待裁定**。
+
+---
+
 ## Active —— 热力图横轴「自动滚动」(auto roll)（2026-09-17 起）
 
 会话：`notes/sessions/2026-09-17/heatmap-auto-roll/`

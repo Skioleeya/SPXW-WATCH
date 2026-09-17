@@ -7,7 +7,18 @@
   `docs(notes)` 提交入库。
   ⚠️ **提交 ≠ KAI 逐轮验收** —— 各轮证据仍在各自的 `handoff.md`。
 
-## 最新：2026-09-17 / heatmap-auto-roll（完成，**已提交 `ab853d3`**）
+## 最新：2026-09-17 / commit-and-push（完成，**已提交 `21293a1`**）
+
+- **会话交接**：`notes/sessions/2026-09-17/commit-and-push/handoff.md`
+- **一句话**：把叠在同一工作区的**五轮改动**提交并推送远端（`ab853d3` 代码 +
+  `21293a1` 记录），工作区转干净；**顺带查出并修掉**一个本地引用存储缺陷 ——
+  远端跟踪引用 `origin/main` 被陈旧 `packed-refs` 钉在 `6828e3a`，
+  导致 `git status` 长期谎报 `[ahead 23]`（`ls-remote` 与 `HEAD` 明明一致）。
+- **修复手段**：`git pack-refs --all`（标准命令，非手工改 `.git`）。
+- ⚠️ **根因未定论**：git 建不了 `.git/refs/` 下的二级子目录（排除权限与 junction）；
+  **未在沙箱外复跑**，下次远端有新提交时可能复现。
+
+## 上一会话：2026-09-17 / heatmap-auto-roll（完成，**已提交 `ab853d3`**）
 
 - **会话交接**：`notes/sessions/2026-09-17/heatmap-auto-roll/handoff.md`
 - **一句话**：热力图缩出横轴窗口后，窗口右缘**自动跟着最新列走**（不再越看越旧）；

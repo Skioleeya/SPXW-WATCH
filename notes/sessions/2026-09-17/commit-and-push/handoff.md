@@ -102,6 +102,16 @@ run.py --check = 16/16
 ⇒ **在本环境里，每一次 push / fetch 只要需要更新跟踪引用，就会把它变陈旧。**
 所以 `pack-refs` 只是"把当前值改对"，**不是根治**。
 
+### 同族的第二个症状：`git commit` 触发自动维护会挂住
+
+第 5 个记录提交时，整条命令被 **SIGTERM** 打断 —— 提交本身成功了，但**推送没执行**。
+现场证据：`.git/objects/maintenance.lock`（0 字节，09:14）残留，且事后**无任何 git 进程**。
+⇒ 是 `git commit` 的 **auto maintenance（auto-gc）在本环境里挂住**，把整条命令拖到超时。
+**处置**：删掉这个**死锁**（确认无 git 进程后），后续 git 操作加
+`-c gc.auto=0 -c maintenance.auto=false` 绕开，随即推送成功。
+⚠️ 这是**记录**，不是长期方案 —— 是否要在本仓库配置里永久关掉 auto-gc，
+**留给 KAI 决定**（本会话未擅自改仓库配置）。
+
 ## Closed in session
 
 - 五轮改动入库并推送；工作区干净（`porcelain` = 0）
@@ -115,6 +125,9 @@ run.py --check = 16/16
 - **git 建不了 `.git/refs/` 二级子目录的原因未查明**（疑为运行环境沙箱）。
   ⚠️ **已确认每次 push/fetch 都会让 `origin/main` 变陈旧**（`3c6d5ad` 推送后当场复现）。
   **未在沙箱外验证。**
+- **`git commit` 的 auto maintenance 在本环境会挂住**（第 5 次提交被 SIGTERM 打断，
+  留下 `maintenance.lock` 死锁）。临时绕法：`-c gc.auto=0 -c maintenance.auto=false`。
+  **是否永久关掉 auto-gc 待 KAI 决定。**
 - **提交 ≠ KAI 逐轮验收**：五轮改动均为各会话自证，KAI 未逐轮复核。
 - `notes/analysis/` 归属仍未定（本提交只是**保全**证据）。
 - `notes/context/*` 三件套在**堆积历史**（`handoff.md` 已叠 5 段会话），与

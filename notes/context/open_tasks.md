@@ -25,6 +25,11 @@ Archive: notes/context/archive/open_tasks_2026-09.md
   `refs/remotes/origin/` 变成空目录）⇒ **本环境里每次 push/fetch 都会让跟踪引用陈旧**；
   `pack-refs` 只是"把当前值改对"，**不是根治**。修复命令：
   `git pack-refs --all`（标准命令）或手工建目录后直写松散引用。
+- [ ] **[高] ⚠️ `git commit` 的 auto maintenance 在本环境会挂住** —— 第 5 个记录提交时
+  整条命令被 **SIGTERM** 打断（提交成功、**推送未执行**），现场留下
+  `.git/objects/maintenance.lock`（0 字节）死锁、事后无任何 git 进程。
+  **临时绕法**：删掉死锁后加 `-c gc.auto=0 -c maintenance.auto=false`。
+  **是否在本仓库配置里永久关掉 auto-gc，待 KAI 决定**（本会话未擅自改仓库配置）。
 - [ ] **[中] ⚠️ 提交 ≠ KAI 逐轮验收** —— 五轮改动均为各会话自证，KAI 未逐轮复核。
 - [ ] **[中] `notes/analysis/` 归属仍待 KAI 裁** —— 本次提交只是**保全**证据，
   不等于把它定为永久库成员（按"答不出类别的不进永久库"纪律）。

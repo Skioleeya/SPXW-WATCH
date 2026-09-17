@@ -19,6 +19,16 @@ L5 — 行权价窗口与 OTM 选边。
 差 5.5～6.3 波动率点），而热力图每个行权价只留一条时间序列 ⇒ 每次现价穿越行权价
 都会打出一个假的 ΔIV 跳变。详见 ``features/heatmap_engine.py`` 模块注释。
 
+本模块只管**绘制**窗口（每帧下发几行）
+--------------------------------------
+``heatmap_draw_rows_each_side``（当前 20）决定本模块取几档 ⇒ 每帧下发 40 行。
+屏幕上真正看到几行是**另一个半径** ``heatmap_visible_rows_each_side``（当前 12
+⇒ 24 行），由前端按帧里下发的 ``visible_rows_each_side`` 裁出可视区 ——
+本模块不参与，也不该参与：它只负责"把足够宽的窗口算出来"。
+
+两者为什么必须分开、以及三条跨文件不变量（绘制 ≤ 订阅 / 可视 ≤ 绘制 /
+订阅 − 可视 ≥ 重建触发），见 ``config/features.json::_heatmap_window_comment``。
+
 依赖：L0（config / contracts）。
 """
 
@@ -40,7 +50,7 @@ class StrikeWindow:
 
     def __init__(self, feat_cfg: dict) -> None:
         self._requested_each_side = loader.as_int(
-            feat_cfg, "heatmap_rows_each_side", module=_CFG
+            feat_cfg, "heatmap_draw_rows_each_side", module=_CFG
         )
 
     # ------------------------------------------------------------------ #

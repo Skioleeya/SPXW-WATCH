@@ -12,6 +12,7 @@ L6 — 热力图矩阵编码。
       "labels":  ["09:30:00", "09:30:30", ...],  # 横轴：基线时间桶
       "strikes": [6485, 6480, ...],         # 纵轴：行权价（降序，高在前）
       "rights":  ["P", "P", "C", ...],      # 每行实际使用的 OTM 方向
+      "visible_rows_each_side": 12,         # 可视窗口半径（档）
       "enc":     "bm16",                    # 数值块编码名（配置给出）
       "scale":   1000,                      # 定标：真实值 = 整数 / scale
       "bm":      "<base64 位图>",            # rows*cols 位，标记哪些格子有值
@@ -25,6 +26,16 @@ L6 — 热力图矩阵编码。
       "scale_policy": {"quantile": 0.95, "floor": 0.5},
       "spot":    6500.0
     }
+
+``visible_rows_each_side`` 为什么必须随帧下发
+---------------------------------------------
+``strikes`` 有 ``2 × heatmap_draw_rows_each_side`` 行（当前 40），屏幕只显示其中
+``2 × heatmap_visible_rows_each_side`` 行（当前 24）—— **画多、看少**（理由见
+``contracts/feature.py::HeatmapMatrix``）。
+
+可视半径若由前端自己抄一份，就是两份真相；更糟的是它会**静默失效**：前端抄的
+值与后端的订阅窗口失去耦合后，门禁查不到它，现价一走就退订正在看的档、行权价轴上
+留下时间空洞。所以它是**载荷**，不是前端配置 —— 前端只负责照做，不负责知道为什么。
 
 数值块为什么不直接发二维数组
 ----------------------------
@@ -101,6 +112,7 @@ class HeatmapSerializer:
             "labels": list(matrix.bucket_labels),
             "strikes": list(matrix.strikes),
             "rights": [str(right) for right in matrix.rights],
+            "visible_rows_each_side": int(matrix.visible_rows_each_side),
             "enc": self._encoding,
             "scale": int(self._scale),
             "bm": bitmap,

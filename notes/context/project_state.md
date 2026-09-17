@@ -1,7 +1,23 @@
 # Project State
 
-ACTIVE_SESSION: 2026-09-16/runtime-monitors
-LAST_UPDATED: 2026-09-16 09:0x —— **两只只读探针落地，四项要求全部验证成立；
+ACTIVE_SESSION: 2026-09-17/heatmap-two-window
+LAST_UPDATED: 2026-09-17 02:4x —— **热力图纵轴改为「画 40 档 / 露 24 档」；
+门禁 16/16、变异 18/18 全过；真机联调未做。**
+
+纵轴现在是**三个半径**：订阅 20（`subscription.json::num_strikes_each_side`）/
+绘制 20（`features.json::heatmap_draw_rows_each_side` ⇒ 每帧 40 行）/
+可视 12（`features.json::heatmap_visible_rows_each_side` ⇒ 屏幕 24 行）。
+可视半径**随帧下发**，前端从帧上读。三条不变量（绘制 ≤ 订阅 / 可视 ≤ 绘制 /
+订阅 − 可视 ≥ 重建触发）由 `run.py --check [6]` 守，3 条变异。
+详见 `notes/sessions/2026-09-17/heatmap-two-window/{handoff,project_state}.md`。
+
+> 以下为**上一会话**的原状态文字（保留原样，未 retro-fit）。
+> 其中的「24 行」「绘制 24 档」等读数描述的是**本次改动之前**的形状。
+
+---
+
+ACTIVE_SESSION_prev: 2026-09-16/runtime-monitors
+LAST_UPDATED_prev: 2026-09-16 09:0x —— **两只只读探针落地，四项要求全部验证成立；
 后端已按要求重启生效。**
 
 探针：`tmp/monitor_backend.py`（读 WS 原始帧判 T2/T3/T4）、

@@ -2,7 +2,80 @@
 
 Archive: notes/context/archive/open_tasks_2026-09.md
 
-## Active —— 重写（2026-09-15 起，唯一现行待办）
+## Active —— 热力图双窗口（2026-09-17 起）
+
+会话：`notes/sessions/2026-09-17/heatmap-two-window/`
+
+- [x] **[高] 真机联调补验 —— 2026-09-17 03:09 已完成（RC=0）**。
+      IB Gateway PID 1232（`:4002`）+ 后端 PID 7784（`:8060`）起来后：
+      ① `tmp/_dom_check.js` ⇒ **PASS 15 / FAIL 0**（40 行 / `yAxis 8..31` /
+      `convertToPixel` 复核恰好 24 行落在网格内 / series 194 点行号全合法 /
+      Top-N 描边格 3 个全在可视区内 / 读数「可见 24/40 档」/ Skew 已渲染 / 无 JS 报错）；
+      ② `tools/check_web_contract.py` **在线** ⇒ RC=0（载荷 59 条，含新路径）；
+      ③ `tmp/_probe_window_sweep.js` ⇒ FAIL 0，宽度恒 24、单调、两端夹边。
+      **残留缺口（已缩小）**：窗口**确实随真实现价移动**（现价 7614 ⇒ 区间 `[8..31]`；
+      7618 ⇒ `[7..30]`，整体上移一行、现价仍居中），但**单次采样内现价没动**
+      ⇒ 「移动**过程中**不闪不空」只有**扫描**证据 + 两次不同稳态的对照，
+      **没有"移动途中逐帧观察"的证据**。想彻底钉死：在现价连续穿越行权价的那几十秒里
+      连续采样（把 `_probe_window_follow.js` 的 `SWATCH_SAMPLES` 加大即可）。
+- [x] **[中] 按新形状重测渲染性能 —— 2026-09-17 03:5x 已测。**
+      真机 1680×1000 视口、纵轴 **40 行**、每帧 1554–1581 点、周期 1 分（446 桶），
+      探针 `tmp/_probe_render_perf.js` 包 `setOption` 计时 40 帧：
+      **min 21.8 / p50 27.4 / p90 35.3 / max 44.6 / avg 28.2 ms**
+      ⇒ 最大 44.6ms **远低于 400ms 推送间隔**，不会积压。
+      ⚠️ 与 `web/heatmap.js` 头部那组（65.7/159.9/188.1 ms）**不是同一口径**
+      （那组是 headless Chrome 153 + SwiftShader、按列数分档、含 WebGL 对照；
+      这次是 Playwright Chromium、单周期、只计时 `setOption` 本身），**不可直接比较**。
+      两处口径已在 `web/heatmap.js` 头部写清。
+- [ ] **[中] 重建 `tools/check_window_tolerance.py`**（白纸重写中被删）。
+      窗口那三条不变量目前**只有静态门禁**（`[6]`），行为侧回归缺失。
+      见 `QUICKREF.md` 卡 P 与 `RULES.md §6.6`。
+- [x] **[低] 清理 `tmp/mut14/` —— 2026-09-17 03:5x 已办。**
+      它是 2026-09-15 留下的**整棵源码副本**（2.3 MB / **144 文件**、无 `.git`）。
+      办前先确认**全项目无任何东西引用它**（`mut14` 只在两条笔记里出现过），
+      再按项目自身惯例（`references/pitfalls.md` 第 14 条：工程内"删除"用 `mv` 不用 `rm`）
+      **移出项目**，未删除：
+      `tmp/mut14/` → `C:\Users\Lenovo\AppData\Local\Temp\spxw_mut14_20260915`（144 文件已核）。
+      ⇒ 移后 `run.py --check` 仍 **16/16**；grep `heatmap_rows_each_side`
+      已不再命中 `tmp/mut14/`。**要还原**：`mv` 回 `tmp/mut14` 即可。
+      ⚠️ 顺带纠正一条我自己的错误判断：`tmp/` **并没有**被 ripgrep 自动跳过
+      （Grep 工具同样会搜到 `tmp/mut14/...`）。所以"用对工具就没污染"是错的；
+      真正的排除法是 `glob: "!tmp/mut14/**"`（已验证有效）—— 现在文件已移走，不再需要。
+- [ ] **[低] `favicon.ico` 返回 404**：浏览器自动请求，`web/` 下无此文件、
+      无任何代码引用 ⇒ 功能无影响，只是控制台留一条红字。放个空 favicon 即可消除。
+- [ ] **[低] 客户端硬关时后端打一条未捕获异常**：
+      `ERROR asyncio Exception in callback _ProactorBasePipeTransport._call_connection_lost()`
+      → `ConnectionResetError [WinError 10054]`。位置在 **asyncio 自己的 proactor 实现**里
+      （`_sock.shutdown()`），不是本项目代码；不影响流水线（后续照常出帧）。
+      属噪声；若嫌吵可在启动处装一个只吞这一条的 asyncio 异常处理器。
+- [x] **[中] `TickStore.refs()` 是否保留"已退订但曾有过 tick"的档 —— 2026-09-17 03:45 已定性：**
+      **会保留**（`prune()` 只按时间裁样本、**不删键**，`state/tick_store.py:203`；
+      只有 `clear()` 才清，而它只在整会话重置时调）。
+      **但不构成用户可见缺陷**，两条理由：
+      ① 可视区（现价 ±12）**永远落在当前订阅区之内** ——
+      订阅中心 C 与现价差 ≤ `T`=2 档（≥3 就重建），故
+      `现价 ± 12 ⊆ C ± 14 ⊂ C ± 20`；所以看得见的 24 行**必然有实时订阅**。
+      ② 可能冻住的行只出现在**绘制窗口最外侧**（距现价 ≥18 档），
+      比可视区（±12）外扩 6 行以上 ⇒ 用户看不到。
+      **实测**：`tmp/_probe_stale_rows.js` 按"每行最后一个非空格所在桶号"判，
+      39 行 **0 行落后**（全部落在全局最新桶 448）⇒ 当前无冻住行。
+      ⚠️ **真正的守卫就是 `S − V ≥ T`** —— 若有人把 `V` 调大或 `S` 调小到
+      `S − V < T`，冻住的行就会**移进可视区**。这条已在 `[6]` 里。
+
+> ⚠️ **本轮实测纠正一条文档错值**：「每帧发 40 行」是**上限不是保证**。
+> 当帧行数 = `min(20, 池内≤现价) + min(20, 池内>现价)`，池 = `TickStore.refs()`
+> （"至少收到过一个 tick 的合约"，`state/tick_store.py:133` +
+> `features/feature_engine.py:243`）。**两种情形不足 40**：
+> ① **现价漂移**（常态，订阅窗口锚在上次重建中心、热力图窗口锚在实时现价）
+> —— 实测现价 7614 ⇒ 40 行、现价 7618 ⇒ 39 行；
+> ② **冷启动** —— 实测约 1 分钟内 33 行。
+> 可视 24 行不受影响（`S − V ≥ T` 保证）。已修 `README.md §4` 与
+> `config/features.json::_heatmap_window_comment`。
+
+
+---
+
+## Active —— 重写（2026-09-15 起，**已收尾**）
 
 - [ ] **[高] 按 L0→L8 顺序完成白纸重写**（会话：`rebuild-from-original`）
   - [x] **#8 设计定稿** → `notes/memory/ARCHITECTURE.md`

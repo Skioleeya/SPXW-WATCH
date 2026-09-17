@@ -125,6 +125,23 @@ class HeatmapMatrix:
 
     每个行权价只取 OTM 一侧（行权价 < 现价取 Put，否则取 Call），
     这样一张矩阵就能完整呈现 0DTE 微笑的两翼，无需再拆成两张图。
+
+    **行数契约：画多、看少**（2026-09-16 定）
+    ----------------------------------------
+    ``strikes`` 有 ``2 × heatmap_draw_rows_each_side`` 行（当前 40），而屏幕上
+    只显示其中 ``2 × visible_rows_each_side`` 行（当前 24）。两个半径都是
+    **后端**配置（``config/features.json``），随帧一起下发，前端不再抄一份 ——
+    抄了就是两份真相。
+
+    为什么"可视半径"必须随帧走、不能放前端配置：它与**订阅**窗口有物理耦合。
+    可视档必须始终落在订阅窗口之内（否则现价一走就退订正在看的档，行权价轴上
+    留下时间空洞），所以它是一条跨模块约束，必须由后端的门禁守着。
+    三条不变量见 ``config/features.json::_heatmap_window_comment``。
+
+    为什么"画 40 只露 24"：现价移动时可视窗口要跟着移。可视区之外若没有**已画好**
+    的行，窗口移出去的瞬间那几行是空的（要等下一帧才有数据）；先画满 40 行、只挪
+    可视窗口，露出来的就是现成数据。代价是多算 16 行（CPU 与带宽），
+    收益是移动时不闪不空。
     """
 
     strikes: tuple[float, ...]
@@ -134,6 +151,9 @@ class HeatmapMatrix:
     bucket_index: int
     spot: float
     volumes: tuple[tuple[int | None, ...], ...] = ()
+    #: 可视窗口半径（档）。0 = 未设定 ⇒ 前端应当**报错并保留上一帧**，
+    #: 而不是"画满全部行"顶上 —— 那会让"配置没接线"表现成一个看起来正常的图。
+    visible_rows_each_side: int = 0
 
     def rows(self) -> int:
         return len(self.strikes)

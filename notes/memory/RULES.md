@@ -102,6 +102,16 @@
 
 ### 6.1 基线验证命令
 
+> ⚠️ **本节整段描述的是「白纸重写之前」的工具集，尚未按现状重写。**
+> 重写后 `tools/` 只剩 **14 个文件**、`check_*.py` **只剩 1 个**
+> （`check_web_contract.py`）；下面清单里的 `smoke_test.py` / `check_persistence*.py` /
+> `check_window_tolerance.py` / `check_skew_*.py` / `check_web_syntax.py` / `ws_probe.py`
+> **全部已不存在**。当前真正可跑的入口是：
+> `<VENV>/python.exe run.py --check`（16 组）· `tools/selfcheck.py --selftest` ·
+> `tools/check_web_contract.py --offline [--selftest]`。
+> 下面那张表**保留原样**，作为"曾经有哪些检查器、各自守什么"的设计意图记录 ——
+> 但**不要照它跑命令**，会全部 file-not-found。
+
 > ⚠️ **必须用带依赖的 venv 解释器，不要用裸 `python`。** 本仓库自带的
 > `venv/Scripts/python.exe`（实测 Py 3.13.14 / `ib_async` 2.1.0 / `aiohttp` / `tzdata` 齐备）
 > 即可；裸解释器没有 `ib_async` / `aiohttp` ⇒ `check_reconnect_flow`、`check_web_contract`
@@ -112,6 +122,7 @@
 
 ```
 <VENV>/python.exe run.py --check                  # RC=0（14 组；2026-09-15 01:4x 实跑，需服务在跑）
+                                                  # ⚠️ 现已 16 组；且无服务时 [13] 只跳过活链路，离线三项照跑
 <VENV>/python.exe tools/smoke_test.py             # RC=0
 <VENV>/python.exe tools/check_*.py                # 22 个；20 RC=0 / 2 RC=1（2026-09-15 01:4x 实跑）
                                                   #   红 = check_page_render / check_ws_compression
@@ -190,18 +201,32 @@ period_aggregation）同时红。加/删 `web/*.js` 后先看这里。
 ### 6.6 配置算术不变量：静态门禁 + 行为回归成对
 - 只在配置里算数（`run.py --check [6]`）证明不了行为；只跑行为回归又慢又重。**成对**：
   静态那条永远跑、钉住下限；行为那条逐点重放机制，并**自带对照**把边界钉死
-  （`tools/check_window_tolerance.py` 用容差 `T−1` / `T` 两条对照证明 `S − R ≥ T` 是紧的，
-  而不是一个人为选的数字）。
-- 不变量优先**推导**，不要拿观测拟合。`S − R ≥ T` 是从"两次重建之间中心最多滞后
+  （旧例：`tools/check_window_tolerance.py` 用容差 `T−1` / `T` 两条对照证明
+  `S − V ≥ T` 是紧的，而不是一个人为选的数字。
+  ⚠️ **该文件已随白纸重写消失、尚未重建** ⇒ 窗口那三条不变量**目前只有静态门禁**
+  （`[6]`，3 条变异）。"成对"这条纪律仍然成立，但当前这一对只剩一半。）
+- 不变量优先**推导**，不要拿观测拟合。`S − V ≥ T` 是从"两次重建之间中心最多滞后
   `T` 档"推出来的；拟合出来的绝对阈值会随观测漂移（`check_ws_compression` 就是例子）。
-- 窗口那对不变量（2026-09-14）：
-  - `heatmap_rows_each_side ≤ num_strikes_each_side`（显示 ≤ 订阅，超出的档永远没数据）
-  - `num_strikes_each_side − heatmap_rows_each_side ≥ recenter_trigger_strikes`（容差下限，
-    否则现价一走就退订显示档 ⇒ 行权价轴上的时间空洞）
+- 窗口那组不变量（**2026-09-17 由 2 条扩为 3 条**，因纵轴改为「画多、看少」）：
+  - `heatmap_draw_rows_each_side ≤ num_strikes_each_side`（绘制 ≤ 订阅，超出的档永远没数据）
+  - `heatmap_visible_rows_each_side ≤ heatmap_draw_rows_each_side`（可视 ≤ 绘制，
+    否则可视区两端露出**空白行** —— 帧里根本没有那些档）
+  - `num_strikes_each_side − heatmap_visible_rows_each_side ≥ recenter_trigger_strikes`
+    （容差下限，否则现价一走就退订**看得见**的档 ⇒ 行权价轴上的时间空洞）
+  - ⚠️ 第三条的被减数是**可视**半径，不是绘制半径。按绘制半径算会假红
+    （20 − 20 = 0 < 3），而真实容差是 20 − 12 = 8。推导见 `[6]` 的注释。
+- **行为侧回归缺失（已知）**：`tools/check_window_tolerance.py` 在白纸重写中已删、
+  尚未重建 ⇒ 上面三条**目前只有静态门禁**（`[6]`，3 条变异）。重建前，
+  "容差在真实行情下够不够"没有回归保护。
 - **测试夹具的靶档不得用 `strike_grid(...)[3]`**：那个阶梯是 `-each_side … +each_side`
   对称的，第 4 根的行权价会随**订阅**半径漂移（12 档 → 6455；20 档 → 6415，落到显示
   窗口之外 ⇒ 假红）。用 `tools.fixtures.display_window_strike()`，它锚在现价上并按
   显示半径设界。
+  ⚠️ **2026-09-17 查实：`strike_grid` / `display_window_strike` 在 `tools/fixtures.py`
+  里都不存在**（白纸重写后该文件只剩 `FakeClock` / `FakeComputation` / `FakeContract` /
+  `FakeTicker` / `make_session_clock` / `make_option_ticker` / `make_index_ticker` /
+  `RecordingSink`）。这条纪律仍然成立，但当前**没有可用的工具函数**去遵守它 ——
+  要写新夹具时得自己按现价锚定。
 - **`use_model_greeks` 必须为 `true`**（2026-09-14 加入，`selfcheck_config.py [6]` 尾部
   `_check_model_greeks_prerequisite`）：这是**跨模块耦合**——`config/ibkr.json` 的一个
   开关 ⇔ 热力图合并序列的正确性。热力图每档只留一条**不带方向**的 IV 序列，现价穿越

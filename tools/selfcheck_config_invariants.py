@@ -8,7 +8,7 @@
 ----------------------------------
 项目硬性要求第 5 条禁止配置文件之间互相引用（不得 ``$ref`` / ``include`` /
 ``extends``）。这是对的 —— 但代价是**跨文件的关系失去了载体**：``side`` 在
-``subscription.json``、显示窗口在 ``features.json``、桶容量在
+``subscription.json``、绘制/可视窗口在 ``features.json``、桶容量在
 ``serialization.json``，它们之间的约束没有任何一个文件能表达。
 
 于是这类约束只能由**检查器读多份文件**来核对。配置文件之间仍然零引用，
@@ -16,7 +16,7 @@
 
 检查项
 ------
-``[6]`` 订阅容量 / 显示窗口 / 窗口容差 / ``use_model_greeks`` 前置条件 / 网格容量
+``[6]`` 订阅容量 / 绘制与可视窗口 / 窗口容差 / ``use_model_greeks`` 前置条件 / 网格容量
 ``[11]`` 出站限速桶容量与 IBKR 配额
 
 为什么把"网格容量"也放进 ``[6]``
@@ -51,8 +51,8 @@ IBKR_MESSAGES_PER_LINE = 2
 
 
 def check_subscription_capacity() -> int:
-    """[6] 订阅容量 / 显示窗口 / 容差 / 模型值前置条件 / 网格容量。"""
-    print(f"\n[6] 订阅容量、显示窗口与网格容量（IBKR 硬上限 {IBKR_SUBSCRIPTION_LIMIT}）")
+    """[6] 订阅容量 / 三个窗口半径 / 容差 / 模型值前置条件 / 网格容量。"""
+    print(f"\n[6] 订阅容量、绘制/可视窗口与网格容量（IBKR 硬上限 {IBKR_SUBSCRIPTION_LIMIT}）")
 
     sub = loader.load("subscription")
     features = loader.load("features")
@@ -81,28 +81,57 @@ def check_subscription_capacity() -> int:
         ok(f"档位 ±{side} → {projected} 条行情（自设上限 {cap}，"
            f"IBKR 上限 {IBKR_SUBSCRIPTION_LIMIT}）")
 
-    # ── 6.2 显示窗口不得宽于订阅窗口 ────────────────────────────────
-    rows = loader.as_int(features, "heatmap_rows_each_side", module="features")
-    if rows > side:
-        fail(f"热力图显示窗口 ±{rows} 宽于订阅窗口 ±{side}"
-             f"（features.json::heatmap_rows_each_side > "
+    # ── 6.2 三个窗口半径的关系 ──────────────────────────────────────
+    # 纵轴有两个半径（2026-09-17 起）：
+    #   draw    绘制 = 后端每帧**下发**几行（HeatmapEngine 的产出宽度）
+    #   visible 可视 = 前端屏幕**显示**几行
+    # 加上订阅半径 S，三者必须满足：
+    #   draw ≤ S        画超过订阅的档永远拿不到数据（配置看着生效、图上是空的）
+    #   visible ≤ draw  可视超过已画的档，露出来的是**空白行**
+    #   S − visible ≥ T 容差下限（推导见 6.3）
+    draw = loader.as_int(features, "heatmap_draw_rows_each_side", module="features")
+    visible = loader.as_int(
+        features, "heatmap_visible_rows_each_side", module="features"
+    )
+
+    if draw > side:
+        fail(f"热力图绘制窗口 ±{draw} 宽于订阅窗口 ±{side}"
+             f"（features.json::heatmap_draw_rows_each_side > "
              f"subscription.json::num_strikes_each_side）—— "
              f"超出的档位**永远拿不到数据**，而配置看上去像是生效的")
         failures += 1
         return failures + _check_model_greeks(ibkr)
 
-    ok(f"显示窗口 ±{rows} ≤ 订阅窗口 ±{side}")
+    ok(f"绘制窗口 ±{draw} ≤ 订阅窗口 ±{side}")
+
+    if visible > draw:
+        fail(f"可视窗口 ±{visible} 宽于绘制窗口 ±{draw}"
+             f"（features.json::heatmap_visible_rows_each_side > "
+             f"heatmap_draw_rows_each_side）—— 可视区两端会露出**空白行**："
+             f"帧里根本没有那些档，前端裁不出数据来，而图上不报任何错，"
+             f"只表现为上下各少几条数据")
+        failures += 1
+    else:
+        ok(f"可视窗口 ±{visible} ≤ 绘制窗口 ±{draw}"
+           f"（每帧发 {2 * draw} 行、屏幕显示 {2 * visible} 行）")
 
     # ── 6.3 窗口容差 ≥ 重建触发 ────────────────────────────────────
     # 推导（不是拿观测拟合的）：重建触发是"中心行权价偏移 ≥ T 档"。两次重建
-    # 之间中心最多滞后 T 档，故现价可探出**已订阅窗口** T 档。此时显示窗口最低
-    # 一档 = 现价 − (T + R − 1) × 步长，订阅窗口最低一档 = 中心 − (S − 1) × 步长；
-    # 要求前者不低于后者即得 S − R ≥ T。
+    # 之间中心最多滞后 T 档，故现价可探出**已订阅窗口** T 档。此时**可视**窗口
+    # 最低一档 = 现价 − (T + V − 1) × 步长，订阅窗口最低一档 = 中心 − (S − 1) × 步长；
+    # 要求前者不低于后者即得 S − V ≥ T。
+    #
+    # ⚠️ 2026-09-17 修正：判据里的半径从**绘制**窗口改成**可视**窗口。旧版拿
+    # `heatmap_rows_each_side` 当被减数，是因为当时两者是同一个数（帧 24 行全显示）。
+    # 现在绘制窗口比可视窗口宽 8 档，那 8 档永远落在可视区之外 —— 它们退订/复订
+    # 只是白跑请求，**用户看不到**，不构成"时间空洞"缺陷。真正会出洞的是**看得见**
+    # 的那几档，所以容差必须对着可视窗口算。若仍按绘制窗口算，这条判据会**假红**
+    # （把 20 − 20 = 0 判成违约，而实际容差是 20 − 12 = 8）。
     trigger = loader.as_float(sub, "recenter_trigger_strikes", module="subscription")
-    tolerance = side - rows
+    tolerance = side - visible
     if tolerance < trigger:
-        fail(f"窗口容差只有 {tolerance} 档（订阅 ±{side} − 显示 ±{rows}），"
-             f"小于窗口重建触发 {trigger} 档 —— 现价一走就会退订显示窗口里的档位，"
+        fail(f"窗口容差只有 {tolerance} 档（订阅 ±{side} − 可视 ±{visible}），"
+             f"小于窗口重建触发 {trigger} 档 —— 现价一走就会退订**看得见**的档位，"
              f"热力图会在行权价轴上留下时间空洞（该行不被删掉，只在中间空一截）")
         failures += 1
     else:

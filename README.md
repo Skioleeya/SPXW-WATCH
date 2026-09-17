@@ -83,7 +83,7 @@ tmp/            gitignore 的一次性脚本区（`.gitignore` 与
 | `subscription.json` | L2 | `num_strikes_each_side` `max_total_subscriptions` `recenter_trigger_strikes` |
 | `spot.json` | L2 | `future_symbol` `synthesised_zones` `max_abs_carry` `max_carry_jump` |
 | `state.json` | L3 | `option_buffer_seconds` `prune_interval_s` `health_stale_tick_s` |
-| `features.json` | L5 | `impulse_windows_seconds` `glitch_*` `skew_target_delta` `heatmap_rows_each_side` `surface_refit_interval_s` |
+| `features.json` | L5 | `impulse_windows_seconds` `glitch_*` `skew_target_delta` `heatmap_draw_rows_each_side` `heatmap_visible_rows_each_side` `surface_refit_interval_s` |
 | `persistence.json` | L5 | `db_dir` `db_filename` `archive_dir` `queue_maxsize` |
 | `serialization.json` | L6 | `heatmap_bucket_seconds` `heatmap_max_buckets` `heatmap_encoding` `surface_residuals_limit` |
 | `transport.json` | L7 | `http_port` `ws_path` `push_interval_ms` `ws_compression` |
@@ -93,6 +93,35 @@ tmp/            gitignore 的一次性脚本区（`.gitignore` 与
 `tools/selfcheck_config_invariants.py` 读多份文件核对 —— 配置文件之间仍然零引用。
 例：`4 × num_strikes_each_side + 1 ≤ max_total_subscriptions ≤ 100`；
 `heatmap_max_buckets ≥ 网格桶数`（否则最早那段被静默裁掉）。
+
+**热力图纵轴的三个半径**（2026-09-17 起，由 `[6]` 一起守住）：
+
+| 半径 | 键 | 当前 | 含义 |
+|---|---|---|---|
+| 订阅 | `subscription.json::num_strikes_each_side` | 20 | 向 IBKR 订几档（容量 `4 × S + 1 ≤ 92`） |
+| 绘制 | `features.json::heatmap_draw_rows_each_side` | 20 | 每帧**下发**几档 ⇒ 稳态 40 行 |
+| 可视 | `features.json::heatmap_visible_rows_each_side` | 12 | 屏幕**显示**几档 ⇒ 24 行 |
+
+⚠️ **40 行是上限，不是保证**。当帧行数 =
+`min(20, 池内 ≤ 现价 的档数) + min(20, 池内 > 现价 的档数)`，
+池 = `TickStore.refs()`（本会话**至少收到过一个 tick** 的合约；
+`state/tick_store.py:133`，调用点 `features/feature_engine.py::_session_refs`）。
+两种情形会不足 40：
+
+① **现价漂移**（常态）—— 订阅窗口锚在**上次重建的中心**，热力图窗口锚在**实时**现价；
+现价一走，靠边那一侧就少几档。2026-09-17 真机实测（同一天同一进程）：
+现价 7614 ⇒ **40 行**、现价 7618 ⇒ **39 行**，随现价 ±1 行。
+② **冷启动** —— 合约还没回过 tick ⇒ 实测启动约 1 分钟内 **33 行**，之后爬满。
+
+⇒ **可视 24 行不受影响**（`S − V ≥ T` 保证最坏情况仍 ≥ 24 行），
+前端在 `2×V ≥ 行数` 时退化为"全显"、行数够时按现价居中。
+**判读「40 行」前先确认现价没偏离重建中心、且已过预热期。**
+
+三条不变量：`绘制 ≤ 订阅`（画了也拿不到数据）、`可视 ≤ 绘制`（露出来的是空白行）、
+`订阅 − 可视 ≥ recenter_trigger_strikes`（容差下限，否则现价一走就退订**看得见**的档
+⇒ 行权价轴上的时间空洞）。**"画 40 露 24"是为了让现价移动时挪窗口而不动数据**：
+可视区之外那 8 档已经画好了，窗口移过去就是现成的，不闪不空。
+可视半径随帧下发（`heatmap.visible_rows_each_side`），前端不另抄一份。
 
 ## 5. 数据流
 

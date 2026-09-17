@@ -15,11 +15,15 @@
 
 <script src="vendor/echarts.min.js"></script>
 <script src="config.js"></script>
+<script src="heatmap_window.js"></script>
+<script src="heatmap_option.js"></script>
 <script src="heatmap.js"></script>
 <script>
   var panel = new HeatmapPanel(document.getElementById("heatmap"));
 
-  /* 模拟 40 档行权价 × 200 个时间桶 */
+  /* 模拟 40 档行权价 × 200 个时间桶。
+     行序必须是**降序**（与帧契约一致）—— heatmap_window.js 会检查这一点，
+     升序帧会被拒（返回 null ⇒ 面板报错并保留上一帧）。 */
   var strikes = [];
   for (var i = 0; i < 40; i++) strikes.push(5500 - i * 5);
 
@@ -53,6 +57,12 @@
     volumes.push(volRow);
   }
 
+  /* 第三个参数 = 可视半径（档），线上由帧的 heatmap.visible_rows_each_side 提供。
+     现价取**中间那一档**（5400 = strikes[20]）—— 真实帧就是这个形状：后端以现价
+     为中心取 ±20 档 ⇒ 现价永远落在第 20 行附近。此时可视窗口应当正好是
+     第 8..31 行（上 12 档 + 下 12 档）。
+     现价若贴近两端（例如 5475，上方只有 5 行），窗口会整体平移回帧内、
+     行数不缩水 —— 那是 heatmap_window.js 的边界规则，不是这里的测试目标。 */
   var info = panel.update({
     strikes: strikes,
     labels: labels,
@@ -60,10 +70,13 @@
     volumes: volumes,
     rights: strikes.map(function() { return "C"; }),
     vmax: 3.0
-  }, 5475);
+  }, 5400, 12);
 
   document.getElementById("info").textContent = info
-    ? "Rendered: " + info.rows + " rows × " + info.cols + " cols, " + info.cells + " cells, vmax=" + info.vmax.toFixed(2) + " (volume = border thickness)"
+    ? "Rendered: visible " + info.visible + "/" + info.rows + " rows (index " +
+      info.from + ".." + info.to + ") × " + info.cols + " cols, " +
+      info.cells + " cells, vmax=" + info.vmax.toFixed(2) +
+      " (volume = border thickness)"
     : "Render failed";
 </script>
 </body>

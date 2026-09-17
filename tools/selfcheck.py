@@ -184,6 +184,18 @@ _MUTATIONS: tuple[Mutation, ...] = (
     Mutation("[6]", "config/subscription.json",
              replace_from='"num_strikes_each_side": 20,',
              replace_to='"num_strikes_each_side": 30,'),
+    # [6] 的三条窗口不变量各要一条变异 —— 只验其中一条，另外两条是空转的。
+    # 两条都必须落在"程序照常启动、照常出图"这一类上（否则它们该被运行期炸出来，
+    # 不值得放进本表）：
+    #   ① 可视半径 > 订阅容差：现价一走就退订**看得见**的档 ⇒ 行权价轴上的时间空洞，
+    #      图看着正常，只是某些行中间空一截。
+    #   ② 可视半径 > 绘制半径：可视区两端露出**空白行** —— 帧里根本没有那些档。
+    Mutation("[6]", "config/features.json",
+             replace_from='"heatmap_visible_rows_each_side": 12,',
+             replace_to='"heatmap_visible_rows_each_side": 18,'),
+    Mutation("[6]", "config/features.json",
+             replace_from='"heatmap_visible_rows_each_side": 12,',
+             replace_to='"heatmap_visible_rows_each_side": 24,'),
     Mutation("[7]", "state/tick_store.py",
              replace_from='_CFG = "state"',
              replace_to='_CFG = "pipeline"'),

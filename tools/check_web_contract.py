@@ -86,6 +86,12 @@ PAYLOAD_PATHS: tuple[str, ...] = (
     # heatmap.js
     "heatmap.strikes", "heatmap.labels",
     "heatmap.rights", "heatmap.vmax",
+    # ⚠️ `heatmap.visible_rows_each_side` 是**纵轴可视窗口半径**，前端在
+    # `app_render.js::renderHeatmap` 从**帧**上读（不是从 block 上读 —— block 到
+    # 面板之前要经过四次逐字段重建，挂在上面的新字段会静默消失），再传给
+    # `HeatmapPanel.update()`。缺了它面板会报错并保留上一帧，所以它在"键缺失算
+    # 失败"的语义下是**必填**字段，与上面 vol_* 那两个可选字段不同。
+    "heatmap.visible_rows_each_side",
     # ⚠️ `heatmap.vol_bm` / `heatmap.vol_i16` **故意不在本清单里** —— 前端确实读
     # 它们（`web/heatmap.js` 的成交量驱动边框），但它们是**可选字段**：后端只在
     # `matrix.volumes` 非空时才发（`serialization/heatmap_matrix.py`），

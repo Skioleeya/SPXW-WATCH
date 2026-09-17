@@ -133,7 +133,7 @@ tmp/              gitignore 的一次性脚本区（`selfcheck_core.py::NON_SOUR
 | `spot.json` | L2 | `future_symbol` `synthesised_zones` `max_abs_carry` `max_carry_jump` |
 | `state.json` | L3 | `option_buffer_seconds` `prune_interval_s` `health_stale_tick_s` |
 | `persistence.json` | L5 | `db_dir` `db_filename` `archive_dir` `queue_maxsize` |
-| `features.json` | L5 | `impulse_windows_seconds` `glitch_*` `skew_target_delta` `heatmap_rows_each_side` |
+| `features.json` | L5 | `impulse_windows_seconds` `glitch_*` `skew_target_delta` `heatmap_draw_rows_each_side` `heatmap_visible_rows_each_side` |
 | `serialization.json` | L6 | `heatmap_bucket_seconds` `heatmap_max_buckets` `heatmap_encoding` `heatmap_max_ffill_buckets` `surface_residuals_limit` |
 | `transport.json` | L7 | `http_port` `ws_path` `push_interval_ms` `ws_compression` |
 | `pipeline.json` | L8 | `compute_interval_ms` `log_stats_every_s` `shutdown_timeout_s` |

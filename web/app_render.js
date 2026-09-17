@@ -121,7 +121,13 @@
     /* P2: 按共享 viewport 裁剪列（Skew 缩放驱动） */
     var view = app.state.viewport ? applyViewport(display.view, app.state.viewport) : display.view;
 
-    var info = app.heatmapPanel.update(view, frame.spot);
+    /* 可视行半径**从帧上取**，不从 block 上取。block 到这里已经被四次逐字段
+       重建过（sliceZones → aggregate → clipTail → applyViewport），挂在上面的
+       新字段会在第一跳静默消失；帧对象自始至终没被重建，取它才是稳的。
+       取不到时 HeatmapPanel.update() 会报错并保留上一帧（不猜值）。 */
+    var visibleEach = frame.heatmap ? frame.heatmap.visible_rows_each_side : undefined;
+
+    var info = app.heatmapPanel.update(view, frame.spot, visibleEach);
     if (info) {
       var zoomText = "";
       if (app.state.viewport) {
@@ -129,9 +135,12 @@
         var to = app.state.viewport.tail ? totalCols - 1 : app.state.viewport.end;
         zoomText = " · 缩放 " + (app.state.viewport.start + 1) + "–" + (to + 1) + "/" + totalCols + " 列";
       }
-      app.setText("heatmap-meta", info.rows + " 档 × " + info.cols + " 桶 · " +
-        info.cells.toLocaleString() + " 格 · 色标 ±" + info.vmax.toFixed(2) +
-        " · " + global.currentViewLabel() + " · " + global.currentPeriodLabel() + zoomText);
+      /* 读数写成「可见 24/40 档」而不是只写一个档数：纵轴现在是"画多、看少"，
+         只写一个数就分不出窗口有没有生效 —— 而那正是这一版最容易静默失效的地方。 */
+      app.setText("heatmap-meta", "可见 " + info.visible + "/" + info.rows + " 档 × " +
+        info.cols + " 桶 · " + info.cells.toLocaleString() + " 格 · 色标 ±" +
+        info.vmax.toFixed(2) + " · " + global.currentViewLabel() + " · " +
+        global.currentPeriodLabel() + zoomText);
     }
     app.setText("heatmap-foot", movers(view));
     return display;

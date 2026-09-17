@@ -26,7 +26,7 @@
   "_shape_gate_comment": "曲面成形门槛：至少几个到期日、几个行权价，才认为数据够画一张曲面。原版把这两个数**写死在 build_clean_surface() 的函数体里**（`num_expiries < 2` / `num_strikes < 8`），本项目按第 3 条搬进配置。⚠️ 这两个值不通过 = 曲面静默为空（surface_ok=False ⇒ SVI 早退 ⇒ 残差全 None），**不抛异常**，所以是配置里最危险的两个数。",
   "_min_expiries_comment": "⚠️ **本项目与唯一的数值差异就在这里**：原版是 2，本项目是 1。理由是订阅侧只做 0DTE（config/app.json::zero_dte_only=true ⇒ 只有一个到期日）。SVI 本来是**逐到期日切片**拟合（clean_df.groupby(\"Expiry\")），单切片数学上完全成立；被 `>=2` 挡住的是 RawSurface 的 Expiry×Strike pivot 展示与 SVI 的**日历套利检查**（w(k=0,T) 随 T 单调）—— 后者在单到期日下无定义，自动退化为恒不报。实测（tmp/probe_single_expiry_relaxed.py）：单到期日、48 个点 ⇒ 设 1 后 surface_ok=True、pivot=(1,24) 无警告、SVI success=True（rmse=0.0032）。",
   "min_expiries": 1,
-  "_min_strikes_comment": "与原版一致（8）。本项目实际有 ±12 档 ⇒ 24 个行权价，远高于此。",
+  "_min_strikes_comment": "与原版一致（8）。⚠️ 本项目实际喂进曲面的行权价数**不是**热力图的显示档数：SurfaceEngine 取 store.refs() 里当前会话的**全部**合约（订阅窗口 ±20 档 × Put/Call = 80 条 ⇒ 40 个行权价），远高于此。热力图那两个窗口半径（绘制/可视）改多少都不影响这里。",
   "min_strikes": 8,
 
   "_svi_comment": "原版 models/svi_fit.py + models/svi_math.py 的标定参数。bounds 与 random_start_ranges 都是 5 元组，顺序固定为 (a, b, rho, m, sigma) —— 顺序写错不会报错但会拟合出垃圾，改这两个键前先读 models/svi_math.py 的注释。rmse 分级阈值单位是 vol points（= 年化波动率百分点）。",

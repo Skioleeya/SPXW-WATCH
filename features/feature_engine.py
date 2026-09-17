@@ -28,6 +28,8 @@ L5 — 特征编排器。
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from config import loader
 from contracts.enums import TRUSTWORTHY_QUALITIES, Quality
 from contracts.feature import (
@@ -56,7 +58,8 @@ class FeatureEngine:
 
     __slots__ = (
         "_store", "_clock", "_window", "_glitch",
-        "_impulse", "_heatmap", "_skew", "_surface", "_each_side", "_session_key",
+        "_impulse", "_heatmap", "_skew", "_surface", "_each_side",
+        "_visible_each_side", "_session_key",
         "_feed_gap_s", "_feed_gap_open", "_writer",
     )
 
@@ -87,7 +90,15 @@ class FeatureEngine:
         self._skew = SkewEngine(feat_cfg, serial_cfg, clock)
         self._surface = SurfaceEngine(store, clock, surface_model, feat_cfg, is_delayed)
         self._each_side = loader.as_int(
-            feat_cfg, "heatmap_rows_each_side", module=_FEAT
+            feat_cfg, "heatmap_draw_rows_each_side", module=_FEAT
+        )
+        # 可视窗口半径。本层**只用它填进矩阵契约**（随帧下发），不参与选档 ——
+        # 选档由 _each_side 决定。放在这里是因为 features.json 的读取点必须在
+        # 本层（[7] 的归属校验只认字面量 module=），而消费方在前端。
+        # 为什么不是前端配置：它与订阅窗口有物理耦合，见
+        # features/strike_window.py 模块注释与 [6] 的三条不变量。
+        self._visible_each_side = loader.as_int(
+            feat_cfg, "heatmap_visible_rows_each_side", module=_FEAT
         )
         # 断流判定阈值。它是热力图的形状参数（与 heatmap_max_buckets 同族），
         # 消费方 HeatmapEngine 也读 serialization.json，所以放那里而不是这里。
@@ -131,6 +142,14 @@ class FeatureEngine:
 
         self._heatmap.observe(cells, moment, break_now=feed_gap_break)
         matrix = self._heatmap.build(rows, spot, moment)
+        if matrix is not None:
+            # 把**可视**窗口半径挂到矩阵上（随帧下发，前端照着裁可视区）。
+            # 用 replace 而不是让 HeatmapEngine 去读这个键：可视半径是**呈现**
+            # 参数，HeatmapEngine 不消费它，让它读等于把一个它用不上的配置
+            # 塞进它的构造参数里（制造假的依赖关系）。
+            matrix = replace(
+                matrix, visible_rows_each_side=self._visible_each_side
+            )
 
         skew_point = self._skew.compute(cells, spot, moment)
         self._persist_current_bucket(moment, skew_point)

@@ -1,7 +1,205 @@
 # Project State
 
-ACTIVE_SESSION: 2026-09-17/heatmap-two-window
-LAST_UPDATED: 2026-09-17 04:0x —— **热力图纵轴「画 40 档 / 露 24 档」已落盘、已推送、
+ACTIVE_SESSION: 2026-09-17/heatmap-auto-roll
+LAST_UPDATED: 2026-09-17 08:5x EDT —— **五轮改动已提交并推送（`ab853d3`），工作区干净**。
+`HEAD` = `ab853d3`（= `origin/main`；上一个功能提交是 `390ac6e`）。
+**本提交混合五个会话**：`heatmap-auto-roll` / `interaction-feedback-5fix` /
+`skew-drag-interaction` / `heatmap-pan-drag` / `skew-dual-axis-zoom` ——
+`web/index.html` 与 `web/config.js` 被五轮共同改动（新脚本标签、新配置块），
+`web/heatmap*.js` 被三轮动过、`web/skew*.js` 被两轮动过 ⇒ **文件级无法拆**，
+沿用 `0d30943` / `53da940` 先例**合并为一提交**；19 文件 / **+2151 −346**
+（含 5 个新增 `web/*.js`）。`notes/` 单独一个 `docs(notes)` 提交。
+⚠️ 提交前 KAI 未逐轮验收，**本提交不等于 KAI 对五轮改动背书** ——
+各轮证据仍在各自的 `notes/sessions/2026-09-17/<task-id>/handoff.md`。
+
+热力图缩出横轴窗口后，窗口右缘**自动跟着最新列走**；往历史里拖 ⇒ 停滚；
+面板头「回到最新」按钮把右缘拉回最新列并恢复跟随、**保住当前缩放跨度**
+（与「复位」分工：复位 = 丢掉缩放回全宽）。
+**触发**三条同时成立（`heatmap.xRoll.enabled` ∧ 有窗口 ∧ 处于跟随态；全宽不需要滚）·
+**方向**只有时间正方向 · **速度**数据驱动不插值（每帧把右缘移到 `cols-1-lagCols`，
+即"前进量 = 该帧新增列数"；`lagCols` 是唯一调节量，默认 0）。
+新增 `web/heatmap_roll.js`(159)。
+
+⚠️ **最关键的设计点**：**「跟随」态必须显式存一个布尔位，不能现算** —— 列一追加，
+任何窗口的右缘都不再贴最新列 ⇒ "用户往回拖了 5 列"与"过了 5 列"无法区分。
+
+⚠️ **三个真教训**：① `enabled=false` 时按钮会亮着却点了没用（静默无操作）⇒ 新增
+`snap()`，**用户指令不受自动化开关管**；② **自动滚动改变了"拖动方向"的含义** ——
+跟随态下右缘就在最新列，**向左拖会被 `clampCols` 原地夹住**（正确的边界行为，
+不是缺陷），要翻历史得**向右拖** ⇒ 三个老 pan 探针据此改向；
+③ **契约检查器 id 覆盖有缺口（已补）**：`_ID_CALL` 原只认 `el/setText/setClass`
+⇒ `bindButton("…")` 与 `ViewChips.*("…")` 的 id 不在覆盖内，已补两分支
+（引用 20 → 27）并把 `--selftest` 扩成三条取法各注入一个假 id。
+
+**验证**：`run.py --check` **16/16**；契约离线**与**在线 + `--selftest` 全通过；
+**非空转**：同一份代码只翻一处配置 ⇒ prod `44/0` · noroll `39/0`（均 RC=0），
+关键判定相反。回归：feedback `49/0` · pan_drag on/off 均 PASS · pan_guards /
+pan_reset PASS · skew_drag `26/0`。
+
+**残留**：**`web/heatmap.js` 397 行（上限 400，只剩 3 行）** —— 下次动它几乎必然要
+先拆分（缝：左键拖拽手势整块下沉 `heatmap_pan.js`）；`web/style.css` 395 行同样贴上限；
+`lagCols > 0` 只有单元断言覆盖；探针在 `tmp/` **无回归保护**。
+
+---
+
+## 上一轮 —— 五项交互缺陷修复（`interaction-feedback-5fix`，已提交 `ab853d3`）
+
+工作区脏项 = **该会话 3 个新增 `web/` 文件 + 9 个修改的 `web/` 文件 + 3 个 `tmp/` 探针 + `notes/`**，
+外加**三个上一会话**（`skew-drag-interaction` 的 `web/skew*.js`、`heatmap-pan-drag` 的
+`web/heatmap*.js`、`skew-dual-axis-zoom`）的未提交改动 ——
+**四轮改动叠在同一工作区**，该会话未替它们背书、也未一并提交。
+
+KAI 从交互诊断"大白话版"点名 **2 / 4 / 5 / 6 / 7** 五项，已全部修完：
+2→A2 全宽横拖弹瞬时徽标（**语义不变**，全宽仍不生成窗口）· 4→B2 锁定侧纵轴变警示色
+`#ffb020` + 锁定徽标 · 5→C1/C4 两图复位按钮 + `Esc`/`R` · 6→C2/D1 Skew 四区游标语义
++ 轴区高亮框 · 7→D2/D3 热力图十字线 + 命中格描边 + 提示框跨重建存活。
+新增 `web/heatmap_hover.js`(185) · `web/skew_regions.js`(155) · `web/view_chips.js`(85)。
+配置新增 `heatmap.hover` / `heatmap.xZoom.hintPx` / `skew.pan.hintPx` / `skew.feedback`
+/ `ui.flashMs` / `ui.resetKeys`（**缺键即抛错**，不静默兜底）。
+
+⚠️ **本轮确立的通用不变量（最重要）**：**凡必须在帧间持续存在的反馈，都不能建在
+ECharts 内部状态上** —— 每 ≤400ms 一次 `setOption(opt, true)`（notMerge）实测摧毁
+悬停（指针静止也在 **+450ms** 消失）、原生 `axisPointer`（三种挂法 × 5 变体
+**一次都没画出来**）、自带 `moveOnMouseMove` 拖拽（8 段只有**前 3 段**生效）
+⇒ 常驻反馈一律走 **DOM 覆盖层**（与重建无关，也不吃 `setOption` 的 p50 = 27ms 预算）；
+重建后按**像素**补 `dispatchAction({type:"showTip", x, y})`（**不能用 dataIndex**，列每帧在追加）。
+
+⚠️ **差点把假绿当非空转证据**：探针模式原本只读环境变量，按位置参数传会**静默退回 prod**
+⇒ 三次"单开关翻转"跑的是同一份代码。**已加守卫**（未知模式抛错，实测 `nofbb` 会 `exit 1`）。
+
+**验证**：`run.py --check` **16/16**（**最终字节上重跑**）；`check_web_contract` 离线 + 在线全通过；
+**非空转**：同一份 `web/*.js` 只翻一处配置 ⇒ prod `49/0`（RC=0）· nofb `43/0` ·
+nohover `41/0` · nohint `48/0`，**断言数故意不同** ⇒ 判定相反。
+
+**残留**：**A1 热力图纵轴仍不可交互**（诊断里最大的功能缺口，本轮**没做**）；
+触摸未接；两图不联动（KAI 的明确取舍）；三个探针在 `tmp/` **无回归保护**；
+`web/style.css` 与 `web/skew_zoom.js` 都到 **394** 行（上限 400）。
+
+---
+
+## 上一轮 —— Skew 图交互改版（`skew-drag-interaction`，已提交 `ab853d3`）
+
+工作区脏项 = **该会话 6 个 `web/` 文件 + 3 个 `tmp/` 探针 + `notes/`**，
+外加**两个上一会话**（`heatmap-pan-drag` 的 `web/heatmap*.js`、
+`skew-dual-axis-zoom` 的 `web/skew*.js`）的未提交改动 ——
+三轮改动**叠在同一工作区**，该会话未替它们背书、也未一并提交。
+
+Skew 图**删掉滚轮缩放**，改为四种按住拖动：左 / 右 Y 轴区上下拖 = **只缩那一侧**纵轴；
+底部 X 轴区左右拖 = 缩 / 放时间窗；网格内按住拖 = 自由平移（纵向两条轴一起移、
+横向挪时间窗）；双击复位三条轴。方向统一为「**往轴的正方向拖 = 放大**」，
+锚点固定为**按下那一刻**的位置。归属在**按下那一刻**按位置定死
+（纯函数 `SKEW.regionOf()`，四区互不重叠）。
+配置：`skew.zoom` 删滚轮语义、加 `stepPx 40` / `minCols 8`；新增
+`skew.drag.throttleMs 100` 与 `skew.pan.enabled`。
+`web/skew_zoom.js` **重写 → 399 行**；`skew_helpers.js` 226 → 348；
+`skew_option.js` 156；`skew.js` 290 → 310；`config.js` 252 → 270。
+
+⚠️ **`web/skew_zoom.js` 399 行，距 400 上限只剩 1 行** —— 下次动它几乎必然要先拆
+（可拆的缝：手势状态机 / 视图状态导出）。
+
+⚠️ **本轮修掉两条自己引入的缺陷**：
+① `skew.js::_count` 被赋成**窗口列数**（应为总列数）⇒ `_applyZoom()` 拿它去 `setCols()`
+⇒ `_cols` **逐帧自我折叠**（拖一次窗口 → 下一帧 `_cols` = 窗口宽 → 再拖更小），
+**实测 654 列被折成 4 列**；已修，探针补两条断言守着
+（窗口宽度 ≥ `minCols`、宽度逐级收窄不反弹）。
+② `view()` 越界一律复位太破坏性 ⇒ 改**先夹、后复位**，两条路都 `console.warn`。
+
+⚠️ **已证伪假设（不要再写回注释）**："`_cols` 会帧间抖动（638 → 555 → 638），
+来源是 Skew 序列对齐后比热力图列数短" —— 这是**错误归因**，那个 555 就是缺陷 ① 的产物。
+基线采样（不做手势、20s / 50ms 读 `_zoom._cols`）只看到 `638 → 639`（单调 +1，无抖动）。
+
+**验证**：`run.py --check` **16/16**；`check_web_contract` 离线 + 在线全通过；
+**非空转**：同一份代码只翻一个开关 ⇒ prod `PASS 26 / FAIL 0`、
+`SWATCH_MODE=nozoom` `24/0`、`SWATCH_MODE=nopan` `25/0`（均 `RC=0`）。
+三次都先断言"开关真的翻到位了"（读 `SWATCH_CONFIG` 实际值）——
+否则"零变化"可能是配置替换的正则没匹配上，**探针自己变成空转**。
+
+⚠️ **残留**：① 探针留 `tmp/` **无回归保护**（按 KAI 明令不建常驻检查器）；
+② 未做像素级 / 肉眼复核，`throttleMs: 100` 的**手感未看**；
+③ 未用真实物理鼠标验证（都是 Playwright 合成事件）；④ 触屏 / 触控板未接；
+⑤ 全宽时横向拖不动（设计如此，与热力图一致，但**无任何视觉反馈** —— 见下）；
+⑥ `skew.zoom.minSpan/maxSpan` 两条轴共用一组，极端缩放下会先触底，**属设计取舍待 KAI 定**。
+
+📄 **同会话另产出**：`notes/analysis/2026-09-17-main-chart-interaction-audit.md`
+（主流金融前端主图交互逻辑分析 + 本项目两主图交互缺陷诊断 A1–F2）。
+**新建 `notes/analysis/` 目录，归属未定待 KAI 裁**（按"答不出类别的不进永久库"纪律，
+未进 `notes/memory/` 知识库）。
+
+详见 `notes/sessions/2026-09-17/skew-drag-interaction/{handoff,project_state}.md`。
+
+> 以下为**上一会话**的原状态文字（保留原样，未 retro-fit）。
+
+---
+
+ACTIVE_SESSION_prev: 2026-09-17/heatmap-pan-drag
+LAST_UPDATED: 2026-09-17 06:0x —— **热力图横轴「左键按住拖拽 = 平移」落地（未提交）**。
+`HEAD` = `390ac6e`（与 `origin/main` 一致；功能提交仍是 `130acdc`）。
+工作区脏项 = **本会话 4 个 `web/` 文件 + 3 个 `tmp/` 探针 + `notes/`**，
+外加**上一会话**（`skew-dual-axis-zoom`）未提交的 `web/skew*.js` 与未跟踪目录 ——
+本会话**未替它背书、也未一并提交**。
+
+热力图面板新增手势：**左键在网格内按住左右拖动 = 平移横轴窗口**，与既有滚轮缩放
+**共用同一个窗口状态** `_xWin`（列下标 `{from,to}`），双击仍复位回全宽。
+配置新增 `heatmap.xZoom.panOnDrag`（开）与 `panThrottleMs: 100`（重绘节流）；
+`web/heatmap.js` **250 → 342 行**。
+
+⚠️ **为什么不是打开 ECharts 自带开关**（实测，`tmp/_diag_pan_drag.js`）：
+`dataZoom.inside.moveOnMouseMove` 把"正在拖"存在自己的 `RoamController._dragging` 里，
+而本面板每 400ms `notMerge` 重建整份 option ⇒ 控制器连同状态一起重建。
+实测 8 段拖拽只有**前 3 段**生效，停点正好落在一次 `setOption` 上（反方向拖只剩 1 段）。
+⇒ 改为面板自己做：绑 `chart.getZr()`（不是容器 —— 容器收不到 zrender 事件，
+上一会话已钉死），只认左键，网格内才算，换算用"内容跟指针走"（1px = `span/gridW` 列）。
+
+**验证**：`run.py --check` **16/16 `RC=0`**；`check_web_contract` 离线 + 在线均 `RC=0`；
+真机渲染 `tmp/_dom_check.js` **PASS 15 / FAIL 0**；
+**非空转**：同一份代码只翻 `panOnDrag` 一个开关 ⇒ 生产 8 段位移 / 关掉 **零位移**；
+边界 `tmp/_probe_pan_guards.js` **8/8**（全宽不动 / 右键不动 / 网格外不动 /
+左键网格内动 / 双击复位 / 0 报错）；拖拽中途复位 `tmp/_probe_pan_reset.js` **6/6**。
+
+⚠️ **残留**：① 三个探针留 `tmp/` **无回归保护**（按 KAI 明令不建常驻检查器）；
+② **未做像素级复核**（判据读 `dataZoom` 百分比与 `_xWin`，不是屏幕观感），
+`panThrottleMs: 100` 的**手感未看**；③ **未用真实物理鼠标验证**（都是 Playwright
+合成事件）；④ 触屏 / 触控板未接；⑤ **全宽（未缩放）时拖拽是空操作**（设计如此，
+面板头已加提示）。
+
+详见 `notes/sessions/2026-09-17/heatmap-pan-drag/{handoff,project_state}.md`。
+
+> 以下为**上一会话**的原状态文字（保留原样，未 retro-fit）。
+
+---
+
+ACTIVE_SESSION_prev: 2026-09-17/skew-dual-axis-zoom
+LAST_UPDATED_prev: 2026-09-17 04:3x —— **Skew 图双纵轴缩放落地（未提交，工作区 7 项脏）**。
+`HEAD` 当时是 `130acdc`（其后另有一个 docs 提交 `390ac6e`）。
+
+左轴 25Δ Skew 与右轴 IV **同一格滚轮一起缩**（各自按同一倍率绕同一屏幕锚点），
+X 轴时间范围**一动不动**；指针在网格外则只缩 X；双击一次性复位两者。
+触发 / 步长 / 上下限全在 `web/config.js::skew.zoom`（`step 1.15` /
+`minSpan 0.05` / `maxSpan 500` / `minCols 8` / `anchorAtPointer`）。
+交互与锁定态的唯一出口 = **新增的 `web/skew_zoom.js`**。
+
+⚠️ **顺带查实一条老缺陷**：2026-09-15 那版"绑在图表容器上"的纵轴滚轮缩放
+**从未执行过** —— zrender 在容器内部另建 viewport root 并 `stopPropagation()`，
+实测 `zr.on("mousewheel")` = 1 而容器 = 0、document = 0。旧检查器只调纯函数
+（`grep -rn "wheel" tools/*.py` 0 命中）⇒ 死绑定一路全绿。
+
+**验证**：`run.py --check` **16/16 RC=0**；`node --check web/*.js` 全过；
+真机探针 `tmp/_probe_skew_yzoom.js` **PASS 19 / FAIL 0**；
+非空转 **4 处变异全部 RC=1**（绑回容器 / 只缩左轴 / 打开 dataZoom 滚轮 / 锚点改中心），
+4/4 逐字节还原。行数：`skew.js` 321 / `skew_zoom.js` 347 / `skew_helpers.js` 230。
+
+⚠️ **残留**：① 两条轴共用一组上下限 ⇒ 左轴（自然量程小）先夹到 `minSpan`，
+极端缩放下"同步"名不副实；② 探针留 `tmp/` **无回归保护**（按 KAI 明令不建常驻检查器）；
+③ **未做浏览器取像素**；④ **未在盘中 RTH 复验**（本轮 GTH，曲线基本平）。
+
+详见 `notes/sessions/2026-09-17/skew-dual-axis-zoom/{handoff,project_state,startup}.md`。
+
+> 以下为**上一会话**的原状态文字（保留原样，未 retro-fit）。
+
+---
+
+ACTIVE_SESSION_prev: 2026-09-17/heatmap-two-window
+LAST_UPDATED_prev: 2026-09-17 04:0x —— **热力图纵轴「画 40 档 / 露 24 档」已落盘、已推送、
 工作区干净**（`HEAD = 130acdc`，与 `origin/main` 一致，`git ls-remote` 已核）。
 
 纵轴现在是**三个半径**：订阅 20（`subscription.json::num_strikes_each_side`）/
@@ -30,7 +228,7 @@ DOM 渲染 `tmp/_dom_check.js` **PASS 15 / FAIL 0**（40 行 / `yAxis 8..31` /
 
 ---
 
-ACTIVE_SESSION_prev: 2026-09-16/runtime-monitors
+ACTIVE_SESSION_PREV: 2026-09-16/runtime-monitors
 LAST_UPDATED_prev: 2026-09-16 09:0x —— **两只只读探针落地，四项要求全部验证成立；
 后端已按要求重启生效。**
 

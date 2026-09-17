@@ -2,6 +2,40 @@
 
 Archive: notes/context/archive/open_tasks_2026-09.md
 
+## Active —— 前端数据中断（`frontend-data-outage`，2026-09-17 诊断完成，**未修复**）
+
+会话：`notes/sessions/2026-09-17/frontend-data-outage/`
+
+- [x] **[高] 链路逐段定性完成** —— 后端与行情源**正常**（帧 `health.connection=connected`、
+  `last_tick_age_s=0.1`、现价在动、订阅 80/92）；**断在「后端 → 浏览器」这一跳**。
+  A/B：同一后端 + 同一份前端代码，**新开页面 `丢 0 · 缺口 0` 完全正常**
+  ⇒ 前端代码没坏，坏的是那个标签页持有的旧连接。立即恢复手段 = **刷新页面**。
+- [ ] **[高] ⚠️ 缺陷①后端：WS 客户端会变僵尸、永不注销** ——
+  `transport/ws_broadcaster.py::_sender` 超时后 `except Exception: pass` **静默退出**，
+  而注销只在 `handle()` 的 `finally`；`handle()` 停在 `async for message in ws:`
+  等**永不到来的**上行消息 ⇒ 客户端永不注销、队列（`client_queue_size: 1`）无人消费
+  ⇒ **每帧都进 `dropped`、100% 丢帧**。实测僵尸存活 **4 小时**、
+  `per_client.sent` 冻结在 5044、`dropped` 单调涨。
+  `heartbeat_interval_s: 20` **救不了**（PING/PONG 由浏览器网络栈应答，与 JS 消费无关）。
+  **修复建议（未实施）**：`_sender` 的 `finally` 里 `await ws.close()`，
+  让 `handle()` 的 `async for` 结束、`finally` 生效。
+- [ ] **[高] ⚠️ 缺陷②前端：看门狗只报不改** —— `web/app.js::watchdog()`
+  算出 `age > staleErrorMs` 后**只改状态文字**（`数据中断 Ns`），**不重连**；
+  而 `web/ws_client.js` 的重连入口**只有** `ws.onclose` 与构造抛错
+  ⇒ socket 一直 OPEN、`onclose` 永不触发 ⇒ **页面永远卡住，只能人工刷新**。
+  **修复建议（未实施）**：`watchdog()` 触发 `SwatchSocket.forceReconnect()`；
+  或用后端既有行为（收到任何 TEXT 立刻回一帧）做"发 ping 等回帧"的活体探针。
+- [ ] **[中] 可观测性缺口** —— `_sender` 死时**一条日志都不留**（WARN 计数恒 0 的成因之一）；
+  `/health` 也不报"发送协程是否还活着" ⇒ 僵尸从外部看是"正常连接"。
+  **建议**：`stats()` 增加 `sender_alive` / `last_sent_at`，`except` 分支补计数 + WARN。
+- [ ] **[中] 门禁缺口** —— 建议新增检查器：`/health` 的 `per_client.sent` **必须在涨**，
+  冻结即红（属"静默错值"类，正是本项目该守的）。
+- [ ] **[低] ⚠️ 触发点未重建** —— 哪段 JS 占住了主线程导致 >1s 背压，无法重建
+  （浏览器侧无埋点）。可确证的只是余量薄：`payload_bytes ≈ 347 KB/帧`
+  （热力图 40 档后翻倍）、`client_queue_size: 1`、`send_timeout_s: 1.0`。
+
+---
+
 ## Active —— 提交推送 + 引用存储修复（`commit-and-push`，2026-09-17 完成）
 
 会话：`notes/sessions/2026-09-17/commit-and-push/`

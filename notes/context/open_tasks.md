@@ -55,12 +55,17 @@ Archive: notes/context/archive/open_tasks_2026-09.md
   `sender_alive`（派生自 task，不另存字段）/ `last_sent_age_s` / `send_failures`。
 - [x] **[低] ⚠️ 触发点未重建：已重建（2026-09-18）** —— 会话
   `notes/sessions/2026-09-18/zombie-trigger-rebuild/`。**手法**：卡住渲染器主线程
-  ≥12s（`tmp/probe_zombie_browser.py`：真 headless Chrome + 真页面 + 产品自己的
+  **≥13s**（`tmp/probe_zombie_browser.py`：真 headless Chrome + 真页面 + 产品自己的
   `WsBroadcaster`/`StaticHandler`，CDP `Runtime.evaluate` 跑
-  `while (Date.now() - t0 < N) {}`）。**机制**：浏览器有界缓冲先吞 ≈28 帧
-  （82,021 B/帧 ≈ **2.24 MB**，约 11s）⇒ 填满后 `send_str` 卡在 `_drain()` ⇒
+  `while (Date.now() - t0 < N) {}`）。**机制**：浏览器有界缓冲先吞 **28 帧**
+  （82,021 B/帧 ≈ **2.24 MB** —— 13/14/15s 三次独立运行完全一致 ⇒ 是缓冲**容量**，
+  推送 400ms 下 ≈11.5s 填满）⇒ 填满后 `send_str` 卡在 `_drain()` ⇒
   `send_timeout_s = 1.0` 到点 ⇒ `_sender` 退出（实测 t≈12.5s）；卡住结束后 socket
   恢复也**救不回来** ⇒ 僵尸长期存在。
+  ⚠️ **边界已扫（8/10/12/13/14/15s）：判据不是"卡多久"，而是"冻结时长是否越过
+  `send_timeout_s`"** —— 8s/10s 冻结 0.0s（缓冲没满）；**12s 冻结 0.5s < 1.0s ⇒
+  后端挺住、无僵尸**；**13s 冻结 9.0s ⇒ 协程死、僵尸 ≥80s**；14s/15s 冻结 10.5s/11.0s。
+  ⇒ 可用下限 ≈ 11.5s + 1.0s；**稳的做法是卡 15s**（留 3.5s 余量）。
   **非空转 A/B 四臂（全在最终字节上重跑，均 RC=0、各 8/8）**：
   `old off 15` ⇒ 僵尸 **≥80s**、`forces=0`、停在「数据中断 79s」**永不恢复**；
   `old on 15` ⇒ 僵尸活到 **45s** 被 `forceReconnect` 清掉、帧恢复；
@@ -73,7 +78,9 @@ Archive: notes/context/archive/open_tasks_2026-09.md
   （333 → 352 行，**纯文档，无行为改动**）。
   ⚠️ **仍未在 KAI 真实浏览器 + 盘中背压下验证**（重建用 headless Chrome，
   KAI 那个标签页当时被什么卡住**仍然未知**，浏览器侧仍无埋点）；
-  **卡住时长边界未扫**（只测 15s / 20s）；**~29s 心跳清理路径只有单次观测**。
+  **"堵住后为何还要 9~11s 才松开"未查**（像是积压 2.24 MB 的排空耗时，
+  **未做实验区分**）；2.24 MB 容量只在一种推送节奏 + 一种帧尺寸下测过；
+  **~29s 心跳清理路径只有单次观测**。
 - [ ] **[低] 探针无回归保护** —— 四个探针（`tmp/probe_zombie_ws.py` ·
   `tmp/probe_stale_reconnect.py` · `tmp/probe_render_stall_guard.py` ·
   `tmp/probe_zombie_browser.py`）都留 `tmp/`（按既有约定

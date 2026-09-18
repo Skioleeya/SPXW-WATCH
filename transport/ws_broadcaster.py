@@ -29,7 +29,26 @@ Fail-Closed 的实现方式
 ``dropped`` 单调涨到 20946、挂了 4 小时 11 分，全程无任何报错）。把不变量的成立
 条件绑在"TCP 还写得动"上，等于没有不变量。
 
-来历与逐段证据见 ``notes/sessions/2026-09-17/frontend-data-outage/handoff.md``。
+心跳**不是**僵尸的安全网（实测，别把兜底寄托在它身上）
+----------------------------------------------------
+``heartbeat_interval_s`` 会让 aiohttp 在 ``pong_heartbeat``（= 心跳 / 2）内收不到
+PONG 时把 ``WSMsgType.ERROR`` 塞进读循环 —— 旧代码那个 ``async for`` 会 ``break``，
+于是**顺带**把僵尸注销掉。**但这条兜底是竞态，不可依赖**：
+
+* 实测（``tmp/probe_zombie_browser.py``：真 headless Chrome + 产品自己的本文件）：
+  卡住页面主线程 20s，**出现过一次** ~29s 被 aiohttp 清掉 —— 时间点正好
+  = 连接建立 + 心跳 20s + pong 期限 10s，代码路径（``_pong_not_received`` →
+  ``_handle_ping_pong_exception`` → ``feed_data(WSMsgType.ERROR)``）也对得上；
+  **同一配置重跑却没复现** ⇒ 它取决于"PING 能不能在 pong 期限前写出去、
+  PONG 能不能在期限内回来"，是个时序竞态。
+* 把心跳窗口拉长到 86400s 做对照 ⇒ 僵尸**必然**活到前端动手（实测 50s 才被清）。
+
+⇒ 它只在"对端连 PONG 都发不回来"时才生效，而**常态下 socket 是好的**：
+2026-09-17 那次事故里 PING/PONG 一路正常、只是发送协程早就死了，僵尸活了
+4 小时 11 分 ⇒ 不能据此认为"僵尸会自己好"。
+
+来历与逐段证据见 ``notes/sessions/2026-09-17/frontend-data-outage/handoff.md``
+与 ``notes/sessions/2026-09-18/zombie-trigger-rebuild/handoff.md``。
 
 依赖：L0、L1。
 """

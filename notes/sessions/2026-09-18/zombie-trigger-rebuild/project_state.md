@@ -1,0 +1,91 @@
+# Project State — zombie-trigger-rebuild
+
+## 为什么用「自带后端」而不是 KAI 的真后端
+
+开工前实测（`startup.md::STARTUP-PROOF`）：`:8060` / `:4001` / `:4002` 全 closed、
+无 `ibgateway` 进程，且**美股休市**（03:3x EDT）。按 `spxw-live-verify` 的纪律，
+盘前不起 `run.py`（会在 0DTE 处 fail-closed），所以**真后端这一路当时不可用**。
+
+替代方案不是"退而求其次"，而是**更合适的载体**：探针自带一台后端（端口 8063），
+用的全是**产品自己的代码** —— `transport/ws_broadcaster.py::WsBroadcaster` +
+`transport/http_static.py::StaticHandler` + `config/transport.json` 的真配置
+（只把 `http_port` 换成 8063）+ 真帧样本 `tmp/frame_sample.json`（411,390 B，
+`tmp/_capture_frame.py` 从真后端抓的）。浏览器侧是**真 headless Chrome + 真页面**。
+
+⇒ 物理链（渲染器不消费 → 缓冲填满 → `send_str` 超时）与生产完全同形，
+且**不需要行情、不需要 IB Gateway、不碰 8060**，可反复重跑。
+
+## 关键机制（这一轮才搞清的）
+
+### 1. 卡主线程真的能造成 TCP 背压（假设成立）
+
+`Runtime.evaluate` 跑 `while (Date.now() - t0 < N) {}` ⇒ 渲染器主线程不消费 WS
+⇒ 有界缓冲填满 ⇒ 后端 `send_str` 卡在 `_drain()` ⇒ `send_timeout_s`(1.0) 到点。
+
+**吸收量实测**：`sent` 从 4 涨到 32（**28 帧 × 82,021 B ≈ 2.24 MB**）才建立背压，
+耗时约 11s（推送 400ms ⇒ 2.5 fps）。⇒ **卡主线程要 ~11s 以上才够**，
+这解释了"为什么不是随便一段 JS 都会触发"。
+
+### 2. 两种形状，寿命差两个数量级（这是本轮最重要的发现）
+
+| 卡住时长 | 发送协程 | socket | 僵尸寿命 |
+|---|---|---|---|
+| **15s**（= 生产形状） | 死（12s 时） | 随后恢复正常 | **≥80s，直到前端动手** |
+| 20s | 死（12s 时） | 卡到心跳 pong 期限 | 50s（前端动手）或 ~29s（心跳） |
+
+⇒ **只有"短卡 + socket 恢复"才是生产事故的形状**。长卡会让 aiohttp 的心跳
+顺手清掉僵尸，那一臂**不能**用来证明前端修复有用。
+
+### 3. aiohttp 心跳是半张网（代码路径 + 单次观测 + 一次对照）
+
+* 代码路径：`_send_heartbeat` 在 `heartbeat_interval_s`(20s) 到点时先
+  `loop.call_at(now + _pong_heartbeat, self._pong_not_received)`（`_pong_heartbeat`
+  = 心跳 / 2 = 10s），**然后**才异步写 PING。`_pong_not_received` →
+  `_handle_ping_pong_exception` → `self._reader.feed_data(WSMessage(WSMsgType.ERROR, exc, None), 0)`
+  ⇒ 旧代码那个 `async for` 的 `if message.type is WSMsgType.ERROR: break` 命中
+  ⇒ `finally: _unregister` ⇒ 僵尸被清掉。
+* 单次观测：`old on 20 400 on` 首次运行，僵尸在 ~29s 被清（`forces=0`、
+  页面靠 `onclose` 自己重连）。时间点 = 连接建立 + 20 + 10。
+* **对照**：同一配置重跑**没复现**（僵尸活到 45s 由前端清掉）；
+  把心跳窗口拉到 86400s（`hb=off`）⇒ 僵尸必然活到前端动手。
+  ⇒ 归因成立，但它是**竞态**，不是稳定行为。**不许把它当兜底。**
+
+### 4. 新后端的自愈比前端看门狗快一个数量级
+
+`head` 臂：`clients` 在 `t=13.0s` 归零（与发送协程结束**同一拍** —— 所以采样
+永远看不到「`clients=1` 且 `sender_done=[True]`」这一态），后端 `ws.close()`
+⇒ 页面 `onclose` → `retrying 202~514ms` → 重连。页面在 ~8s 内恢复（其中前几秒
+还在消化浏览器内部缓冲的旧帧），`forces=0`。对比 `old` + 前端修复 = **45s**。
+
+## 被拒的方案
+
+* **切片式卡住**（分多次 2s 忙等，好在中间观察后端）：**拒**。切片之间的空隙
+  会让渲染器把缓冲排空 ⇒ 背压建不起来。改成"一次性长卡 + 从 Python 侧盯后端"。
+* **`git stash` 摘掉修复**做 A/B：**拒**。会污染工作区、且依赖当时的工作区状态。
+  改为探针自己 `git show 748cd56^:transport/ws_broadcaster.py` 取出来当独立模块加载，
+  并**打印 sha256**（`46976ac4ca5fbdb0…`）供核对 ⇒ 可复现、不碰工作区。
+* **等行情起来再跑真后端**：本轮时间窗内不可行（休市），且自带后端已能满足。
+
+## 踩到的坑
+
+* `importlib` 加载含 `@dataclass(slots=True)` 的模块，**必须先登记 `sys.modules`**
+  再 `exec_module` —— 否则 `dataclasses._is_type` 回查
+  `sys.modules[cls.__module__].__dict__` 抛
+  `AttributeError: 'NoneType' object has no attribute '__dict__'`。
+* **我自己写错的两条判据**（都发生在 `head` 臂，且都是"判据错"而非"产品错"）：
+  1. 「发送协程已结束」原本只认 `sender_done=[True]` —— 新代码里"协程结束"与
+     "注销"同一拍，采样看不到那一态。**改正依据**：后端 WARN 日志
+     `客户端 127.0.0.1 发送失败（TimeoutError: ），已发 32 帧 / 丢 1 帧，放弃该连接`
+     + 时间线里 `clients` 于 `t=13.0s` 归零。改为"两者任一成立"。
+  2. 「新后端：僵尸根本没机会形成」原本只看**末态** `clients == 0` —— 但页面
+     重连之后又会有新客户端注册进来（`clients` 回到 1）。**改正依据**：整段观测窗
+     里"协程已死 + 仍注册"出现 **0 次**。改为看整个观测窗。
+  两条都在改正后**重跑**并复绿；不是为了让结论好看而放宽。
+
+## 没做到的
+
+* **仍未在 KAI 的真实浏览器 + 真实盘中背压下验证** —— 触发条件现在能按需重建，
+  但重建用的是 headless Chrome；KAI 那个标签页当时到底被什么卡住，仍然未知。
+* 卡住时长 → 后果的边界（15s 够、多少秒开始会被心跳顺手清掉）**没有扫过**，
+  只测了 15s / 20s 两个点。
+* 探针留 `tmp/`（按 KAI 明令不建常驻检查器）⇒ **无回归保护**。

@@ -1,13 +1,66 @@
 # Project State
 
-ACTIVE_SESSION: 2026-09-17/frontend-stale-reconnect
-LAST_UPDATED: 2026-09-17 14:0x EDT —— **2026-09-17「前端数据中断」两处根因均已修完**
-（① 后端僵尸 `748cd56` · ② 前端看门狗自愈 本轮）。
+ACTIVE_SESSION: 2026-09-18/zombie-trigger-rebuild
+LAST_UPDATED: 2026-09-18 03:4x EDT —— **僵尸的触发条件已重建**（此前唯一缺的那块证据）。
+后端修复 `748cd56` / 前端自愈 `87fa904`+`70cba0c` 均未改动；本轮**只加文档**。
 ⚠️ **HEAD 以 `git log` 为准，本文件不写死**（写死就会被下一条记录提交立刻变成假记录）。
 ⚠️ **时间基准**：环境注入的时钟比本机 `date` 慢 8h；本文件及 `notes/sessions/` 里
 2026-09-17 早先标注的 `04:xx`–`06:xx` **实际是本机 `13:xx`–`14:xx`**。
 
-## 本轮 —— 前端「数据中断」自愈（`frontend-stale-reconnect`）
+## 本轮 —— 重建「浏览器侧触发僵尸」的条件（`zombie-trigger-rebuild`）
+
+会话：`notes/sessions/2026-09-18/zombie-trigger-rebuild/{startup,handoff,project_state}.md`
+
+**结论：触发条件造得出来，而且它比原先设想的窄。** 把页面主线程**故意卡住 ≥12s**，
+后端 `_sender` 就会超时死掉（实测 t≈12.5s）；卡住结束、socket 恢复正常也**救不回来**
+（发送协程已经没了）⇒ 队列（容量 1）有人丢、没人收 ⇒ **0 帧送达、每帧进 `dropped`**，
+状态栏却写着「已连接」—— 与 2026-09-17 生产事故逐条同形。
+
+**触发手法（可复现）**：真 headless Chrome + 真页面 + 真后端代码（产品自己的
+`WsBroadcaster`/`StaticHandler`，端口 8063），CDP `Runtime.evaluate` 执行
+`while (Date.now() - t0 < N) {}`。卡住期间浏览器**有界缓冲**先吞掉 ≈28 帧
+（82,021 B/帧压缩后 ≈ **2.24 MB**，约 11s），填满后 `send_str` 卡在 `_drain()` ⇒
+`send_timeout_s = 1.0` 到点 ⇒ `_sender` 退出。
+
+**非空转 A/B（同一份探针只翻一个变量；四臂全部在最终字节上重跑，均 RC=0、各 8/8）**：
+
+| # | 后端 | 前端 | 卡住 | 心跳 | 结果 |
+|---|---|---|---|---|---|
+| 1 | `old` | `off` | 15s | 20s | 僵尸 **≥80s**；`forces=0`；停在「数据中断 79s」，**永不恢复** |
+| 2 | `old` | `on` | 15s | 20s | 僵尸活到 **45s** ⇒ 前端 `forceReconnect` 清掉 ⇒ 帧恢复 |
+| 3 | `head` | `on` | 15s | 20s | **僵尸根本没形成**（`clients` 归零于 t=13.0s）；页面 ~8s 自愈，`forces=0` |
+| 4 | `old` | `on` | 20s | **86400s**（对照） | 僵尸 **50s**，只有前端能清掉 |
+
+- **臂 1 ↔ 臂 2 = 前端修复的非空转证明**：只翻 `render.reconnectOnStale` 一个开关
+  ⇒ 判定相反（卡死在「数据中断 79s」vs 45s 后帧恢复）。
+- **臂 1 的僵尸形态**：`clients=1` ∧ `sender_done=[True]` ∧ `sent` 冻结 32 ∧
+  `dropped` 27→224（观测 80s）。**臂 3 的新后端自愈比看门狗快一个数量级**（13s vs 45s）。
+
+⚠️ **本轮最重要的发现：心跳是「半张网」，不是兜底。** `old on 20` **首次**跑时僵尸在
+**~29s** 被 aiohttp 清掉（时间点 = 连接建立 + 心跳 20s + pong 期限 10s，代码路径
+`_send_heartbeat` → `_pong_not_received` → `_handle_ping_pong_exception` →
+`feed_data(WSMsgType.ERROR)` → 旧代码 `async for` 里的 `break` → `finally: _unregister`），
+**但同一配置重跑没复现**（僵尸活到 45s、由前端清掉），心跳拉长到 86400s 则僵尸**必然**
+活到前端动手 ⇒ 它是**竞态**（PING 能否在 pong 期限前写出去、PONG 能否期限内回来），
+**不能当兜底**。2026-09-17 事故里 PING/PONG 一路正常、僵尸活了 4h11m，也印证这点。
+
+**改了什么**：`transport/ws_broadcaster.py`（333 → **352 行**，**纯文档**：模块 docstring
+新增「心跳**不是**僵尸的安全网」一节；`git diff` = 20 insertions / 1 deletion，全在
+docstring 内，**无任何行为改动**）；`tmp/probe_zombie_browser.py`（新建 519 行，gitignored）。
+**未改**任何 `web/*.js`、任何配置、`features/`、`serialization/`。
+
+**验证**：四臂 **4×8/8 RC=0**；`run.py --check` **16/16 RC=0**；`py_compile` ok。
+真后端 / IB Gateway 侧：**N/A:开工时 `:8060`/`:4002` 全 closed 且休市，按纪律不起服务**。
+
+⚠️ **残留**：**仍未在 KAI 真实浏览器 + 盘中背压下验证**（重建用 headless Chrome，
+KAI 那个标签页当时被什么卡住**仍然未知**）；**卡住时长边界未扫**（只测 15s / 20s）；
+**~29s 心跳清理路径只有单次观测**（归因成立但是竞态）；探针留 `tmp/` ⇒ **无回归保护**。
+⚠️ **KAI 侧仍有两件事**：① 重启后端让 `748cd56` + 本轮 docstring 生效；
+② 刷新页面（旧标签页仍连着旧连接）。
+
+---
+
+## 上一轮 —— 前端「数据中断」自愈（`frontend-stale-reconnect`）
 
 会话：`notes/sessions/2026-09-17/frontend-stale-reconnect/{handoff,project_state}.md`
 

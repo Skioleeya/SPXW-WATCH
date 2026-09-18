@@ -2,10 +2,11 @@
 
 Archive: notes/context/archive/open_tasks_2026-09.md
 
-## Active —— 前端数据中断（`frontend-data-outage`，2026-09-17 诊断完成，**①②两处根因均已修并验证**）
+## Active —— 前端数据中断（`frontend-data-outage`，2026-09-17 诊断完成，**①②两处根因均已修并验证；触发条件 2026-09-18 已重建**）
 
 会话：`notes/sessions/2026-09-17/frontend-data-outage/`（诊断）
 · `notes/sessions/2026-09-17/frontend-stale-reconnect/`（缺陷②修复）
+· `notes/sessions/2026-09-18/zombie-trigger-rebuild/`（触发条件重建 + 前端修复首次在真僵尸上验证）
 
 - [x] **[高] 链路逐段定性完成** —— 后端与行情源**正常**（帧 `health.connection=connected`、
   `last_tick_age_s=0.1`、现价在动、订阅 80/92）；**断在「后端 → 浏览器」这一跳**。
@@ -52,11 +53,30 @@ Archive: notes/context/archive/open_tasks_2026-09.md
 - [x] **[中] 可观测性缺口：已补** —— `_sender` 的 `except` 由 `pass` 改为
   `send_failures += 1` + 一条 WARN；`stats()` 的 `per_client` 增
   `sender_alive`（派生自 task，不另存字段）/ `last_sent_age_s` / `send_failures`。
-- [ ] **[低] ⚠️ 触发点未重建** —— 哪段 JS 占住了主线程导致 >1s 背压，无法重建
-  （浏览器侧无埋点）。可确证的只是余量薄：`payload_bytes ≈ 347 KB/帧`
-  （热力图 40 档后翻倍）、`client_queue_size: 1`、`send_timeout_s: 1.0`。
-- [ ] **[低] 探针无回归保护** —— 三个探针（`tmp/probe_zombie_ws.py` ·
-  `tmp/probe_stale_reconnect.py` · `tmp/probe_live_page.py`）都留 `tmp/`（按既有约定
+- [x] **[低] ⚠️ 触发点未重建：已重建（2026-09-18）** —— 会话
+  `notes/sessions/2026-09-18/zombie-trigger-rebuild/`。**手法**：卡住渲染器主线程
+  ≥12s（`tmp/probe_zombie_browser.py`：真 headless Chrome + 真页面 + 产品自己的
+  `WsBroadcaster`/`StaticHandler`，CDP `Runtime.evaluate` 跑
+  `while (Date.now() - t0 < N) {}`）。**机制**：浏览器有界缓冲先吞 ≈28 帧
+  （82,021 B/帧 ≈ **2.24 MB**，约 11s）⇒ 填满后 `send_str` 卡在 `_drain()` ⇒
+  `send_timeout_s = 1.0` 到点 ⇒ `_sender` 退出（实测 t≈12.5s）；卡住结束后 socket
+  恢复也**救不回来** ⇒ 僵尸长期存在。
+  **非空转 A/B 四臂（全在最终字节上重跑，均 RC=0、各 8/8）**：
+  `old off 15` ⇒ 僵尸 **≥80s**、`forces=0`、停在「数据中断 79s」**永不恢复**；
+  `old on 15` ⇒ 僵尸活到 **45s** 被 `forceReconnect` 清掉、帧恢复；
+  `head on 15` ⇒ **僵尸根本没形成**（`clients` 归零于 t=13.0s）、页面 ~8s 自愈；
+  `old on 20` + 心跳 86400s（对照）⇒ 僵尸 50s，只有前端能清。
+  **臂 1↔2 即前端修复的非空转证明**（只翻 `reconnectOnStale` 一个开关 ⇒ 判定相反）。
+  ⚠️ **顺带查明：心跳是「半张网」不是兜底** —— `old on 20` **首次**跑时僵尸在 ~29s
+  被 aiohttp 清掉（= 建连 + 心跳 20s + pong 期限 10s），**同配置重跑未复现**
+  ⇒ 竞态，不可依赖。已写进 `transport/ws_broadcaster.py` 模块 docstring
+  （333 → 352 行，**纯文档，无行为改动**）。
+  ⚠️ **仍未在 KAI 真实浏览器 + 盘中背压下验证**（重建用 headless Chrome，
+  KAI 那个标签页当时被什么卡住**仍然未知**，浏览器侧仍无埋点）；
+  **卡住时长边界未扫**（只测 15s / 20s）；**~29s 心跳清理路径只有单次观测**。
+- [ ] **[低] 探针无回归保护** —— 四个探针（`tmp/probe_zombie_ws.py` ·
+  `tmp/probe_stale_reconnect.py` · `tmp/probe_render_stall_guard.py` ·
+  `tmp/probe_zombie_browser.py`）都留 `tmp/`（按既有约定
   不建常驻检查器）；未在真实浏览器 + 真实背压下复测。
 
 ---

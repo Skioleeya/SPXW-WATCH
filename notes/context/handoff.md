@@ -6,7 +6,47 @@
   ⚠️ **HEAD 以 `git log` 为准，本文件不写死**（写死就会被下一条记录提交立刻变成假记录）。
   ⚠️ **提交 ≠ KAI 逐轮验收** —— 各轮证据仍在各自的 `handoff.md`。
 
-## 最新：2026-09-17 / frontend-stale-reconnect（完成，**缺陷②前端自愈**）
+## 最新：2026-09-18 / zombie-trigger-rebuild（完成，**触发条件已重建**）
+
+- **会话交接**：`notes/sessions/2026-09-18/zombie-trigger-rebuild/handoff.md`
+  （"为什么这么造"在 `project_state.md`；开工基线在 `startup.md`）
+- **一句话**：把页面主线程**故意卡住 ≥12s**，后端的发送协程就会超时死掉、而 socket
+  随后恢复正常 ⇒ **真僵尸造出来了**，形状与 2026-09-17 生产事故逐条同形。
+- **触发条件（可复现）**：真 headless Chrome + 真页面 + 真后端代码（自带 `:8063`），
+  CDP `Runtime.evaluate: while (Date.now() - t0 < N) {}`。卡住期间浏览器有界缓冲先吞
+  **≈28 帧 ≈ 2.24 MB**（约 11s），填满后 `send_str` 卡在 `_drain()` ⇒
+  `send_timeout_s = 1.0` 到点 ⇒ `_sender` 退出（实测 t≈12.5s）；卡住结束、socket 恢复
+  也**救不回来**（发送协程已经没了）⇒ 队列（容量 1）有人丢没人收 ⇒ **0 帧送达**。
+- **非空转 A/B（同一探针只翻一个变量；四臂全在最终字节上重跑，均 RC=0，各 8/8）**：
+
+  | # | 后端 | 前端 | 卡住 | 心跳 | 结果 |
+  |---|---|---|---|---|---|
+  | 1 | `old` | `off` | 15s | 20s | 僵尸 **≥80s**；`forces=0`；停在「数据中断 79s」，**永不恢复** |
+  | 2 | `old` | `on` | 15s | 20s | 僵尸活到 **45s** ⇒ 前端 `forceReconnect` 清掉 ⇒ 帧恢复 |
+  | 3 | `head` | `on` | 15s | 20s | **僵尸根本没形成**（`clients` 归零于 t=13.0s）；页面 ~8s 自愈，`forces=0` |
+  | 4 | `old` | `on` | 20s | **86400s**（对照） | 僵尸 **50s**，只有前端能清掉 |
+
+  **臂 1 ↔ 臂 2 就是前端修复的非空转证明**（`reconnectOnStale` 一个开关 ⇒ 判定相反）。
+  **臂 1 的僵尸形态**：`sent` 冻结 32、`dropped` 27 → 224（观测 80s）、`clients=1`
+  且 `sender_done=[True]`。**臂 3 的新后端自愈比看门狗快一个数量级**（13s vs 45s）。
+- ⚠️ **本轮最重要的发现：心跳是「半张网」，不是兜底。** `old on 20` **首次**跑时僵尸在
+  **~29s** 被 aiohttp 清掉（= 连接建立 + 心跳 20s + pong 期限 10s，代码路径
+  `_send_heartbeat` → `_pong_not_received` → `feed_data(WSMsgType.ERROR)` →
+  旧代码 `async for` 的 `break`），**但同一配置重跑没复现**（僵尸活到 45s），
+  心跳拉长到 86400s 则僵尸必然活到前端动手 ⇒ **竞态，不能依赖**。
+  已写进 `transport/ws_broadcaster.py` 模块 docstring（**只加文档，无行为改动**）。
+- **改了什么**：`transport/ws_broadcaster.py`（333 → **352 行**，**纯文档**：
+  新增「心跳**不是**僵尸的安全网」一节，`git diff` = 20 insertions / 1 deletion，全在
+  docstring 内）；`tmp/probe_zombie_browser.py`（新建 519 行，gitignored）。
+  **未改**任何 `web/*.js`、任何配置、`features/`、`serialization/`。
+- **验证**：四臂 **4×8/8 RC=0**；`run.py --check` **16/16 RC=0**；`py_compile` ok。
+  真后端侧 **N/A:开工时 `:8060`/`:4002` 全 closed 且休市，按纪律不起服务**。
+- ⚠️ **仍未在 KAI 真实浏览器 + 盘中背压下验证**；卡住时长边界未扫（只测 15s / 20s）；
+  ~29s 心跳清理路径只有单次观测；探针留 `tmp/` **无回归保护**。
+- ⚠️ **KAI 侧仍有两件事**：① 重启后端让 `748cd56` + 本轮 docstring 生效；
+  ② 刷新页面（旧标签页仍连着旧连接）。
+
+## 上一会话：2026-09-17 / frontend-stale-reconnect（完成，**缺陷②前端自愈**）
 
 - **会话交接**：`notes/sessions/2026-09-17/frontend-stale-reconnect/handoff.md`
   （"为什么这么改"在 `project_state.md`）

@@ -6,7 +6,43 @@
   ⚠️ **HEAD 以 `git log` 为准，本文件不写死**（写死就会被下一条记录提交立刻变成假记录）。
   ⚠️ **提交 ≠ KAI 逐轮验收** —— 各轮证据仍在各自的 `handoff.md`。
 
-## 最新：2026-09-18 / zombie-trigger-rebuild（完成，**触发条件已重建**）
+## 最新：2026-09-18 / live-start-blocked（**起不来，等 KAI 拍板**）
+
+- **会话交接**：`notes/sessions/2026-09-18/live-start-blocked/handoff.md`
+- **一句话**：**不是 IBKR 的问题，是产品缺陷** —— 今天（ES 季月到期日）GTH 段
+  **一点现货都拿不到**，所以 `run.py` 起不来。
+- **触发条件**：`synthesised_zones: ["gth"]` ⇒ GTH 段现货**必须用 ES 期货合成**；
+  而 ES **前月今天到期**（`ES 20260918`，到期时刻 = 09:30 ET）。于是
+  `SpotSynthesis._years_to` 把到期时刻**发明成"到期日 00:00 UTC"**（真实是 13:30 UTC）
+  ⇒ 从 00:00 UTC 起 `T1 = -0.000970` 为负 ⇒ `if t1 <= 0: return None` ⇒
+  `spot()` **永远 None** ⇒ `_await_spot()` 20s 超时 ⇒ `SpotUnavailableError`。
+- **两个缺陷（分层，都要修）**：
+  ① `_years_to` 的到期时刻是**推算**出来的（只用了 `realExpirationDate`，精度到日）；
+  ⚠️ 它 docstring 的辩护「误差在相减时抵消」**只对 carry 成立**，`t1 <= 0` 这个**闸门**
+  和 `e^(−ĉ·t1)` 用的是**绝对 T1**，误差不抵消。
+  ② `spot()` 的**换月只写在文档里、代码没实现** —— `fresh[0], fresh[1]` 从不跳过
+  `T1 <= 0` 的月份 ⇒ 第三个月份**订了但从没当过后月之前的"前月"**。
+- **关键证据（全部可复跑）**：独立探针 `tmp/probe_ibkr_spot.py`（只读、client_id=99）
+  证明 IBKR 侧**完全正常**：`DUQ898780`；ES 22 个月份全带 conId；前/次/次次月
+  **全部 `md=1` 实时**（`7661.00/7661.25/7660.75`）；农场 `usfarm.nj`/`hfarm`/`usfuture` OK。
+  ⇒ **用产品自己的代码**跑同一批真实报价的三个反证：
+  A) 三个月全喂 → `spot = None`（samples=0）／B) 只喂次月+次次月 → `7650.12598` ✅
+  ／C) 同一批报价、moment 往前 12h → `7661.01154` ✅（`T1(past)=+0.000400`）
+  ⇒ 同一份代码、同一批报价，**唯一变量是 T1 的符号**。
+- ⚠️ **到期时刻不用推算，IBKR 数据里就有**：`lastTradeTime='08:30:00'` +
+  `timeZoneId='US/Central'`，且 `tradingHours` 末段 `20260917:1700-20260918:0830`
+  **两处独立来源一致** ⇒ 权威时刻 = 2026-09-18 08:30 CT = 13:30 UTC。
+- ⚠️ **日志里一条 feed 告警都没有** —— 因为 `_note()` 不写 logging（已知坑）⇒
+  只查日志会得出"什么都没发生"的错误结论。
+- **影响面**：每年 **4 天**（ES 季月到期 = 第三个周五，3/6/9/12 月）的 GTH 窗口
+  （≈13 小时）**服务起不来**；这 4 天恰好是季月 0DTE。RTH（09:30 起）走 SPX 指数直读
+  ⇒ **不受影响** ⇒ **今天不修也能在 09:30 EDT 正常起来**。
+- **改了什么**：**没有**。只新建 `tmp/probe_ibkr_spot.py`（gitignored、只读）；
+  **未改任何产品代码、任何配置**（修法见 handoff，**待拍板**）。
+- **OPEN-RISKS**：修复未实施；`_years_to` 改真时刻后的**新误差未量化**（时区解析错会更糟
+  ⇒ 必须用 `tradingHours` 末段交叉校验）；"RTH 不受影响"未实测（今天 09:30 后才有机会）。
+
+## 上一会话：2026-09-18 / zombie-trigger-rebuild（完成，**触发条件已重建**）
 
 - **会话交接**：`notes/sessions/2026-09-18/zombie-trigger-rebuild/handoff.md`
   （"为什么这么造"在 `project_state.md`；开工基线在 `startup.md`）

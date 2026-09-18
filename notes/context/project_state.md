@@ -1,13 +1,77 @@
 # Project State
 
-ACTIVE_SESSION: 2026-09-18/zombie-trigger-rebuild
-LAST_UPDATED: 2026-09-18 03:4x EDT —— **僵尸的触发条件已重建**（此前唯一缺的那块证据）。
-后端修复 `748cd56` / 前端自愈 `87fa904`+`70cba0c` 均未改动；本轮**只加文档**。
+ACTIVE_SESSION: 2026-09-18/live-start-blocked
+LAST_UPDATED: 2026-09-18 04:3x EDT —— **实盘启动失败已定根因：不是 IBKR，是产品缺陷**。
+⚠️ **未改任何产品代码**（等 KAI 拍板）。服务在 **09:30 EDT 之后**可正常启动，不受影响。
 ⚠️ **HEAD 以 `git log` 为准，本文件不写死**（写死就会被下一条记录提交立刻变成假记录）。
 ⚠️ **时间基准**：环境注入的时钟比本机 `date` 慢 8h；本文件及 `notes/sessions/` 里
 2026-09-17 早先标注的 `04:xx`–`06:xx` **实际是本机 `13:xx`–`14:xx`**。
 
-## 本轮 —— 重建「浏览器侧触发僵尸」的条件（`zombie-trigger-rebuild`）
+## 本轮 —— 实盘启动失败：GTH 段「前月被提前 13.5 小时判死」⇒ 无现货 ⇒ 起不来
+
+会话：`notes/sessions/2026-09-18/live-start-blocked/handoff.md`
+（KAI 令「继续启动系统，实盘测试」，结果起不来 ⇒ 转为定根因）
+
+**结论：`run.py` 起不来不是环境问题、不是行情权限问题，是 `SpotSynthesis` 的两处缺陷。**
+`config/spot.json::synthesised_zones = ["gth"]` ⇒ GTH 段现货**必须由 ES 期货合成**
+（SPX 指数在 GTH 是冻结值，`SpotSourceSelector` 主动丢弃）；而今天 **2026-09-18 是 ES
+季月到期日**（第三个周五），前月 `ES 20260918` 的**真实到期时刻 = 09:30 ET = 13:30 UTC**。
+`_years_to` 却把到期时刻当成**到期日 00:00 UTC** ⇒ 从 00:00 UTC 起 `T1 = -0.000970`（负）
+⇒ `spot()` 命中 `if t1 <= 0: return None` ⇒ **永远 None** ⇒ `_await_spot()` 20s 超时
+⇒ `SpotUnavailableError`。
+
+**两处缺陷（分层）**：
+1. `_years_to`（`acquisition/spot_synthesis.py`）的到期时刻是**推算出来的**，只用了
+   `realExpirationDate`（精度到日）。⚠️ 它 docstring 为"精度到日"辩护的理由是
+   「ĉ 只依赖两个到期日的**差**，误差在相减时抵消」—— **只对 carry 成立**；
+   `t1 <= 0` 这个**闸门**与 `e^(−ĉ·t1)` 用的是**绝对 T1**，误差不抵消。
+2. `spot()` 的**换月只写在文档里、代码没实现**：`_subscribe_futures` docstring 明确承诺
+   「前月到期消失后，需要 (次月, 次次月) 顶上」，但 `fresh[0], fresh[1]` **从不跳过
+   `T1 <= 0` 的月份** ⇒ 第三个合约**订了但从没被当"前月"用过**。
+
+**关键证据（可复跑）**：
+- 独立探针 `tmp/probe_ibkr_spot.py`（新建、只读、client_id=99）⇒ **IBKR 侧完全正常**：
+  `managedAccounts = ['DUQ898780']`；ES 返回 22 个月份全带 conId；前/次/次次月
+  **全部 `marketDataType=1` 且有实时 bid/ask/last**（`7661.00 / 7661.25 / 7660.75` 等）；
+  农场 `2104 OK: usfarm.nj / hfarm / usfuture`。
+- **用产品自己的 `SpotSynthesis`** 跑同一批真实报价，三个反证：
+  ```
+  T(20260918) = -0.000970 年 ← 负   T(20261218) = +0.248345   T(20270319) = +0.497660
+  A) 三个月全喂          → spot = None（永远）  samples=0
+  B) 只喂「次月+次次月」  → spot = 7650.12598 ✅  carry=0.0413
+  C) 同批报价、moment −12h → spot = 7661.01154 ✅  T1(past)=+0.000400
+  ⇒ 同一份代码、同一批报价，唯一变量是 T1 的符号 ⇒ 判据就是 `t1 <= 0`
+  ```
+- `run.py` **两次同样失败**（不反复重启）：`04:25:34 启动 … is_open: True` →
+  `04:25:36 限速桶 45/1s` → `core.errors.SpotUnavailableError: 20s 内未收到标的现价`
+  （`feed_service.py:207 → :314`）；第二次 04:28:39 同样 20s 后同样异常，
+  `:8060` 从未真正服务（`/health` 空）。
+  ⚠️ `is_open: True` + 会话 20:15→16:00 ⇒ **这不是"盘前 fail-closed"**。
+  ⚠️ **日志里一条 feed 告警都没有** —— `_note()` 不写 logging（已知坑）⇒ 只查日志
+  会得出"什么都没发生"的错误结论。
+- **到期时刻 IBKR 里就有、不需要推算**：`lastTradeTime='08:30:00'` +
+  `timeZoneId='US/Central'`；`tradingHours` 末段 `20260917:1700-20260918:0830`；
+  `liquidHours='20260918:CLOSED'` ⇒ **两处独立来源一致**，权威时刻 =
+  2026-09-18 08:30 CT = 13:30 UTC = 09:30 ET。
+
+**影响面**：每年 **4 天**（ES 季月到期 = 3/6/9/12 月第三个周五）的 **GTH 窗口**
+（前一日 20:15 → 当日 09:25，≈13 小时）**没有任何现货 ⇒ 服务起不来**；这 4 天恰好是
+**季月 0DTE**。RTH（09:30 起）现货走 SPX 指数直读 ⇒ **不受影响**
+⇒ **今天不修也能在 09:30 EDT 正常起来；修是为了那 4 天 × 13 小时。**
+
+**已否决的"绕过"**：把 `synthesised_zones` 里的 `gth` 去掉（改用 SPX 指数）
+—— 那是**静默降级**（GTH 段指数是冻结值），项目纪律不允许，且 `max_underlying_age_s=10.0`
+本来就会拒收陈旧值。
+
+**本轮改了什么**：**没有改任何产品代码 / 配置**。只新建 `tmp/probe_ibkr_spot.py`
+（gitignored、只读）。修法见 handoff「建议的修法」，**待 KAI 拍板**。
+
+**OPEN-RISKS**：修复方案**未实施**；`_years_to` 改真时刻后的**新误差未量化**（时区解析
+错了会更糟 ⇒ 改时必须用 `tradingHours` 末段交叉校验）；"RTH 段真的不受影响"**未实测**
+（今天 09:30 后才有机会）；`run.py` 在沙箱里长跑会让 Windows 回收站爆炸 ⇒ 常驻请 KAI
+在普通终端里起。
+
+## 上一轮 —— 重建「浏览器侧触发僵尸」的条件（`zombie-trigger-rebuild`）
 
 会话：`notes/sessions/2026-09-18/zombie-trigger-rebuild/{startup,handoff,project_state}.md`
 

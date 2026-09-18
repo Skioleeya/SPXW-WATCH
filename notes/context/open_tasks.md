@@ -2,6 +2,33 @@
 
 Archive: notes/context/archive/open_tasks_2026-09.md
 
+## Active —— 实盘启动被堵（`live-start-blocked`，2026-09-18 定根因，**未修，等 KAI 拍板**）
+
+会话：`notes/sessions/2026-09-18/live-start-blocked/handoff.md`
+
+- [ ] **[高] GTH 段前月被提前 13.5 小时判死 ⇒ 无现货 ⇒ 服务起不来** ——
+  触发日 = **ES 季月到期日**（第三个周五，3/6/9/12 月）= 每年 4 天；今天 2026-09-18 命中。
+  `config/spot.json::synthesised_zones=["gth"]` ⇒ GTH 段现货必须由 ES 期货合成；
+  `SpotSynthesis._years_to` 把到期时刻当成**到期日 00:00 UTC**（真实 = 13:30 UTC）
+  ⇒ `T1` 为负 ⇒ `if t1 <= 0: return None` ⇒ `spot()` 永远 None ⇒ `_await_spot()` 超时
+  ⇒ `SpotUnavailableError`。**独立探针证明 IBKR 侧完全正常**（ES 前/次/次次月全实时），
+  且**用产品自己的代码**在同一批真实报价上做了三个反证（唯一变量 = T1 的符号）。
+  - [ ] **缺陷①`_years_to` 的到期时刻是推算的** ⇒ 应改为吃 IBKR 给的
+    `lastTradeTime` + `timeZoneId`（`tradingHours` 末段可交叉校验）；
+    `feed_service._subscribe_futures` 目前只把日期字符串塞进 `set_future_contracts`
+    ⇒ 需要把**到期时刻**一起带下去。
+  - [ ] **缺陷②`spot()` 的换月只写在文档里、代码没实现** ⇒ `fresh` 选择要**跳过
+    `T1 <= 0`** 的月份，取最近两个 `T1 > 0`。
+    ⚠️ 换月那一刻 S 会跳 ≈11 点（`7650.13` vs `7661.12`）；`max_carry_jump=0.005`
+    会拒收第一拍（Δ=0.0059）⇒ 自愈一拍；`recenter_trigger_strikes`=3 档(15点) > 11 点
+    ⇒ 不会触发窗口重建。
+  - [ ] **验证要求**：`tools/check_spot_synthesis.py` 全绿 + **非空转**（造"前月 T1 ≤ 0"
+    用例：旧代码 FAIL / 新代码 PASS）+ 用真实 ES 三月份报价复跑反证 A/B。
+  - ⚠️ **今天不修也能在 09:30 EDT 正常启动**（RTH 走 SPX 指数直读）；
+    修是为了那 4 天 × 13 小时。
+  - ⚠️ 已否决的"绕过"：把 `gth` 从 `synthesised_zones` 去掉 = **静默降级**
+    （GTH 段 SPX 指数是冻结值），项目纪律不允许。
+
 ## Active —— 前端数据中断（`frontend-data-outage`，2026-09-17 诊断完成，**①②两处根因均已修并验证；触发条件 2026-09-18 已重建**）
 
 会话：`notes/sessions/2026-09-17/frontend-data-outage/`（诊断）

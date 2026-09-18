@@ -28,6 +28,7 @@ from acquisition.chain_resolver import ChainResolver
 from acquisition.contract_factory import ContractFactory
 from acquisition.feed_errors import FeedErrorHandler
 from acquisition.feed_reconcile import WindowFollower
+from acquisition import future_expiry
 from acquisition.ibkr_gateway import IbkrGateway
 from acquisition.spot_source import SpotSourceSelector
 from acquisition.spot_synthesis import SpotSynthesis
@@ -261,9 +262,11 @@ class IbkrFeed:
         顶上，所以第三个是**换月余量** —— 缺了它，换月当天会只剩一个月份，
         合成直接 fail-closed 一整个交易日。
 
-        到期日一律取 IBKR 的 ``ContractDetails.realExpirationDate``，
-        **代码不推算任何日期**：硬编码"第三个周五"正是 B1 在换月日静默错值
-        的同族错误。
+        到期日**与到期时刻**一律取 IBKR 的 ``ContractDetails``（``realExpirationDate``
+        / ``lastTradeTime`` / ``timeZoneId``），**代码不推算日期也不发明时刻** ——
+        硬编码"第三个周五"正是 B1 在换月日静默错值的同族错误；把到期时刻当成
+        "当日 00:00 UTC" 则会让前月提前 13.5 小时被判死（2026-09-18 实测：整个
+        GTH 段合成不出现货、服务起不来）。解析与交叉校验见 ``acquisition.future_expiry``。
 
         拿不到两个月就直接抛错、拒绝启动 —— 宁可启动失败，也不要拿冻结指数
         顶上一个看起来正常的现货（实测差 8 档）。
@@ -287,17 +290,12 @@ class IbkrFeed:
                 "拒绝启动 —— 不拿冻结指数顶上。"
             )
 
-        mapping: dict[int, str] = {}
+        mapping, expiries = future_expiry.build_map(details)
         for item in details:
-            contract = item.contract
-            expiry = str(
-                getattr(item, "realExpirationDate", "")
-                or getattr(contract, "lastTradeDateOrContractMonth", "")
-            )
-            self._gateway.subscribe_future(contract)
-            mapping[int(getattr(contract, "conId", 0) or 0)] = expiry
+            self._gateway.subscribe_future(item.contract)
 
         self._router.set_future_contracts(mapping)
+        self._synthesis.set_expiries(expiries)
         self._note(
             f"期货 {len(mapping)} 个月已订阅: "
             + ", ".join(sorted(mapping.values()))
@@ -311,8 +309,13 @@ class IbkrFeed:
             if spot > 0:
                 return spot
             await asyncio.sleep(0.1)
+        # 把合成器状态拼进异常：`_note()` 不写 logging，合成静默返回 None 时日志里
+        # 会干净得像什么都没发生（2026-09-18 就为这个查了两小时）。
+        synth = self._synthesis
+        detail = "现货合成器未初始化" if synth is None else synth.diagnosis(now_ts())
         raise SpotUnavailableError(
-            f"{timeout:.0f}s 内未收到标的现价。请确认 TWS 已登录且具备行情权限。"
+            f"{timeout:.0f}s 内未收到标的现价（{detail}）。"
+            "请确认 TWS 已登录且具备行情权限。"
         )
 
     # ------------------------------------------------------------------ #

@@ -2,32 +2,39 @@
 
 Archive: notes/context/archive/open_tasks_2026-09.md
 
-## Active —— 实盘启动被堵（`live-start-blocked`，2026-09-18 定根因，**未修，等 KAI 拍板**）
+## Active —— 实盘启动被堵（`live-start-blocked` 诊断 → `live-start-fix` **已修并起起来了**）
 
-会话：`notes/sessions/2026-09-18/live-start-blocked/handoff.md`
+会话：`notes/sessions/2026-09-18/live-start-blocked/handoff.md`（诊断）
+· `notes/sessions/2026-09-18/live-start-fix/handoff.md`（修复 + 实盘启动）
 
-- [ ] **[高] GTH 段前月被提前 13.5 小时判死 ⇒ 无现货 ⇒ 服务起不来** ——
-  触发日 = **ES 季月到期日**（第三个周五，3/6/9/12 月）= 每年 4 天；今天 2026-09-18 命中。
-  `config/spot.json::synthesised_zones=["gth"]` ⇒ GTH 段现货必须由 ES 期货合成；
-  `SpotSynthesis._years_to` 把到期时刻当成**到期日 00:00 UTC**（真实 = 13:30 UTC）
-  ⇒ `T1` 为负 ⇒ `if t1 <= 0: return None` ⇒ `spot()` 永远 None ⇒ `_await_spot()` 超时
-  ⇒ `SpotUnavailableError`。**独立探针证明 IBKR 侧完全正常**（ES 前/次/次次月全实时），
-  且**用产品自己的代码**在同一批真实报价上做了三个反证（唯一变量 = T1 的符号）。
-  - [ ] **缺陷①`_years_to` 的到期时刻是推算的** ⇒ 应改为吃 IBKR 给的
-    `lastTradeTime` + `timeZoneId`（`tradingHours` 末段可交叉校验）；
-    `feed_service._subscribe_futures` 目前只把日期字符串塞进 `set_future_contracts`
-    ⇒ 需要把**到期时刻**一起带下去。
-  - [ ] **缺陷②`spot()` 的换月只写在文档里、代码没实现** ⇒ `fresh` 选择要**跳过
-    `T1 <= 0`** 的月份，取最近两个 `T1 > 0`。
-    ⚠️ 换月那一刻 S 会跳 ≈11 点（`7650.13` vs `7661.12`）；`max_carry_jump=0.005`
-    会拒收第一拍（Δ=0.0059）⇒ 自愈一拍；`recenter_trigger_strikes`=3 档(15点) > 11 点
-    ⇒ 不会触发窗口重建。
-  - [ ] **验证要求**：`tools/check_spot_synthesis.py` 全绿 + **非空转**（造"前月 T1 ≤ 0"
-    用例：旧代码 FAIL / 新代码 PASS）+ 用真实 ES 三月份报价复跑反证 A/B。
-  - ⚠️ **今天不修也能在 09:30 EDT 正常启动**（RTH 走 SPX 指数直读）；
-    修是为了那 4 天 × 13 小时。
-  - ⚠️ 已否决的"绕过"：把 `gth` 从 `synthesised_zones` 去掉 = **静默降级**
-    （GTH 段 SPX 指数是冻结值），项目纪律不允许。
+- [x] **[高] 缺陷①到期时刻是推算的：已修** —— 新建 `acquisition/future_expiry.py`
+  （149 行）：到期时刻由 IBKR 的 `lastTradeTime` + `timeZoneId` 合成（`ZoneInfo`，
+  夏令时交给时区库、**不写死偏移**），并用 `tradingHours` 里"止于到期日"那段的结束
+  时刻做**交叉校验**，不一致 ⇒ `SpotUnavailableError`。
+  `spot_synthesis` 的 `_years_to` 改为**查注入表**（`set_expiries`），不再解析日期串。
+- [x] **[高] 缺陷②换月只写在文档里：已修** —— `spot()` 的候选改为**新鲜 且 `T > 0`**，
+  按到期时刻升序取最近两个；旧写法 `sorted(新鲜)[:2]` 从不跳过已到期月。
+- [x] **非空转 A/B 已做**（`tmp/probe_spot_rollover.py`，真报价，旧代码现场从 git 取）
+  **9/9 RC=0**：换月前 旧 `None` / 新 `7659.1027`（= 手算 (前月,次月)）；换月后
+  旧仍 `None` / 新 `7647.6612`（= 手算 (次月,次次月)）；单月负对照新旧都 `None`；
+  坏时区/空到期日 ⇒ `SpotUnavailableError`。**`run.py --check` 16/16 RC=0。**
+- [x] **实盘已启动**（04:44 EDT 一次成功）：`:8060` 在服务、`spot=7661.1`（**合成值**）、
+  `connection=connected`、`subscribed=80/92`、`[SVI] fitted 1/1`、`skew_25d=2.674`；
+  日志 error/traceback/warn 计数 0。
+- [ ] **[中] 换月那一刻的 `max_carry_jump` 行为待实测** —— 预测：第一拍被拒
+  （carry 0.0354 → 0.0413，Δ=0.0059 > 0.005）、**第二拍起自愈**；
+  且跳变 11.44 点 < `recenter_trigger_strikes`=3 档(15 点) ⇒ 预测**不**触发窗口重建。
+  **今天 09:30 EDT（前月到期）才有机会实测。**
+- [ ] **[中] `future_expiry` 只在 ES 上实测过** —— `future_symbol` 可配，换品种时
+  `lastTradeTime` / `timeZoneId` / `tradingHours` 的形态**未验证**。
+- [ ] **[低] 交叉校验只有前月有效** —— `tradingHours` 是有限窗口（实测 ESZ6/ESH7 只列
+  6 天），窗口不覆盖到期日时**无从校验**、静默只用主来源（已在 docstring 写明）。
+- [ ] **[低] spot 合成没有常驻检查器** —— 验证只靠 `tmp/probe_spot_rollover.py`，
+  **无回归保护**（与既有的四个探针同）。要不要建常驻检查器**待 KAI 裁**。
+- [ ] **[低] `ticks_dropped 1082/14751`（≈7.3%）未定性** —— 属既有行为
+  （TickRouter 的 IV 值域/降级闸门），本轮未动。
+- ⚠️ **上一份 handoff 里 `tools/check_spot_synthesis.py`（16 项）是假声明** ——
+  该文件**不存在**（`tools/` 只剩 1 个 `check_*.py`）。已在原文件就地更正。
 
 ## Active —— 前端数据中断（`frontend-data-outage`，2026-09-17 诊断完成，**①②两处根因均已修并验证；触发条件 2026-09-18 已重建**）
 

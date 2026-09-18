@@ -1,13 +1,91 @@
 # Project State
 
-ACTIVE_SESSION: 2026-09-18/live-start-blocked
-LAST_UPDATED: 2026-09-18 04:3x EDT —— **实盘启动失败已定根因：不是 IBKR，是产品缺陷**。
-⚠️ **未改任何产品代码**（等 KAI 拍板）。服务在 **09:30 EDT 之后**可正常启动，不受影响。
+ACTIVE_SESSION: 2026-09-18/live-start-fix
+LAST_UPDATED: 2026-09-18 04:5x EDT —— **GTH 段起不来的两处缺陷已修，实盘已启动并出数据**。
+⚠️ **未改任何配置**；`config/*.json` 一字未动。服务当前**在跑**（`:8060`）。
 ⚠️ **HEAD 以 `git log` 为准，本文件不写死**（写死就会被下一条记录提交立刻变成假记录）。
 ⚠️ **时间基准**：环境注入的时钟比本机 `date` 慢 8h；本文件及 `notes/sessions/` 里
 2026-09-17 早先标注的 `04:xx`–`06:xx` **实际是本机 `13:xx`–`14:xx`**。
 
-## 本轮 —— 实盘启动失败：GTH 段「前月被提前 13.5 小时判死」⇒ 无现货 ⇒ 起不来
+## 本轮 —— 修掉「GTH 段前月被提前 13.5h 判死」，实盘起起来了（`live-start-fix`）
+
+会话：`notes/sessions/2026-09-18/live-start-fix/handoff.md`
+（KAI 令「现在就修，然后起系统」；上一轮 `live-start-blocked` 只做了诊断）
+
+**改了什么**（`git diff --stat` 不含新文件 = +108 −40）：
+
+| 文件 | 行数 | 说明 |
+|---|---|---|
+| `acquisition/future_expiry.py` | **新建 149** | 到期**时刻**解析 + 交叉校验 + 两张登记表 |
+| `acquisition/spot_synthesis.py` | 195 → **260** | `T` 改为注入的到期时刻；`spot()` 真正实现换月；新增 `diagnosis()` |
+| `acquisition/feed_service.py` | 391 → **394** | 接 `future_expiry`；起不来时把合成器状态拼进异常 |
+
+**缺陷① 到期时刻不再"发明"**：旧代码用 `datetime(y, m, d, tzinfo=utc)` ⇒ 到期时刻 =
+**当日 00:00 UTC**，比 ES 真实的 **08:30 US/Central（13:30 UTC）** 早 **13.5 小时**。
+现在由 IBKR 的 `lastTradeTime` + `timeZoneId` 合成（`ZoneInfo`，**夏令时交给时区库**，
+不写死偏移），并用 `tradingHours` 里"**止于**到期日"那段的结束时刻做**交叉校验**，
+不一致 ⇒ 抛 `SpotUnavailableError`（不知道该信谁时不猜 T）。
+⚠️ `tradingHours` 是**有限窗口**（实测 ESZ6/ESH7 只列 6 天）⇒ **只有前月**能被独立
+校验，次月/次次月只有主来源。**"缺少校验"与"校验失败"在代码里是两条路径**。
+到期日与到期时刻**一起返回**（同源不会错配）；时刻是**合约的属性** ⇒ 用
+`set_expiries()` 设一次，不随每笔 tick 传；没登记的月份 fail-closed（不猜时刻）。
+
+**缺陷② 换月真正实现**：`spot()` 的候选 = 新鲜 **且 `T > 0`**，按到期时刻升序取最近两个。
+旧写法 `sorted(新鲜月份)[:2]` **从不跳过已到期月** ⇒ 换月日整天出不了值
+（`_subscribe_futures` 的 docstring 早就承诺了换月，代码里没有）。
+
+**顺带补的观测（不是顺手重构，是这次的直接教训）**：`_await_spot()` 超时抛的异常里
+拼进 `SpotSynthesis.diagnosis()`（每月 `T`、是否"已到期/无到期时刻"、报价多久前、
+成功/拒收次数）。理由：`_note()` **不写 logging** ⇒ 合成静默返回 `None` 时日志干净得
+像什么都没发生（本次为它查了两小时）；而**异常是会进日志的**，所以诊断放这里。
+
+**非空转 A/B（`tmp/probe_spot_rollover.py`，真报价，旧代码现场从 git 取）9/9 RC=0**：
+
+```
+到期时刻实测：20260918 → 13:30Z / 20261218 → 14:30Z / 20270319 → 13:30Z
+              （14:30 vs 13:30 那一小时差 = 夏令时被正确处理的旁证）
+[换月前] 旧 T(前月)=-0.000996 ⇒ spot()=None   ／ 新 T=+0.000545 ⇒ 7659.1027
+         且 = 手算 (前月, 次月) 的结果
+[换月后] 旧仍 None                            ／ 新 7647.6612 = 手算 (次月, 次次月)
+[负对照] 只喂一个月 ⇒ 新旧都 None（不是"总是出值"）
+[fail-closed] 坏时区 / 空到期日 ⇒ SpotUnavailableError，无静默回落
+⇒ 换月那一刻 S 跳 11.44 点
+```
+
+**门禁**：`run.py --check` **16/16 RC=0**（`feed_service.py` 394 / `spot_synthesis.py`
+260 / `future_expiry.py` 149 ⇒ 均**未**触发"余量 < 5 行"警告）；`check_web_contract.py`
+全部通过；`[13]` 活链路（`:8060` 起来后自动跑）全绿。
+
+**实盘证据（04:44 EDT 起，一次成功）**：`流水线已就绪` + `[SVI] fitted 1/1 expiries
+| avg RMSE=0.023217`；日志里 `error|traceback|warn` 计数 **0**。帧实测：
+
+```
+spot = 7661.1（**合成值** —— health.messages 明写「现货源切换：区段 gth → 合成（B2b 期货反解）」）
+health.connection=connected   last_tick_age_s=0.1   mode=delayed
+subscribed=80 / cap=92   ticks_received=14751   ticks_dropped=1082
+health.messages = ['期货 3 个月已订阅: 20260918, 20261218, 20270319',
+                   '现货源切换：区段 gth → 合成（B2b 期货反解）', '标的现价 7659.60',
+                   '0DTE 切片 20260918 SPXW (744 个行权价, SMART)',
+                   '初始订阅 80 条 (上限 92, 目标 80)', '行情服务已就绪']
+atm = {atm_strike 7660.0, atm_iv 16.181, straddle 35.57, put25_iv 17.848,
+       call25_iv 15.174, skew_25d 2.674}；skew.latest quality='ok'
+静态：GET / → 200 (4452 B) / GET /style.css → 200
+```
+
+⚠️ **顺手更正一条假声明**：`live-start-blocked/handoff.md` 里写的
+`tools/check_spot_synthesis.py`（16 项）**不存在** —— `tools/` 下**只剩 1 个**
+`check_*.py`（`check_web_contract.py`），35 个旧检查器全被删过。已在原文件就地标注更正。
+
+**OPEN-RISKS**：① 换月那一刻 `max_carry_jump` 会拒收第一拍（carry 0.0354 → 0.0413，
+Δ=0.0059 > 0.005）⇒ 预测"自愈一拍"、**今天 09:30 EDT 才有机会实测**；
+`recenter_trigger_strikes`=3 档（15 点）> 跳变 11.44 点 ⇒ 预测**不**触发窗口重建，
+同样待实测。② `future_expiry` **只在 ES 上实测过**（前 3 个月），换品种未验证。
+③ 交叉校验只有前月有效。④ 探针留 `tmp/` **无回归保护**（项目里**没有** spot 合成的
+常驻检查器）。⑤ `ticks_dropped 1082/14751`（≈7.3%）属既有行为（TickRouter 的 IV
+值域/降级闸门），**未定性**。⑥ 前端页面只验了静态资源 200 与帧内容，**未目视确认**。
+⑦ `run.py` 在沙箱里长跑会让 Windows 回收站爆炸 ⇒ 常驻请 KAI 在普通终端里起。
+
+## 上一轮 —— 实盘启动失败：GTH 段「前月被提前 13.5 小时判死」⇒ 无现货 ⇒ 起不来
 
 会话：`notes/sessions/2026-09-18/live-start-blocked/handoff.md`
 （KAI 令「继续启动系统，实盘测试」，结果起不来 ⇒ 转为定根因）

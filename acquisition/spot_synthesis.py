@@ -25,6 +25,21 @@ S&P DJI 的实时指数依赖成分股 Consolidated Tape，美股不交易就没
 r−q）的理由：实测外部口径与市场内蕴值差 26.6bp，T=0.25 时值 5.04 点，而且它
 是**静默**错的。也不用 B1（冻结 RTH 观测基差）：换月日会静默错值数十点。
 
+``T`` 是**到期时刻**，不是到期日
+--------------------------------
+``T`` 由调用方通过 :meth:`SpotSynthesis.set_expiries` 注入，值来自 IBKR 的
+``ContractDetails``（``lastTradeTime`` + ``timeZoneId``，见
+``acquisition.future_expiry``）。本模块**不解析日期字符串、更不发明时刻**。
+
+曾经这里把到期时刻当成"到期日 **00:00 UTC**"，比 ES 的真实到期时刻
+（08:30 US/Central = 13:30 UTC）早 **13.5 小时**。误差在 ``T2 − T1`` 里会抵消
+（所以 carry 一直是准的），但在**绝对 T1** 上不会 —— 2026-09-18（ES 季月到期日）
+实测：从 00:00 UTC 起 ``T1 = -0.000970`` 为负 ⇒ ``spot()`` 命中 ``t1 <= 0``
+⇒ GTH 段**一点现货都合成不出来、服务起不来**，且不报任何错。
+
+**换月**（前月到期 ⇒ 由 (次月, 次次月) 顶上）是 :meth:`spot` 里一条显式规则，
+不是"文档承诺"：候选月份必须先滤掉 ``T ≤ 0``，否则前月一到期就整天出不了值。
+
 两层闸门
 --------
 1. ``max_abs_carry``：|ĉ| 越界 ⇒ fail-closed，拦"合约选错 / 数值算崩"。
@@ -39,7 +54,6 @@ r−q）的理由：实测外部口径与市场内蕴值差 26.6bp，T=0.25 时�
 from __future__ import annotations
 
 import math
-from datetime import datetime, timezone
 
 from config import loader
 
@@ -50,7 +64,7 @@ class SpotSynthesis:
     """前后月期货价 → 现货。无 IO、无时钟依赖（"现在"由调用方传入）。"""
 
     __slots__ = (
-        "_max_abs", "_max_jump", "_quotes",
+        "_max_abs", "_max_jump", "_quotes", "_expiries",
         "_last_carry", "_rejections", "_samples",
     )
 
@@ -66,6 +80,7 @@ class SpotSynthesis:
         self._max_abs = loader.as_float(spot_cfg, "max_abs_carry", module=_CFG)
         self._max_jump = loader.as_float(spot_cfg, "max_carry_jump", module=_CFG)
         self._quotes: dict[str, tuple[float, float]] = {}
+        self._expiries: dict[str, float] = {}
         self._last_carry: float | None = None
         self._rejections = 0
         self._samples = 0
@@ -97,6 +112,23 @@ class SpotSynthesis:
     # 输入
     # ------------------------------------------------------------------ #
 
+    def set_expiries(self, mapping: dict[str, float]) -> None:
+        """
+        登记 ``到期日 → 到期时刻（epoch 秒）``。**必须在 ``update()`` 之前调用。**
+
+        到期时刻是**合约的属性**，不是每笔报价的属性，所以在这里设一次，而不是
+        随每笔 tick 传下来 —— 与 ``TickRouter.set_future_contracts`` 同源同批
+        （两张表都由 ``acquisition.future_expiry.build_map`` 生成）。
+
+        没登记的月份一律 fail-closed（``_years_to`` 返回 0.0 ⇒ 被 :meth:`spot`
+        滤掉），不猜一个时刻出来。
+        """
+        self._expiries = {
+            str(key).strip(): float(value)
+            for key, value in mapping.items()
+            if str(key).strip()
+        }
+
     def update(self, expiry: str, price: float, ts: float) -> None:
         """
         登记一条期货报价。
@@ -127,24 +159,34 @@ class SpotSynthesis:
         """
         合成现货价；任一 fail-closed 条件不满足就返回 ``None``。
 
+        候选月份 = **报价还新鲜** 且 **尚未到期**（``T > 0``），按到期时刻升序取最近
+        两个。滤掉已到期月份就是**换月**：前月到期那一刻起，由 (次月, 次次月) 顶上
+        —— 这正是 ``config/spot.json`` 里"订第 3 个月是换月余量"那句承诺的实现。
+        （旧写法取 ``sorted(...)[:2]`` 从不跳过已到期月 ⇒ 换月日整天出不了值。）
+
         这里**不缓存、不回落到旧值**：拿不到就是拿不到，由调用方按"没有现货"
         处理（暂停窗口跟随并报 WARN），而不是拿一个看起来正常的旧数字顶上。
         """
-        fresh = sorted(
-            expiry for expiry, (_, ts) in self._quotes.items()
-            if (float(moment) - ts) <= max_age_s
-        )
-        if len(fresh) < 2:
+        now = float(moment)
+        candidates: list[tuple[float, str]] = []
+        for expiry, (_, ts) in self._quotes.items():
+            if (now - float(ts)) > max_age_s:
+                continue
+            years = self._years_to(expiry, now)
+            if years <= 0:
+                continue
+            candidates.append((years, expiry))
+        if len(candidates) < 2:
             return None
+        candidates.sort()
 
-        front, second = fresh[0], fresh[1]
+        t1, front = candidates[0]
+        t2, second = candidates[1]
+        if t2 <= t1:
+            # 两个不同的键指向同一个到期时刻 —— T 分母无意义，不能算。
+            return None
         f1 = self._quotes[front][0]
         f2 = self._quotes[second][0]
-        t1 = self._years_to(front, moment)
-        t2 = self._years_to(second, moment)
-        if t1 <= 0 or t2 <= t1:
-            # 前月已到期 / 两个到期日同一天 —— T 分母无意义，不能算。
-            return None
 
         carry = (math.log(f2) - math.log(f1)) / (t2 - t1)
 
@@ -154,6 +196,8 @@ class SpotSynthesis:
 
         # 跳变闸门：**基准照常跟上**，只拒收这一桶。若基准不更新，一次真实跳变
         # 会让后续每一桶都被拒收 —— 那是死锁，不是保护。
+        # 换月那一刻 S 会跳（Sep 锚 → Dec 锚，实测 ≈11 点）⇒ 第一拍被这里拒收、
+        # 第二拍起正常 —— 自愈一拍，不是故障。
         jumped = (
             self._last_carry is not None
             and abs(carry - self._last_carry) > self._max_jump
@@ -169,27 +213,48 @@ class SpotSynthesis:
         self._samples += 1
         return price
 
+    def diagnosis(self, moment: float) -> str:
+        """
+        一行"为什么合成不出来" —— 起不来时**唯一**能带进日志的东西。
+
+        为什么要有它：``_note()`` 不写 logging，所以合成静默返回 ``None`` 时，
+        日志里干净得像什么都没发生（2026-09-18 实测）。而 ``_await_spot`` 超时抛的
+        异常**是**会进日志的，把这段状态拼进异常消息，下一次就不用再查两小时。
+        """
+        if not self._quotes:
+            return "尚无任何期货报价登记"
+        now = float(moment)
+        items: list[str] = []
+        for expiry in sorted(self._quotes):
+            _, ts = self._quotes[expiry]
+            years = self._years_to(expiry, now)
+            flags = []
+            if expiry not in self._expiries:
+                flags.append("无到期时刻")
+            elif years <= 0:
+                flags.append("已到期")
+            flags.append(f"报价{now - float(ts):.0f}s前")
+            items.append(f"{expiry}={years:+.6f}({','.join(flags)})")
+        return (
+            f"期货 {len(items)} 个月 T: " + " ".join(items)
+            + f"；合成成功 {self._samples} 次 / 闸门拒收 {self._rejections} 次"
+        )
+
     # ------------------------------------------------------------------ #
     # 辅助
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _years_to(expiry: str, moment: float) -> float:
+    def _years_to(self, expiry: str, moment: float) -> float:
         """
-        ``expiry``（"YYYYMMDD"，IBKR 的 ``realExpirationDate``）到 ``moment`` 的年数。
+        ``expiry``（"YYYYMMDD"）的**到期时刻**到 ``moment`` 的年数。
 
-        用当日 00:00 UTC 作基准。精度到日是 IBKR 给的全部信息，固有误差最多半天，
-        折到 S 上约 0.36 点（档距 5 点）；而且 ``ĉ`` 只依赖两个到期日的**差**，
-        该误差在相减时抵消 —— carry 本身是准的。
+        到期时刻由 :meth:`set_expiries` 注入（来自 IBKR 的 ``lastTradeTime`` +
+        ``timeZoneId``）。本模块不解析日期字符串、更不发明时刻：曾经这里用
+        "到期日 00:00 UTC"，比真实时刻早 13.5 小时 ⇒ 前月被提前判死。
 
-        解析失败返回 0.0，由调用方按"T 非法"fail-closed 掉。
+        未登记的 ``expiry`` 返回 0.0，由调用方按"T 非法"fail-closed 掉。
         """
-        text = str(expiry or "").strip()
-        if len(text) < 8:
+        instant = self._expiries.get(str(expiry or "").strip())
+        if instant is None:
             return 0.0
-        try:
-            year, month, day = int(text[:4]), int(text[4:6]), int(text[6:8])
-            target = datetime(year, month, day, tzinfo=timezone.utc).timestamp()
-        except ValueError:
-            return 0.0
-        return (target - float(moment)) / (365.0 * 86400.0)
+        return (instant - float(moment)) / (365.0 * 86400.0)

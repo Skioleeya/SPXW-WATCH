@@ -6,7 +6,46 @@
   ⚠️ **HEAD 以 `git log` 为准，本文件不写死**（写死就会被下一条记录提交立刻变成假记录）。
   ⚠️ **提交 ≠ KAI 逐轮验收** —— 各轮证据仍在各自的 `handoff.md`。
 
-## 最新：2026-09-18 / live-start-blocked（**起不来，等 KAI 拍板**）
+## 最新：2026-09-18 / live-start-fix（**已修，实盘已启动并出数据**）
+
+- **会话交接**：`notes/sessions/2026-09-18/live-start-fix/handoff.md`
+- **KAI 令**：「现在就修，然后起系统」。**两处缺陷都修了，`run.py` 一次起成功。**
+- **改了什么**（**未改任何配置**）：新建 `acquisition/future_expiry.py`（149 行）；
+  `acquisition/spot_synthesis.py`（195 → 260）；`acquisition/feed_service.py`
+  （391 → 394）。`git diff --stat` = +108 −40（不含新文件）。
+- **缺陷① 到期时刻不再"发明"**：`_years_to` 改吃注入的到期时刻（IBKR 的
+  `lastTradeTime` + `timeZoneId`，`ZoneInfo` 处理夏令时，**不写死偏移**）；
+  `tradingHours` 里"止于到期日"那段的结束时刻做**交叉校验**，不一致 ⇒ 抛错
+  （⚠️ 该窗口是**有限**的 ⇒ 只有**前月**能被独立校验，其余只有主来源 —— 这是本轮
+  唯一"少校验"的路径，已写进 docstring）。
+- **缺陷② 换月真正实现**：`spot()` 的候选 = 新鲜 **且 `T > 0`**，按到期时刻升序取
+  最近两个（旧写法 `sorted(新鲜)[:2]` 从不跳过已到期月 ⇒ 换月日整天出不了值）。
+- **顺带补观测**：`_await_spot()` 超时抛的异常里拼进 `SpotSynthesis.diagnosis()`
+  （每月 T、是否已到期/无到期时刻、报价多久前、成功/拒收次数）。理由：`_note()`
+  不写 logging ⇒ 合成静默返回 `None` 时日志干净得像什么都没发生（本次为它查了两小时）。
+- **非空转 A/B（`tmp/probe_spot_rollover.py`，真报价，旧代码现场从 git 取）9/9 RC=0**：
+  换月前 旧 `spot()=None` / 新 `7659.1027`（= 手算 (前月,次月)）；
+  换月后 旧仍 `None` / 新 `7647.6612`（= 手算 (次月,次次月) ⇒ **换月真的发生了**）；
+  负对照单月 ⇒ 新旧都 `None`。⇒ 换月那一刻 S 跳 **11.44 点**。
+  坏时区 / 空到期日 ⇒ `SpotUnavailableError`（**无静默回落**）。
+- **门禁**：`run.py --check` **16/16 RC=0**（三个文件都没触发"余量 < 5 行"警告）；
+  `check_web_contract.py` 全通过；`[13]` 活链路全绿（`连接 connected / 订阅 80/92 /
+  热力图 39 档 × 1021 桶`）。
+- **实盘证据（04:44 EDT 起，一次成功）**：`流水线已就绪` + `[SVI] fitted 1/1`，
+  日志里 error/traceback/warn 计数 **0**；帧里 `spot=7661.1`、`connection=connected`、
+  `last_tick_age_s=0.1`、`subscribed=80/92`、`atm_iv=16.181`、`skew_25d=2.674`；
+  `health.messages` 明写 **"现货源切换：区段 gth → 合成（B2b 期货反解）"** ⇒ 那个
+  7661.1 是**合成值**（GTH 段本该如此）。
+- ⚠️ **顺手更正一条假声明**：上一份 handoff 写的 `tools/check_spot_synthesis.py`（16 项）
+  **不存在**（`tools/` 只剩 1 个 `check_*.py`）—— 已在原文件就地标注更正。
+- **OPEN-RISKS**：换月那一刻 `max_carry_jump` 会拒收第一拍（Δ=0.0059 > 0.005）⇒
+  预测"自愈一拍"、**今天 09:30 EDT 才有机会实测**（`recenter_trigger_strikes`=3 档
+  > 11.44 点 ⇒ 预测不触发窗口重建）；`future_expiry` **只在 ES 上实测过**；
+  探针留 `tmp/` **无回归保护**（项目里**没有** spot 合成的常驻检查器）；
+  `ticks_dropped 1082/14751`（≈7.3%）属既有行为、**未定性**；前端页面只验了静态
+  资源 200 与帧内容，**未目视确认**。
+
+## 上一会话：2026-09-18 / live-start-blocked（**起不来，等 KAI 拍板** → 已由上一段修掉）
 
 - **会话交接**：`notes/sessions/2026-09-18/live-start-blocked/handoff.md`
 - **一句话**：**不是 IBKR 的问题，是产品缺陷** —— 今天（ES 季月到期日）GTH 段

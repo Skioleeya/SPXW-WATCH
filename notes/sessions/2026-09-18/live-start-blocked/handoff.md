@@ -126,8 +126,12 @@ if t1 <= 0 or t2 <= t1: return None         # ← 于是永远在这里返回
    ⚠️ 换月那一刻 S 会跳 ≈11 点（Sep 锚 → Dec/Mar 合成）；`max_carry_jump` 会拒收第一拍
    （carry 0.0354 → 0.0413，Δ=0.0059 > 0.005），第二拍起正常 ⇒ 自愈一拍。
    `recenter_trigger_strikes` = 3 档（15 点）> 11 点 ⇒ 不会触发窗口重建。
-3. 验证：`tools/check_spot_synthesis.py`（16 项）必须全绿 + **非空转**（造一个
-   "前月 T1 ≤ 0" 的用例，旧代码 FAIL / 新代码 PASS）+ 用真实 ES 三月份报价复跑反证 A/B。
+3. ~~验证：`tools/check_spot_synthesis.py`（16 项）必须全绿 + **非空转**（造一个
+   "前月 T1 ≤ 0" 的用例，旧代码 FAIL / 新代码 PASS）+ 用真实 ES 三月份报价复跑反证 A/B。~~
+   ⚠️ **更正（同日，`live-start-fix` 会话）**：**`tools/check_spot_synthesis.py` 不存在**
+   —— `tools/` 下只剩 1 个 `check_*.py`（`check_web_contract.py`），35 个旧检查器全被删过。
+   实际验证 = `tmp/probe_spot_rollover.py`（非空转 A/B，旧代码从 git 现场取）+ 
+   `run.py --check` 16/16。详见 `notes/sessions/2026-09-18/live-start-fix/handoff.md`。
 
 ## 开工基线
 
